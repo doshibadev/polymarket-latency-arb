@@ -25,7 +25,7 @@ impl AppConfig {
         let threshold_bps: u64 = env::var("THRESHOLD_BPS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(4000); // $40 spike minimum
+            .unwrap_or(6000); // $60 spike minimum
 
         let min_hold_ms: u64 = env::var("MIN_HOLD_MS")
             .ok()
@@ -60,7 +60,7 @@ impl AppConfig {
         let profit_target_pct: f64 = env::var("PROFIT_TARGET_PCT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0.02); // 2% profit target default
+            .unwrap_or(0.0); // 0% profit target (trade by spike)
 
         let timeout_ms: u64 = env::var("TIMEOUT_MS")
             .ok()

@@ -151,33 +151,37 @@ impl PaperWallet {
             let state = self.symbol_states.get(&pos.symbol).cloned().unwrap_or_default();
             let current_spike = state.last_binance - state.last_chainlink;
             
-            // Spike Convergence
-            let mut spike_converged = false;
-            if (pos.entry_spike > 0.0 && current_spike <= 0.0) || (pos.entry_spike < 0.0 && current_spike >= 0.0) {
-                spike_converged = true;
-            } else if pos.entry_spike.abs() > 0.0 && current_spike.abs() < pos.entry_spike.abs() * 0.3 {
-                spike_converged = true;
+            // Close if next tick is going in opposite direction
+            let mut trend_reversed = false;
+            if pos.direction == "UP" {
+                if current_spike < 0.0 { trend_reversed = true; }
+            } else {
+                if current_spike > 0.0 { trend_reversed = true; }
+            }
+
+            // Spike Convergence: Close if spike has significantly faded
+            let mut spike_faded = false;
+            if current_spike.abs() < pos.entry_spike.abs() * 0.1 {
+                spike_faded = true;
             }
 
             let held_ms = pos.entry_time.elapsed().as_millis();
             
-            // Trailing stop
+            // Trailing stop (optional safety)
             let mut trailing_stop_hit = false;
-            if current_price >= pos.profit_target && current_price < pos.highest_price * (1.0 - self.config.trailing_stop_pct) {
+            if self.config.trailing_stop_pct > 0.0 && current_price < pos.highest_price * (1.0 - self.config.trailing_stop_pct) {
                 trailing_stop_hit = true;
             }
 
-            // Emergency Exit: Spike reversed, NOT profitable, but held too long?
-            // User wants "sell only for profit", but let's implement a very conservative emergency exit
-            // if it's been 4 minutes (near end of window) and spike is gone.
+            // Emergency Exit: near end of window
             let near_end = held_ms > 240000; // 4 minutes
-            let spike_gone = current_spike.abs() < 5.0;
 
-            if pnl > 0.0 && (spike_converged || trailing_stop_hit || held_ms > self.config.timeout_ms as u128) {
-                to_close.push((idx, if trailing_stop_hit { "trailing_stop" } else if spike_converged { "spike_converged" } else { "timeout" }));
-            } else if near_end && spike_gone && pnl < 0.0 {
-                // Emergency Exit even if loss, to avoid expiration
-                to_close.push((idx, "emergency_exit"));
+            if trend_reversed || spike_faded || trailing_stop_hit || near_end {
+                let reason = if trend_reversed { "trend_reversed" } 
+                            else if spike_faded { "spike_faded" }
+                            else if trailing_stop_hit { "trailing_stop" }
+                            else { "near_end" };
+                to_close.push((idx, reason));
             }
         }
 
