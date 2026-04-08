@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ArbTerminal | Quant Flux</title>
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        :root {
+            --bg-base: #0a0a0c;
+            --bg-card: #141417;
+            --bg-accent: #1c1c21;
+            --border-dim: #26262c;
+            --border-bright: #3f3f46;
+            
+            --text-main: #e4e4e7;
+            --text-dim: #a1a1aa;
+            --text-muted: #52525b;
+            
+            --color-up: #10b981;
+            --color-down: #f43f5e;
+            --color-neutral: #3b82f6;
+            --color-gold: #f59e0b;
+            
+            --font-mono: 'JetBrains Mono', monospace;
+            --font-sans: 'Inter', sans-serif;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            -webkit-font-smoothing: antialiased;
+            overflow: hidden;
+        }
+
+        .terminal-container {
+            max-width: 1650px;
+            margin: 0 auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 320px 1fr 320px;
+            gap: 20px;
+            height: 100vh;
+        }
+
+        .panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border-dim);
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 12px 16px;
+            background: var(--bg-accent);
+            border-bottom: 1px solid var(--border-dim);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .panel-title {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-dim);
+        }
+
+        .main-header {
+            grid-column: 1 / -1;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo h1 {
+            font-family: var(--font-mono);
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .settings-btn {
+            background: var(--bg-accent);
+            border: 1px solid var(--border-dim);
+            color: var(--text-dim);
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+            text-transform: uppercase;
+            transition: all 0.2s;
+        }
+        .settings-btn:hover {
+            border-color: var(--border-bright);
+            color: #fff;
+        }
+
+        .status-pill {
+            padding: 4px 12px;
+            border-radius: 100px;
+            font-size: 11px;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--bg-accent);
+            border: 1px solid var(--border-dim);
+        }
+
+        .status-dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--color-up);
+            box-shadow: 0 0 8px var(--color-up);
+        }
+        .status-dot.offline { background: var(--color-down); box-shadow: 0 0 8px var(--color-down); }
+
+        .metrics-bar {
+            grid-column: 1 / -1;
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 12px;
+        }
+
+        .metric-mini {
+            background: var(--bg-card);
+            border: 1px solid var(--border-dim);
+            padding: 12px 16px;
+            border-radius: 8px;
+        }
+
+        .m-label { font-size: 9px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px; }
+        .m-value { font-family: var(--font-mono); font-size: 16px; font-weight: 700; }
+
+        .left-side { display: flex; flex-direction: column; gap: 20px; }
+        .center-side { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+        .right-side { display: flex; flex-direction: column; gap: 20px; }
+
+        .market-summary { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+        .m-question { font-size: 13px; font-weight: 500; line-height: 1.4; }
+        .m-timer { font-family: var(--font-mono); font-size: 24px; color: var(--color-gold); text-align: center; margin: 10px 0; }
+
+        .price-line { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border-dim); }
+        .p-label { font-size: 11px; color: var(--text-dim); }
+        .p-val { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+
+        .spike-viz { height: 30px; background: #000; border-radius: 4px; margin-top: 8px; position: relative; overflow: hidden; border: 1px solid var(--border-dim); }
+        .spike-center { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--text-muted); z-index: 2; }
+        .spike-fill { position: absolute; height: 100%; top: 0; transition: width 0.1s, left 0.1s; }
+
+        .chart-panel { flex: 1; min-height: 400px; padding: 20px; }
+
+        .list-container { flex: 1; overflow-y: auto; }
+        .trade-item { padding: 12px 16px; border-bottom: 1px solid var(--border-dim); display: flex; justify-content: space-between; align-items: center; }
+        .trade-item:last-child { border-bottom: none; }
+        .t-left { display: flex; flex-direction: column; gap: 2px; }
+        .t-type { font-size: 9px; font-weight: 800; font-family: var(--font-mono); padding: 2px 6px; border-radius: 3px; width: fit-content; margin-bottom: 4px; }
+        .t-entry { background: rgba(255,255,255,0.1); color: #fff; }
+        .t-win { background: rgba(16, 185, 129, 0.2); color: var(--color-up); }
+        .t-loss { background: rgba(244, 63, 94, 0.2); color: var(--color-down); }
+        .t-info { font-size: 11px; color: var(--text-dim); }
+        .t-price { font-family: var(--font-mono); font-size: 12px; font-weight: 700; text-align: right; }
+
+        .pos-item { padding: 16px; border-bottom: 1px solid var(--border-dim); }
+        .pos-top { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 8px; }
+        .pos-pnl { font-family: var(--font-mono); font-weight: 700; }
+
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 10px; }
+
+        .val-up { color: var(--color-up); }
+        .val-down { color: var(--color-down); }
+
+        /* Modal Styles */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.8);
+            backdrop-filter: blur(4px);
+            z-index: 100;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border-bright);
+            width: 450px;
+            border-radius: 8px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+        }
+        .settings-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            padding: 20px;
+        }
+        .setting-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .setting-label {
+            font-size: 10px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            font-weight: 700;
+        }
+        .setting-input {
+            background: var(--bg-accent);
+            border: 1px solid var(--border-dim);
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            outline: none;
+        }
+        .setting-input:focus { border-color: var(--color-neutral); }
+        .save-btn {
+            grid-column: 1 / -1;
+            margin-top: 10px;
+            background: var(--color-neutral);
+            color: #fff;
+            border: none;
+            padding: 12px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+            text-transform: uppercase;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="modal-overlay" id="settings-modal" onclick="if(event.target === this) closeSettings()">
+        <div class="modal-content">
+            <div class="panel-header">
+                <div class="panel-title">Bot Configuration</div>
+                <div style="cursor:pointer; color:var(--text-dim);" onclick="closeSettings()">✕</div>
+            </div>
+            <div class="settings-grid">
+                <div class="setting-group">
+                    <label class="setting-label">Spike Threshold ($)</label>
+                    <input type="number" id="set-threshold" class="setting-input" value="40">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Portfolio Size (%)</label>
+                    <input type="number" id="set-portfolio" class="setting-input" value="15">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Min Hold (ms)</label>
+                    <input type="number" id="set-minhold" class="setting-input" value="1500">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Profit Target (%)</label>
+                    <input type="number" id="set-profit" class="setting-input" value="2.0" step="0.1">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Trailing Stop (%)</label>
+                    <input type="number" id="set-trailing" class="setting-input" value="0.5" step="0.1">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Max Spread (BPS)</label>
+                    <input type="number" id="set-spread" class="setting-input" value="100">
+                </div>
+                <button class="save-btn" onclick="saveSettings()">Save & Apply Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="terminal-container">
+        <header class="main-header">
+            <div class="logo">
+                <div style="width:14px; height:14px; background:var(--color-up); transform:rotate(45deg);"></div>
+                <h1>ARBTERMINAL <span style="color:var(--text-muted); font-weight:300;">// FLUX</span></h1>
+            </div>
+            <div class="header-actions">
+                <button class="settings-btn" onclick="openSettings()">Settings</button>
+                <div class="status-pill">
+                    <div class="status-dot" id="status-dot"></div>
+                    <span id="status-text">CONNECTING...</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="metrics-bar">
+            <div class="metric-mini">
+                <div class="m-label">Portfolio Value</div>
+                <div class="m-value" id="v-portfolio">$0.00</div>
+            </div>
+            <div class="metric-mini">
+                <div class="m-label">Total Session PnL</div>
+                <div class="m-value" id="v-total-pnl">$0.00</div>
+            </div>
+            <div class="metric-mini">
+                <div class="m-label">Unrealized PnL</div>
+                <div class="m-value" id="v-unrealized">$0.00</div>
+            </div>
+            <div class="metric-mini">
+                <div class="m-label">Win Rate</div>
+                <div class="m-value" id="v-winrate">0.0%</div>
+            </div>
+            <div class="metric-mini">
+                <div class="m-label">Total Volume</div>
+                <div class="m-value" id="v-volume">$0.00</div>
+            </div>
+            <div class="metric-mini">
+                <div class="m-label">Total Fees</div>
+                <div class="m-value" id="v-fees">$0.00</div>
+            </div>
+            <div class="metric-mini">
+                <div class="m-label">Latency Adv.</div>
+                <div class="m-value" id="v-latency" style="color:var(--color-neutral);">0ms</div>
+            </div>
+        </div>
+
+        <div class="left-side">
+            <div class="panel">
+                <div class="panel-header"><div class="panel-title">Active Market</div></div>
+                <div class="market-summary">
+                    <div class="m-question" id="m-question">FETCHING MARKET DATA...</div>
+                    <div class="m-timer" id="m-timer">00:00</div>
+                    
+                    <div class="price-line">
+                        <span class="p-label">BINANCE BTC</span>
+                        <span class="p-val" id="m-binance">$0.00</span>
+                    </div>
+                    <div class="price-line">
+                        <span class="p-label">CHAINLINK BTC</span>
+                        <span class="p-val" id="m-chainlink">$0.00</span>
+                    </div>
+                    <div class="price-line">
+                        <span class="p-label">POLY UP</span>
+                        <span class="p-val val-up" id="m-up">0.0000</span>
+                    </div>
+                    <div class="price-line">
+                        <span class="p-label">POLY DOWN</span>
+                        <span class="p-val val-down" id="m-down">0.0000</span>
+                    </div>
+
+                    <div style="margin-top:10px;">
+                        <div style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-dim); margin-bottom:4px;">
+                            <span>SPIKE DELTA</span>
+                            <span id="m-spike">0.00</span>
+                        </div>
+                        <div class="spike-viz">
+                            <div class="spike-center"></div>
+                            <div class="spike-fill" id="m-spike-fill"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel" style="flex:1;">
+                <div class="panel-header">
+                    <div class="panel-title">Open Positions</div>
+                    <div style="font-family:var(--font-mono); font-size:10px;" id="count-open">0</div>
+                </div>
+                <div class="list-container" id="list-open"></div>
+            </div>
+        </div>
+
+        <div class="center-side">
+            <div class="panel" style="flex:1;">
+                <div class="panel-header">
+                    <div class="panel-title">Session Value Performance</div>
+                </div>
+                <div class="chart-panel">
+                    <canvas id="mainChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="right-side">
+            <div class="panel" style="flex:1;">
+                <div class="panel-header">
+                    <div class="panel-title">Execution Log</div>
+                </div>
+                <div class="list-container" id="list-trades"></div>
+            </div>
+            
+            <div class="panel" style="height: 300px;">
+                <div class="panel-header">
+                    <div class="panel-title">Recent Settled</div>
+                </div>
+                <div class="list-container" id="list-settled"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const formatMoney = (val) => '$' + Math.abs(val).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        const formatMoneySigned = (val) => (val > 0 ? '+$' : val < 0 ? '-$' : '$') + Math.abs(val).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        
+        let myChart = null;
+        let startingBalance = 27.0;
+
+        const initChart = () => {
+            const ctx = document.getElementById('mainChart').getContext('2d');
+            myChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Portfolio Value',
+                        data: [],
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        pointHoverRadius: 4,
+                        fill: false,
+                        tension: 0.1,
+                        segment: {
+                            borderColor: ctx => {
+                                const val = ctx.p1.parsed.y;
+                                return val >= startingBalance ? '#10b981' : '#f43f5e';
+                            }
+                        }
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: { duration: 0 },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            mode: 'index', intersect: false,
+                            backgroundColor: '#18181b',
+                            titleFont: { family: 'JetBrains Mono', size: 10 },
+                            bodyFont: { family: 'JetBrains Mono', size: 12 },
+                            borderColor: '#3f3f46', borderWidth: 1, padding: 10,
+                            displayColors: false,
+                            callbacks: { label: (ctx) => 'VALUE: ' + formatMoney(ctx.parsed.y) }
+                        }
+                    },
+                    scales: {
+                        x: { display: true, grid: { display: false }, ticks: { color: '#52525b', font: { family: 'JetBrains Mono', size: 9 }, maxTicksLimit: 10 } },
+                        y: { display: true, position: 'right', grid: { color: '#1c1c21' }, ticks: { color: '#52525b', font: { family: 'JetBrains Mono', size: 9 }, callback: (v) => '$' + v } }
+                    },
+                    interaction: { mode: 'nearest', axis: 'x', intersect: false }
+                }
+            });
+        };
+
+        const openSettings = () => { document.getElementById('settings-modal').style.display = 'flex'; };
+        const closeSettings = () => { document.getElementById('settings-modal').style.display = 'none'; };
+
+        const saveSettings = async () => {
+            const btn = document.querySelector('.save-btn');
+            const originalText = btn.innerText;
+            btn.innerText = 'SAVING...';
+            btn.disabled = true;
+
+            const settings = {
+                threshold_bps: parseInt(document.getElementById('set-threshold').value) * 100,
+                portfolio_pct: parseFloat(document.getElementById('set-portfolio').value) / 100,
+                min_hold_ms: parseInt(document.getElementById('set-minhold').value),
+                profit_target_pct: parseFloat(document.getElementById('set-profit').value) / 100,
+                trailing_stop_pct: parseFloat(document.getElementById('set-trailing').value) / 100,
+                max_spread_bps: parseInt(document.getElementById('set-spread').value)
+            };
+
+            try {
+                const res = await fetch('/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings)
+                });
+                if (res.ok) {
+                    btn.style.background = 'var(--color-up)';
+                    btn.innerText = 'SUCCESS';
+                    setTimeout(closeSettings, 1000);
+                } else {
+                    btn.style.background = 'var(--color-down)';
+                    btn.innerText = 'ERROR';
+                }
+            } catch (e) {
+                btn.style.background = 'var(--color-down)';
+                btn.innerText = 'ERROR';
+            }
+
+            setTimeout(() => {
+                btn.style.background = 'var(--color-neutral)';
+                btn.innerText = originalText;
+                btn.disabled = false;
+            }, 2000);
+        };
+
+        const updateUI = (sim) => {
+            if (!sim) return;
+            const totalVal = sim.total_portfolio_value || 0;
+            startingBalance = sim.starting_balance || 27.0;
+            const totalPnL = sim.total_pnl || 0;
+            const unrealized = sim.unrealized_pnl || 0;
+            const posDict = sim.positions || {};
+
+            if (sim.config) {
+                const inputs = [
+                    { id: 'set-threshold', val: sim.config.threshold_bps / 100 },
+                    { id: 'set-portfolio', val: (sim.config.portfolio_pct * 100).toFixed(1) },
+                    { id: 'set-minhold', val: sim.config.min_hold_ms },
+                    { id: 'set-profit', val: (sim.config.profit_target_pct * 100).toFixed(1) },
+                    { id: 'set-trailing', val: (sim.config.trailing_stop_pct * 100).toFixed(1) },
+                    { id: 'set-spread', val: sim.config.max_spread_bps }
+                ];
+                inputs.forEach(i => {
+                    const el = document.getElementById(i.id);
+                    if (el && document.activeElement !== el) el.value = i.val;
+                });
+            }
+
+            document.getElementById('v-portfolio').innerText = formatMoney(totalVal);
+            document.getElementById('v-total-pnl').innerText = formatMoneySigned(totalPnL);
+            document.getElementById('v-total-pnl').className = 'm-value ' + (totalPnL >= 0 ? 'val-up' : 'val-down');
+            document.getElementById('v-unrealized').innerText = formatMoneySigned(unrealized);
+            document.getElementById('v-unrealized').className = 'm-value ' + (unrealized >= 0 ? 'val-up' : 'val-down');
+            
+            const wins = sim.wins || 0, losses = sim.losses || 0;
+            const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100).toFixed(1) : '0.0';
+            document.getElementById('v-winrate').innerText = wr + '%';
+            document.getElementById('v-volume').innerText = formatMoney(sim.total_volume || 0);
+            document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
+            document.getElementById('v-latency').innerText = (sim.latency_advantage_ms || 0) + 'ms';
+
+            const m = sim.market || {};
+            document.getElementById('m-question').innerText = (m.question || 'AWAITING DATA...').toUpperCase();
+            document.getElementById('m-binance').innerText = '$' + (m.binance_btc || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+            document.getElementById('m-chainlink').innerText = '$' + (m.chainlink_btc || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+            document.getElementById('m-up').innerText = (m.up_price || 0).toFixed(4);
+            document.getElementById('m-down').innerText = (m.down_price || 0).toFixed(4);
+            document.getElementById('m-spike').innerText = (m.spike || 0).toFixed(2);
+            
+            const spikeMag = Math.min(Math.abs(m.spike || 0) / 100, 1) * 50;
+            const bar = document.getElementById('m-spike-fill');
+            bar.style.width = spikeMag + '%';
+            bar.style.left = m.spike >= 0 ? '50%' : (50 - spikeMag) + '%';
+            bar.style.background = m.spike >= 0 ? 'var(--color-up)' : 'var(--color-down)';
+
+            if (m.end_ts) {
+                const remaining = Math.max(0, m.end_ts - Math.floor(Date.now() / 1000));
+                const mins = Math.floor(remaining / 60), secs = remaining % 60;
+                document.getElementById('m-timer').innerText = `${mins}:${secs.toString().padStart(2, '0')}`;
+            }
+
+            document.getElementById('count-open').innerText = Object.keys(posDict).length;
+            document.getElementById('list-open').innerHTML = Object.values(posDict).map(p => `
+                <div class="pos-item">
+                    <div class="pos-top"><span>${p.side} POSITION</span><span class="pos-pnl ${p.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(p.pnl)}</span></div>
+                    <div style="font-size:10px; color:var(--text-dim);">${p.shares.toFixed(2)} SHARES @ ${p.entry_price.toFixed(4)}</div>
+                    <div style="font-size:10px; color:var(--text-dim); margin-top:2px;">MARKET: ${p.current_price.toFixed(4)}</div>
+                </div>
+            `).join('');
+
+            const trades = (sim.trades || []).slice().reverse().slice(0, 30);
+            document.getElementById('list-trades').innerHTML = trades.map(t => `
+                <div class="trade-item">
+                    <div class="t-left">
+                        <div class="t-type ${t.type==='exit'?(t.pnl>=0?'t-win':'t-loss'):'t-entry'}">${t.type==='exit'?'EXIT':'ENTRY'}</div>
+                        <div class="t-info">${t.direction} · ${t.shares.toFixed(2)} SH</div>
+                    </div>
+                    <div class="t-price">
+                        ${t.type==='exit'?formatMoneySigned(t.pnl):formatMoney(t.cost)}
+                        <div style="font-size:9px; font-weight:400; color:var(--text-muted);">${new Date(t.timestamp).toLocaleTimeString([], {hour12:false})}</div>
+                    </div>
+                </div>
+            `).join('');
+
+            const settled = (sim.trades || []).filter(t => t.type === 'exit').slice().reverse().slice(0, 10);
+            document.getElementById('list-settled').innerHTML = settled.map(t => `
+                <div class="trade-item">
+                    <div class="t-left">
+                        <div class="t-info" style="color:#fff; font-weight:600;">${t.pnl>=0?'PROFIT':'LOSS'}</div>
+                        <div class="t-info">${t.close_reason}</div>
+                    </div>
+                    <div class="t-price ${t.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(t.pnl)}</div>
+                </div>
+            `).join('');
+
+            if (sim.history && sim.history.length > 0) {
+                myChart.data.labels = sim.history.map(h => h.t);
+                myChart.data.datasets[0].data = sim.history.map(h => h.v);
+                myChart.update();
+            }
+        };
+
+        const connect = () => {
+            const ws = new WebSocket(`ws://${window.location.host}/ws`);
+            ws.onopen = () => {
+                document.getElementById('status-dot').classList.remove('offline');
+                document.getElementById('status-text').innerText = 'CORE ONLINE';
+            };
+            ws.onmessage = (e) => updateUI(JSON.parse(e.data));
+            ws.onclose = () => {
+                document.getElementById('status-dot').classList.add('offline');
+                document.getElementById('status-text').innerText = 'CORE OFFLINE';
+                setTimeout(connect, 2000);
+            };
+        };
+
+        initChart();
+        connect();
+    </script>
+</body>
+</html>
