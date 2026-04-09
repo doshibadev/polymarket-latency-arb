@@ -32,6 +32,7 @@ pub struct ArbEngine {
     symbol_states: HashMap<String, SymbolState>,
     last_clob_update_ts: Option<Instant>,
     history: Vec<Value>,
+    signals: Vec<Value>,
 }
 
 impl ArbEngine {
@@ -57,7 +58,21 @@ impl ArbEngine {
             symbol_states: HashMap::new(),
             last_clob_update_ts: None,
             history: Vec::new(),
+            signals: Vec::new(),
         }
+    }
+
+    fn add_signal(&mut self, symbol: &str, direction: &str, spike: f64, status: &str, reason: Option<String>) {
+        let now = chrono::Local::now().format("%H:%M:%S").to_string();
+        self.signals.push(json!({
+            "t": now,
+            "s": symbol,
+            "d": direction,
+            "v": spike,
+            "st": status,
+            "r": reason
+        }));
+        if self.signals.len() > 50 { self.signals.remove(0); }
     }
 
     fn update_history(&mut self, total_val: f64) {
@@ -67,6 +82,7 @@ impl ArbEngine {
     }
 
     fn broadcast_state(&self) {
+        tracing::debug!("Broadcasting state: {} markets, balance: {}", self.symbol_states.len(), self.wallet.balance);
         let mut unrealized_pnl = 0.0;
         let mut net_market_value = 0.0;
         let mut positions = Vec::new();
@@ -97,8 +113,6 @@ impl ArbEngine {
 
         let mut markets = HashMap::new();
         for (symbol, state) in &self.symbol_states {
-            let (up_p, down_p) = self.wallet.get_bid_ask(symbol, "UP"); // Wallet returns mid if simplified, but here we use bid/ask
-            let up_mid = (up_p + self.wallet.get_bid_ask(symbol, "UP").1) / 2.0; // Corrected below
             let (up_b, up_a) = self.wallet.get_bid_ask(symbol, "UP");
             let (dn_b, dn_a) = self.wallet.get_bid_ask(symbol, "DOWN");
 
@@ -129,6 +143,7 @@ impl ArbEngine {
             "positions": positions,
             "trades": self.wallet.trade_history,
             "history": self.history,
+            "signals": self.signals,
             "markets": markets,
             "config": {
                 "threshold_bps": self.config.threshold_bps,
@@ -144,7 +159,6 @@ impl ArbEngine {
     pub async fn run(&mut self) -> Result<()> {
         info!("Arb Engine V2 running");
 
-        let mut log_timer = tokio::time::interval(Duration::from_secs(10));
         let mut broadcast_timer = tokio::time::interval(Duration::from_millis(500));
         let mut history_timer = tokio::time::interval(Duration::from_secs(1));
 
@@ -195,6 +209,8 @@ impl ArbEngine {
     async fn handle_clob_update(&mut self, update: SharePriceUpdate) {
         self.last_clob_update_ts = Some(Instant::now());
         self.wallet.update_share_price(&update.symbol, &update.direction, update.best_bid, update.best_ask);
+        self.wallet.try_close_position().await;
+        self.check_for_spike(&update.symbol).await;
     }
 
     pub async fn handle_market_update(&mut self, market: MarketData) {
@@ -206,34 +222,55 @@ impl ArbEngine {
     }
 
     async fn check_for_spike(&mut self, symbol: &str) {
-        let state = self.symbol_states.get_mut(symbol).unwrap();
-        let (binance, chainlink) = match (state.last_binance, state.last_chainlink) {
-            (Some(b), Some(c)) => (b, c),
-            _ => return,
+        let (binance, chainlink) = {
+            let state = self.symbol_states.get(symbol).unwrap();
+            match (state.last_binance, state.last_chainlink) {
+                (Some(b), Some(c)) => (b.0, c.0),
+                _ => return,
+            }
         };
 
-        if binance.1.elapsed() > Duration::from_secs(5) || chainlink.1.elapsed() > Duration::from_secs(5) { return; }
-
-        let adjusted_spike = (binance.0 - chainlink.0) - state.ema_offset;
+        // Need to re-fetch state to modify it
+        let state = self.symbol_states.get_mut(symbol).unwrap();
+        
+        let adjusted_spike = (binance - chainlink) - state.ema_offset;
         let abs_spike = adjusted_spike.abs();
         let threshold_usd = self.config.threshold_bps as f64 / 100.0;
 
-        if abs_spike < threshold_usd { state.last_spike_usd = 0.0; return; }
+        if abs_spike < threshold_usd { 
+            state.last_spike_usd = 0.0; 
+            return; 
+        }
 
         let direction = if adjusted_spike > 0.0 { "UP" } else { "DOWN" };
         let (bid, ask) = self.wallet.get_bid_ask(symbol, direction);
-        if bid <= 0.0 || ask <= 0.0 { return; }
-        let spread_bps = (((ask - bid) / ((bid + ask) / 2.0)) * 10000.0) as u64;
-
+        
+        if bid <= 0.0 || ask <= 0.0 { 
+            self.add_signal(symbol, direction, adjusted_spike, "REJECTED", Some("NO_POL_LIQUIDITY".to_string()));
+            return; 
+        }
+        
         if let Some(end_ts) = state.market_end_ts {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-            if now >= end_ts.saturating_sub(45) { return; }
+            if now >= end_ts.saturating_sub(45) { 
+                self.add_signal(symbol, direction, adjusted_spike, "REJECTED", Some("MARKET_ENDING".to_string()));
+                return; 
+            }
         }
 
         // New spike or significantly larger spike for scaling in
         if abs_spike > state.last_spike_usd * 1.1 {
-            self.wallet.open_position(symbol, direction, binance.0, chainlink.0, adjusted_spike, spread_bps, threshold_usd).await;
-            state.last_spike_usd = abs_spike;
+            let spread_bps = (((ask - bid) / ((bid + ask) / 2.0)) * 10000.0) as u64;
+            match self.wallet.open_position(symbol, direction, binance, chainlink, adjusted_spike, spread_bps, threshold_usd).await {
+                Ok(level) => {
+                    let level_str = format!("LEVEL_{}", level);
+                    state.last_spike_usd = abs_spike;
+                    self.add_signal(symbol, direction, adjusted_spike, "EXECUTED", Some(level_str));
+                }
+                Err(reason) => {
+                    self.add_signal(symbol, direction, adjusted_spike, "REJECTED", Some(reason));
+                }
+            }
         }
     }
 }

@@ -177,7 +177,27 @@
         .spike-center { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--text-muted); z-index: 2; }
         .spike-fill { position: absolute; height: 100%; top: 0; transition: width 0.1s, left 0.1s; }
 
-        .chart-panel { flex: 1; min-height: 400px; padding: 20px; }
+        .chart-panel { height: 320px; padding: 10px 20px; }
+
+        .terminal-panel { 
+            height: 250px; 
+            display: flex; 
+            flex-direction: column; 
+            background: #000;
+            margin: 0 20px 20px 20px;
+            border: 1px solid var(--border-dim);
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            overflow: hidden;
+        }
+        #signal-log { 
+            overflow-y: auto; 
+            flex: 1; 
+        }
+        .term-header { background: #0a0a0c; color: var(--text-muted); font-weight: 700; text-transform: uppercase; font-size: 9px; }
+        .st-exec { color: var(--color-up); font-weight: 700; }
+        .st-rej { color: var(--color-down); opacity: 0.8; }
+        .sig-val { color: var(--color-neutral); }
 
         .list-container { flex: 1; overflow-y: auto; }
         .trade-item { padding: 12px 16px; border-bottom: 1px solid var(--border-dim); display: flex; justify-content: space-between; align-items: center; }
@@ -401,6 +421,15 @@
                 <div class="chart-panel">
                     <canvas id="mainChart"></canvas>
                 </div>
+                <div class="panel-header" style="border-top:1px solid var(--border-dim)">
+                    <div class="panel-title">Signal Terminal</div>
+                </div>
+                <div class="terminal-panel">
+                    <div class="term-line term-header">
+                        <span>Time</span><span>Sym</span><span>Side</span><span>Spike</span><span>Status</span><span>Reason</span>
+                    </div>
+                    <div id="signal-log" style="overflow-y:auto; flex:1;"></div>
+                </div>
             </div>
         </div>
 
@@ -520,6 +549,7 @@
         };
 
         const updateUI = (sim) => {
+            console.log('Dashboard update received:', sim);
             if (!sim) return;
             const totalVal = sim.total_portfolio_value || 0;
             startingBalance = sim.starting_balance || 27.0;
@@ -555,14 +585,27 @@
             document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
             document.getElementById('v-latency').innerText = (sim.latency_advantage_ms || 0) + 'ms';
 
-            const m = sim.market || {};
+            // Get the primary market data (prefer BTC if available)
+            let marketData = {};
+            if (sim.markets) {
+                if (sim.markets.BTC) {
+                    marketData = sim.markets.BTC;
+                } else {
+                    const firstKey = Object.keys(sim.markets)[0];
+                    if (firstKey) {
+                        marketData = sim.markets[firstKey];
+                    }
+                }
+            }
+            const m = marketData;
+
             document.getElementById('m-question').innerText = (m.question || 'AWAITING DATA...').toUpperCase();
-            document.getElementById('m-binance').innerText = '$' + (m.binance_btc || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
-            document.getElementById('m-chainlink').innerText = '$' + (m.chainlink_btc || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+            document.getElementById('m-binance').innerText = '$' + (m.binance || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+            document.getElementById('m-chainlink').innerText = '$' + (m.chainlink || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
             document.getElementById('m-up').innerText = (m.up_price || 0).toFixed(4);
             document.getElementById('m-down').innerText = (m.down_price || 0).toFixed(4);
             document.getElementById('m-spike').innerText = (m.spike || 0).toFixed(2);
-            
+             
             const spikeMag = Math.min(Math.abs(m.spike || 0) / 100, 1) * 50;
             const bar = document.getElementById('m-spike-fill');
             bar.style.width = spikeMag + '%';
@@ -598,6 +641,18 @@
                 </div>
             `).join('');
 
+            const signals = (sim.signals || []).slice().reverse();
+            document.getElementById('signal-log').innerHTML = signals.map(s => `
+                <div class="term-line">
+                    <span style="color:var(--text-muted)">${s.t}</span>
+                    <span>${s.s}</span>
+                    <span class="${s.d==='UP'?'val-up':'val-down'}">${s.d}</span>
+                    <span class="sig-val">${s.v.toFixed(2)}</span>
+                    <span class="${s.st==='EXECUTED'?'st-exec':'st-rej'}">${s.st}</span>
+                    <span style="font-size:10px; color:var(--text-dim)">${s.r || ''}</span>
+                </div>
+            `).join('');
+
             const settled = (sim.trades || []).filter(t => t.type === 'exit').slice().reverse().slice(0, 10);
             document.getElementById('list-settled').innerHTML = settled.map(t => `
                 <div class="trade-item">
@@ -622,7 +677,15 @@
                 document.getElementById('status-dot').classList.remove('offline');
                 document.getElementById('status-text').innerText = 'CORE ONLINE';
             };
-            ws.onmessage = (e) => updateUI(JSON.parse(e.data));
+            ws.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    console.log('WS message received:', data);
+                    updateUI(data);
+                } catch (err) {
+                    console.error('Failed to parse WS message:', err);
+                }
+            };
             ws.onclose = () => {
                 document.getElementById('status-dot').classList.add('offline');
                 document.getElementById('status-text').innerText = 'CORE OFFLINE';

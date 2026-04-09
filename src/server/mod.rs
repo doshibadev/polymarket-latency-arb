@@ -60,6 +60,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
             broadcast_msg = rx.recv() => {
                 match broadcast_msg {
                     Ok(msg) => {
+                        debug!("Sending state to dashboard ({} bytes)", msg.len());
                         if let Err(_) = sender.send(Message::Text(msg)).await {
                             // Standard disconnect, no need to log as ERROR
                             break;

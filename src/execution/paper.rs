@@ -107,10 +107,14 @@ impl PaperWallet {
             state.down_bid = bid; state.down_ask = ask;
         }
 
-        // Update highest price for all positions of this symbol/direction
+        // Update best price for all positions of this symbol/direction
         for pos in &mut self.open_positions {
             if pos.symbol == symbol && pos.direction == direction {
-                if mid_price > pos.highest_price { pos.highest_price = mid_price; }
+                if direction == "UP" {
+                    if mid_price > pos.highest_price { pos.highest_price = mid_price; }
+                } else {
+                    if mid_price < pos.highest_price { pos.highest_price = mid_price; }
+                }
             }
         }
     }
@@ -159,26 +163,21 @@ impl PaperWallet {
                 if current_spike > 0.0 { trend_reversed = true; }
             }
 
-            // Spike Convergence: Close if spike has significantly faded
-            let mut spike_faded = false;
-            if current_spike.abs() < pos.entry_spike.abs() * 0.1 {
-                spike_faded = true;
-            }
+            // Trailing stop: 5% below highest for UP, above lowest for DOWN
+            let trailing_stop_pct = self.config.trailing_stop_pct / 100.0;
+            let trailing_stop_hit = if pos.direction == "UP" {
+                current_price < pos.highest_price * (1.0 - trailing_stop_pct)
+            } else {
+                current_price > pos.highest_price * (1.0 + trailing_stop_pct)
+            };
 
             let held_ms = pos.entry_time.elapsed().as_millis();
-            
-            // Trailing stop (optional safety)
-            let mut trailing_stop_hit = false;
-            if self.config.trailing_stop_pct > 0.0 && current_price < pos.highest_price * (1.0 - self.config.trailing_stop_pct) {
-                trailing_stop_hit = true;
-            }
 
             // Emergency Exit: near end of window
             let near_end = held_ms > 240000; // 4 minutes
 
-            if trend_reversed || spike_faded || trailing_stop_hit || near_end {
-                let reason = if trend_reversed { "trend_reversed" } 
-                            else if spike_faded { "spike_faded" }
+            if trend_reversed || trailing_stop_hit || near_end {
+                let reason = if trend_reversed { "trend_reversed" }
                             else if trailing_stop_hit { "trailing_stop" }
                             else { "near_end" };
                 to_close.push((idx, reason));
@@ -219,25 +218,26 @@ impl PaperWallet {
         }
     }
 
-    pub async fn open_position(&mut self, symbol: &str, direction: &str, binance: f64, chainlink: f64, spike: f64, spread_bps: u64, threshold_usd: f64) {
+    pub async fn open_position(&mut self, symbol: &str, direction: &str, binance: f64, chainlink: f64, spike: f64, _spread_bps: u64, threshold_usd: f64) -> std::result::Result<u32, String> {
         let current_symbol_positions: Vec<_> = self.open_positions.iter().filter(|p| p.symbol == symbol && p.direction == direction).collect();
         let scale_level = current_symbol_positions.len() as u32 + 1;
 
-        if scale_level > 3 { return; } // Max 3 entries per coin/direction
+        if scale_level > 3 { return Err("MAX_SCALE_LEVEL".to_string()); }
 
         if scale_level > 1 {
             let last_entry_spike = current_symbol_positions.last().unwrap().entry_spike.abs();
-            if spike.abs() < last_entry_spike * 1.5 { return; } // Only scale in if spike grows 50%
+            if spike.abs() < last_entry_spike * 1.5 { return Err("SPIKE_NOT_GROWING".to_string()); }
         }
 
         let entry_price = self.get_share_price(symbol, direction);
-        if entry_price <= 0.0 || entry_price > self.config.max_entry_price { return; }
-        if spread_bps > self.config.max_spread_bps { return; }
+        if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }
+        if entry_price > self.config.max_entry_price { return Err("PRICE_TOO_HIGH".to_string()); }
+        // Removed spread check to allow trading any spread
 
         let position_size = self.balance * self.portfolio_pct * (1.0 / scale_level as f64);
         let shares = position_size / entry_price;
         let buy_fee = self.calculate_fee(shares, entry_price);
-        if (position_size + buy_fee) > self.balance { return; }
+        if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
 
         self.balance -= position_size + buy_fee;
 
@@ -276,5 +276,6 @@ impl PaperWallet {
         });
 
         info!(symbol=%symbol, level=scale_level, "Position opened");
+        Ok(scale_level)
     }
 }

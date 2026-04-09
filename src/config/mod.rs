@@ -25,7 +25,7 @@ impl AppConfig {
         let threshold_bps: u64 = env::var("THRESHOLD_BPS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(6000); // $60 spike minimum
+            .unwrap_or(2000); // $20 spike minimum
 
         let min_hold_ms: u64 = env::var("MIN_HOLD_MS")
             .ok()
@@ -70,7 +70,7 @@ impl AppConfig {
         let trailing_stop_pct: f64 = env::var("TRAILING_STOP_PCT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0.005); // 0.5% trailing stop
+            .unwrap_or(5.0); // 5% trailing stop from highest
 
         let max_spread_bps: u64 = env::var("MAX_SPREAD_BPS")
             .ok()
