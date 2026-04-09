@@ -162,11 +162,12 @@ impl PaperWallet {
                 current_price > pos.highest_price * (1.0 + self.config.trailing_stop_pct / 100.0)
             };
 
-            // Spike reversed direction
+            // Spike reversed: for UP close when spike goes negative, for DOWN close when spike goes positive
+            // Use entry_spike sign to determine what "reversed" means
             let trend_reversed = if pos.direction == "UP" {
-                adjusted_spike < 0.0
+                adjusted_spike < -(pos.entry_spike.abs() * 0.1) // spike went 10% negative
             } else {
-                adjusted_spike > 0.0
+                adjusted_spike > (pos.entry_spike.abs() * 0.1) // spike went 10% positive
             };
 
             // Spike faded to <spike_faded_pct of entry spike
