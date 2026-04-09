@@ -125,7 +125,7 @@ impl PaperWallet {
         state.last_chainlink = chainlink;
     }
 
-    fn calculate_fee(&self, shares: f64, price: f64) -> f64 {
+    pub fn calculate_fee(&self, shares: f64, price: f64) -> f64 {
         let fee = shares * self.config.crypto_fee_rate * price * (1.0 - price);
         if fee < 0.00001 { 0.0 } else { (fee * 100000.0).round() / 100000.0 }
     }
@@ -136,12 +136,12 @@ impl PaperWallet {
         } else { (0.0, 0.0) }
     }
 
-    fn get_share_price(&self, symbol: &str, direction: &str) -> f64 {
+    pub fn get_share_price(&self, symbol: &str, direction: &str) -> f64 {
         let (bid, ask) = self.get_bid_ask(symbol, direction);
         if bid > 0.0 && ask > 0.0 { (bid + ask) / 2.0 } else { 0.0 }
     }
 
-    pub async fn try_close_position(&mut self) {
+    pub async fn try_close_position(&mut self) -> bool {
         let mut to_close = Vec::new();
 
         for (idx, pos) in self.open_positions.iter().enumerate() {
@@ -163,25 +163,27 @@ impl PaperWallet {
                 if current_spike > 0.0 { trend_reversed = true; }
             }
 
-            // Trailing stop: 5% below highest for UP, above lowest for DOWN
-            let trailing_stop_pct = self.config.trailing_stop_pct / 100.0;
-            let trailing_stop_hit = if pos.direction == "UP" {
-                current_price < pos.highest_price * (1.0 - trailing_stop_pct)
-            } else {
-                current_price > pos.highest_price * (1.0 + trailing_stop_pct)
-            };
+            // Spike Convergence: Close if spike has significantly faded
+            let mut spike_faded = false;
+            if current_spike.abs() < pos.entry_spike.abs() * 0.1 {
+                spike_faded = true;
+            }
 
             let held_ms = pos.entry_time.elapsed().as_millis();
 
             // Emergency Exit: near end of window
             let near_end = held_ms > 240000; // 4 minutes
 
-            if trend_reversed || trailing_stop_hit || near_end {
-                let reason = if trend_reversed { "trend_reversed" }
-                            else if trailing_stop_hit { "trailing_stop" }
+            if trend_reversed || spike_faded || near_end {
+                let reason = if trend_reversed { "trend_reversed" } 
+                            else if spike_faded { "spike_faded" }
                             else { "near_end" };
                 to_close.push((idx, reason));
             }
+        }
+
+        if to_close.is_empty() {
+            return false;
         }
 
         // Close in reverse order to keep indices valid
@@ -216,6 +218,8 @@ impl PaperWallet {
 
             info!(symbol=%pos.symbol, pnl=format!("${:.4}", pnl), reason=%reason, "Position closed");
         }
+
+        true
     }
 
     pub async fn open_position(&mut self, symbol: &str, direction: &str, binance: f64, chainlink: f64, spike: f64, _spread_bps: u64, threshold_usd: f64) -> std::result::Result<u32, String> {

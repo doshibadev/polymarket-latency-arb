@@ -33,12 +33,15 @@
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            height: 100%;
+        }
         body {
             background-color: var(--bg-base);
             color: var(--text-main);
             font-family: var(--font-sans);
             -webkit-font-smoothing: antialiased;
-            overflow: hidden;
+            overflow-y: auto;
         }
 
         .terminal-container {
@@ -48,7 +51,6 @@
             display: grid;
             grid-template-columns: 320px 1fr 320px;
             gap: 20px;
-            height: 100vh;
         }
 
         .panel {
@@ -161,9 +163,9 @@
         .m-label { font-size: 9px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px; }
         .m-value { font-family: var(--font-mono); font-size: 16px; font-weight: 700; }
 
-        .left-side { display: flex; flex-direction: column; gap: 20px; }
+        .left-side { display: flex; flex-direction: column; gap: 20px; height: 860px; }
         .center-side { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
-        .right-side { display: flex; flex-direction: column; gap: 20px; }
+        .right-side { display: flex; flex-direction: column; gap: 20px; height: 860px; }
 
         .market-summary { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
         .m-question { font-size: 13px; font-weight: 500; line-height: 1.4; }
@@ -177,10 +179,10 @@
         .spike-center { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--text-muted); z-index: 2; }
         .spike-fill { position: absolute; height: 100%; top: 0; transition: width 0.1s, left 0.1s; }
 
-        .chart-panel { height: 320px; padding: 10px 20px; }
+        .chart-panel { height: 320px; padding: 10px 20px; flex-shrink: 0; }
 
         .terminal-panel { 
-            height: 250px; 
+            flex: 1;
             display: flex; 
             flex-direction: column; 
             background: #000;
@@ -189,6 +191,7 @@
             border-radius: 4px;
             font-family: var(--font-mono);
             overflow: hidden;
+            min-height: 0;
         }
         #signal-log { 
             overflow-y: auto; 
@@ -210,7 +213,25 @@
         .t-info { font-size: 11px; color: var(--text-dim); }
         .t-price { font-family: var(--font-mono); font-size: 12px; font-weight: 700; text-align: right; }
 
-        .pos-item { padding: 16px; border-bottom: 1px solid var(--border-dim); }
+        .pos-item { padding: 16px; border-bottom: 1px solid var(--border-dim); position: relative; }
+        .pos-item:hover .pos-close-btn { opacity: 1; }
+        .pos-close-btn {
+            opacity: 0;
+            position: absolute;
+            top: 50%; right: 12px;
+            transform: translateY(-50%);
+            background: rgba(244,63,94,0.15);
+            border: 1px solid var(--color-down);
+            color: var(--color-down);
+            font-family: var(--font-mono);
+            font-size: 10px;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: opacity 0.15s, background 0.15s;
+        }
+        .pos-close-btn:hover { background: rgba(244,63,94,0.3); }
         .pos-top { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 8px; }
         .pos-pnl { font-family: var(--font-mono); font-weight: 700; }
 
@@ -235,7 +256,7 @@
         .modal-content {
             background: var(--bg-card);
             border: 1px solid var(--border-bright);
-            width: 450px;
+            width: 520px;
             border-radius: 8px;
             box-shadow: 0 20px 40px rgba(0,0,0,0.5);
         }
@@ -294,27 +315,43 @@
             <div class="settings-grid">
                 <div class="setting-group">
                     <label class="setting-label">Spike Threshold ($)</label>
-                    <input type="number" id="set-threshold" class="setting-input" value="40">
+                    <input type="number" id="set-threshold" class="setting-input" placeholder="e.g. 20">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Portfolio Size (%)</label>
-                    <input type="number" id="set-portfolio" class="setting-input" value="15">
+                    <label class="setting-label">Portfolio Per Trade (%)</label>
+                    <input type="number" id="set-portfolio" class="setting-input" step="0.1" placeholder="e.g. 10">
                 </div>
                 <div class="setting-group">
                     <label class="setting-label">Min Hold (ms)</label>
-                    <input type="number" id="set-minhold" class="setting-input" value="1500">
+                    <input type="number" id="set-minhold" class="setting-input" placeholder="e.g. 1500">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Timeout (ms)</label>
+                    <input type="number" id="set-timeout" class="setting-input" placeholder="e.g. 10000">
                 </div>
                 <div class="setting-group">
                     <label class="setting-label">Profit Target (%)</label>
-                    <input type="number" id="set-profit" class="setting-input" value="2.0" step="0.1">
+                    <input type="number" id="set-profit" class="setting-input" step="0.1" placeholder="e.g. 0">
                 </div>
                 <div class="setting-group">
                     <label class="setting-label">Trailing Stop (%)</label>
-                    <input type="number" id="set-trailing" class="setting-input" value="0.5" step="0.1">
+                    <input type="number" id="set-trailing" class="setting-input" step="0.1" placeholder="e.g. 5">
                 </div>
                 <div class="setting-group">
                     <label class="setting-label">Max Spread (BPS)</label>
-                    <input type="number" id="set-spread" class="setting-input" value="100">
+                    <input type="number" id="set-spread" class="setting-input" placeholder="e.g. 100">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Max Entry Price</label>
+                    <input type="number" id="set-maxprice" class="setting-input" step="0.01" placeholder="e.g. 0.70">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Spike Scaling Factor</label>
+                    <input type="number" id="set-scaling" class="setting-input" step="0.0001" placeholder="e.g. 0.0001">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">EMA Alpha</label>
+                    <input type="number" id="set-ema" class="setting-input" step="0.01" placeholder="e.g. 0.1">
                 </div>
                 <button class="save-btn" onclick="saveSettings()">Save & Apply Changes</button>
             </div>
@@ -329,6 +366,7 @@
             </div>
             <div class="header-actions">
                 <button class="settings-btn" onclick="openSettings()">Settings</button>
+                <button id="toggle-btn" class="settings-btn" onclick="toggleBot()" style="border-color: var(--color-down); color: var(--color-down);">■ STOP</button>
                 <div class="status-pill">
                     <div class="status-dot" id="status-dot"></div>
                     <span id="status-text">CONNECTING...</span>
@@ -404,7 +442,7 @@
                 </div>
             </div>
 
-            <div class="panel" style="flex:1;">
+            <div class="panel" style="flex:1; min-height:0; overflow:hidden;">
                 <div class="panel-header">
                     <div class="panel-title">Open Positions</div>
                     <div style="font-family:var(--font-mono); font-size:10px;" id="count-open">0</div>
@@ -414,14 +452,14 @@
         </div>
 
         <div class="center-side">
-            <div class="panel" style="flex:1;">
+            <div class="panel" style="flex:1; min-height:0; height:860px; max-height:860px;">
                 <div class="panel-header">
                     <div class="panel-title">Session Value Performance</div>
                 </div>
                 <div class="chart-panel">
                     <canvas id="mainChart"></canvas>
                 </div>
-                <div class="panel-header" style="border-top:1px solid var(--border-dim)">
+                <div class="panel-header" style="border-top:1px solid var(--border-dim); flex-shrink:0;">
                     <div class="panel-title">Signal Terminal</div>
                 </div>
                 <div class="terminal-panel">
@@ -434,7 +472,7 @@
         </div>
 
         <div class="right-side">
-            <div class="panel" style="flex:1;">
+            <div class="panel" style="flex:1; min-height:0; overflow:hidden;">
                 <div class="panel-header">
                     <div class="panel-title">Execution Log</div>
                 </div>
@@ -514,12 +552,17 @@
             btn.disabled = true;
 
             const settings = {
-                threshold_bps: parseInt(document.getElementById('set-threshold').value) * 100,
+                _type: 'settings',
+                threshold_bps: Math.round(parseFloat(document.getElementById('set-threshold').value) * 100),
                 portfolio_pct: parseFloat(document.getElementById('set-portfolio').value) / 100,
                 min_hold_ms: parseInt(document.getElementById('set-minhold').value),
+                timeout_ms: parseInt(document.getElementById('set-timeout').value),
                 profit_target_pct: parseFloat(document.getElementById('set-profit').value) / 100,
-                trailing_stop_pct: parseFloat(document.getElementById('set-trailing').value) / 100,
-                max_spread_bps: parseInt(document.getElementById('set-spread').value)
+                trailing_stop_pct: parseFloat(document.getElementById('set-trailing').value),
+                max_spread_bps: parseInt(document.getElementById('set-spread').value),
+                max_entry_price: parseFloat(document.getElementById('set-maxprice').value),
+                spike_scaling_factor: parseFloat(document.getElementById('set-scaling').value),
+                ema_alpha: parseFloat(document.getElementById('set-ema').value),
             };
 
             try {
@@ -530,8 +573,8 @@
                 });
                 if (res.ok) {
                     btn.style.background = 'var(--color-up)';
-                    btn.innerText = 'SUCCESS';
-                    setTimeout(closeSettings, 1000);
+                    btn.innerText = 'SAVED ✓';
+                    setTimeout(closeSettings, 800);
                 } else {
                     btn.style.background = 'var(--color-down)';
                     btn.innerText = 'ERROR';
@@ -548,28 +591,63 @@
             }, 2000);
         };
 
+        let botRunning = true;
+
+        const toggleBot = async () => {
+            const cmd = botRunning ? 'stop' : 'start';
+            await fetch('/command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ _type: cmd })
+            });
+        };
+
+        const closePosition = async (index) => {
+            await fetch('/command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ _type: 'close_position', index })
+            });
+        };
         const updateUI = (sim) => {
-            console.log('Dashboard update received:', sim);
             if (!sim) return;
             const totalVal = sim.total_portfolio_value || 0;
             startingBalance = sim.starting_balance || 27.0;
             const totalPnL = sim.total_pnl || 0;
             const unrealized = sim.unrealized_pnl || 0;
-            const posDict = sim.positions || {};
+            const posArr = sim.positions || [];
+
+            // Update running state
+            if (typeof sim.running === 'boolean') {
+                botRunning = sim.running;
+                const btn = document.getElementById('toggle-btn');
+                if (botRunning) {
+                    btn.innerText = '■ STOP';
+                    btn.style.borderColor = 'var(--color-down)';
+                    btn.style.color = 'var(--color-down)';
+                } else {
+                    btn.innerText = '▶ START';
+                    btn.style.borderColor = 'var(--color-up)';
+                    btn.style.color = 'var(--color-up)';
+                }
+            }
 
             if (sim.config) {
-                const inputs = [
-                    { id: 'set-threshold', val: sim.config.threshold_bps / 100 },
-                    { id: 'set-portfolio', val: (sim.config.portfolio_pct * 100).toFixed(1) },
-                    { id: 'set-minhold', val: sim.config.min_hold_ms },
-                    { id: 'set-profit', val: (sim.config.profit_target_pct * 100).toFixed(1) },
-                    { id: 'set-trailing', val: (sim.config.trailing_stop_pct * 100).toFixed(1) },
-                    { id: 'set-spread', val: sim.config.max_spread_bps }
-                ];
-                inputs.forEach(i => {
-                    const el = document.getElementById(i.id);
-                    if (el && document.activeElement !== el) el.value = i.val;
-                });
+                const c = sim.config;
+                const setIfNotFocused = (id, val) => {
+                    const el = document.getElementById(id);
+                    if (el && document.activeElement !== el) el.value = val;
+                };
+                setIfNotFocused('set-threshold', (c.threshold_bps / 100).toFixed(0));
+                setIfNotFocused('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
+                setIfNotFocused('set-minhold', c.min_hold_ms);
+                setIfNotFocused('set-timeout', c.timeout_ms);
+                setIfNotFocused('set-profit', (c.profit_target_pct * 100).toFixed(1));
+                setIfNotFocused('set-trailing', c.trailing_stop_pct);
+                setIfNotFocused('set-spread', c.max_spread_bps);
+                setIfNotFocused('set-maxprice', c.max_entry_price);
+                setIfNotFocused('set-scaling', c.spike_scaling_factor);
+                setIfNotFocused('set-ema', c.ema_alpha);
             }
 
             document.getElementById('v-portfolio').innerText = formatMoney(totalVal);
@@ -585,17 +663,9 @@
             document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
             document.getElementById('v-latency').innerText = (sim.latency_advantage_ms || 0) + 'ms';
 
-            // Get the primary market data (prefer BTC if available)
             let marketData = {};
             if (sim.markets) {
-                if (sim.markets.BTC) {
-                    marketData = sim.markets.BTC;
-                } else {
-                    const firstKey = Object.keys(sim.markets)[0];
-                    if (firstKey) {
-                        marketData = sim.markets[firstKey];
-                    }
-                }
+                marketData = sim.markets.BTC || sim.markets[Object.keys(sim.markets)[0]] || {};
             }
             const m = marketData;
 
@@ -618,28 +688,43 @@
                 document.getElementById('m-timer').innerText = `${mins}:${secs.toString().padStart(2, '0')}`;
             }
 
-            document.getElementById('count-open').innerText = Object.keys(posDict).length;
-            document.getElementById('list-open').innerHTML = Object.values(posDict).map(p => `
+            document.getElementById('count-open').innerText = posArr.length;
+            document.getElementById('list-open').innerHTML = posArr.map((p, idx) => `
                 <div class="pos-item">
-                    <div class="pos-top"><span>${p.side} POSITION</span><span class="pos-pnl ${p.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(p.pnl)}</span></div>
-                    <div style="font-size:10px; color:var(--text-dim);">${p.shares.toFixed(2)} SHARES @ ${p.entry_price.toFixed(4)}</div>
-                    <div style="font-size:10px; color:var(--text-dim); margin-top:2px;">MARKET: ${p.current_price.toFixed(4)}</div>
+                    <div class="pos-top"><span>${p.side} · LVL ${p.level || 1}</span><span class="pos-pnl ${p.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(p.pnl)}</span></div>
+                    <div style="font-size:10px; color:var(--text-dim);">${p.shares.toFixed(2)} SH @ ${p.entry_price.toFixed(4)} · NOW ${p.current_price.toFixed(4)}</div>
+                    <button class="pos-close-btn" onclick="closePosition(${idx})">CLOSE</button>
                 </div>
             `).join('');
 
             const trades = (sim.trades || []).slice().reverse().slice(0, 30);
-            document.getElementById('list-trades').innerHTML = trades.map(t => `
-                <div class="trade-item">
-                    <div class="t-left">
-                        <div class="t-type ${t.type==='exit'?(t.pnl>=0?'t-win':'t-loss'):'t-entry'}">${t.type==='exit'?'EXIT':'ENTRY'}</div>
-                        <div class="t-info">${t.direction} · ${t.shares.toFixed(2)} SH</div>
+            document.getElementById('list-trades').innerHTML = trades.map(t => {
+                const isExit = t.type === 'exit';
+                const pnlClass = isExit ? (t.pnl >= 0 ? 'val-up' : 'val-down') : '';
+                let priceInfo = '';
+                if (t.entry_price) {
+                    priceInfo = `Entry: $${t.entry_price.toFixed(4)}`;
+                    if (isExit && t.exit_price) {
+                        const changePct = ((t.exit_price - t.entry_price) / t.entry_price * 100).toFixed(2);
+                        priceInfo += ` · Exit: $${t.exit_price.toFixed(4)} (${changePct}%)`;
+                    }
+                }
+                return `
+                    <div class="trade-item">
+                        <div class="t-left">
+                            <div class="t-type ${isExit ? (t.pnl>=0?'t-win':'t-loss') : 't-entry'}">${isExit?'EXIT':'ENTRY'}</div>
+                            <div class="t-info">
+                                ${t.direction} · ${t.shares.toFixed(2)} SH
+                                <div style="font-size:10px; color:var(--text-dim); margin-top:2px;">${priceInfo}</div>
+                            </div>
+                        </div>
+                        <div class="t-price ${pnlClass}">
+                            ${isExit ? formatMoneySigned(t.pnl) : formatMoney(t.cost)}
+                            <div style="font-size:9px; font-weight:400; color:var(--text-muted);">${new Date(t.timestamp).toLocaleTimeString([], {hour12:false})}</div>
+                        </div>
                     </div>
-                    <div class="t-price">
-                        ${t.type==='exit'?formatMoneySigned(t.pnl):formatMoney(t.cost)}
-                        <div style="font-size:9px; font-weight:400; color:var(--text-muted);">${new Date(t.timestamp).toLocaleTimeString([], {hour12:false})}</div>
-                    </div>
-                </div>
-            `).join('');
+                `;
+            }).join('');
 
             const signals = (sim.signals || []).slice().reverse();
             document.getElementById('signal-log').innerHTML = signals.map(s => `

@@ -23,6 +23,7 @@ pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serd
         .route("/", any_service(ServeFile::new("dashboard.html")))
         .route("/ws", get(ws_handler))
         .route("/settings", post(update_settings))
+        .route("/command", post(send_command))
         .fallback_service(ServeDir::new("."))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -37,6 +38,17 @@ async fn update_settings(
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     info!(settings = ?payload, "Received settings update from dashboard");
+    let mut cmd = payload;
+    cmd["_type"] = serde_json::json!("settings");
+    let _ = state.cmd_tx.send(cmd).await;
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+async fn send_command(
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    info!(cmd = ?payload, "Received command from dashboard");
     let _ = state.cmd_tx.send(payload).await;
     Json(serde_json::json!({ "status": "ok" }))
 }

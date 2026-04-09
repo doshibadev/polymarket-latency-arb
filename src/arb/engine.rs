@@ -33,6 +33,7 @@ pub struct ArbEngine {
     last_clob_update_ts: Option<Instant>,
     history: Vec<Value>,
     signals: Vec<Value>,
+    running: bool,
 }
 
 impl ArbEngine {
@@ -59,6 +60,7 @@ impl ArbEngine {
             last_clob_update_ts: None,
             history: Vec::new(),
             signals: Vec::new(),
+            running: true,
         }
     }
 
@@ -145,9 +147,18 @@ impl ArbEngine {
             "history": self.history,
             "signals": self.signals,
             "markets": markets,
+            "running": self.running,
             "config": {
                 "threshold_bps": self.config.threshold_bps,
                 "portfolio_pct": self.config.portfolio_pct,
+                "min_hold_ms": self.config.min_hold_ms,
+                "profit_target_pct": self.config.profit_target_pct,
+                "trailing_stop_pct": self.config.trailing_stop_pct,
+                "max_spread_bps": self.config.max_spread_bps,
+                "timeout_ms": self.config.timeout_ms,
+                "max_entry_price": self.config.max_entry_price,
+                "spike_scaling_factor": self.config.spike_scaling_factor,
+                "ema_alpha": self.config.ema_alpha,
             }
         });
 
@@ -159,26 +170,97 @@ impl ArbEngine {
     pub async fn run(&mut self) -> Result<()> {
         info!("Arb Engine V2 running");
 
+        // Push initial portfolio value (just cash)
+        self.update_history(self.wallet.balance);
+
         let mut broadcast_timer = tokio::time::interval(Duration::from_millis(500));
-        let mut history_timer = tokio::time::interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
                 Some(cmd) = self.cmd_rx.recv() => {
-                    let _ = self.config.update_from_json(cmd);
-                    self.wallet.update_config(self.config.clone());
-                }
-                _ = history_timer.tick() => {
-                    let mut net_market_value = 0.0;
-                    for pos in &self.wallet.open_positions {
-                        let (b, a) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
-                        net_market_value += pos.shares * ((b + a) / 2.0);
+                    match cmd.get("_type").and_then(|v| v.as_str()) {
+                        Some("settings") => {
+                            let _ = self.config.update_from_json(cmd);
+                            self.wallet.update_config(self.config.clone());
+                            info!("Settings updated");
+                        }
+                        Some("start") => {
+                            self.running = true;
+                            info!("Bot started");
+                        }
+                        Some("stop") => {
+                            self.running = false;
+                            info!("Bot stopped");
+                        }
+                        Some("close_position") => {
+                            if let Some(idx) = cmd.get("index").and_then(|v| v.as_u64()) {
+                                let idx = idx as usize;
+                                if idx < self.wallet.open_positions.len() {
+                                    let pos = self.wallet.open_positions.remove(idx);
+                                    let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
+                                    let sell_fee = self.wallet.calculate_fee(pos.shares, current_price);
+                                    let net_revenue = (pos.shares * current_price) - sell_fee;
+                                    let pnl = net_revenue - (pos.position_size + pos.buy_fee);
+                                    self.wallet.balance += net_revenue;
+                                    self.wallet.trade_count += 1;
+                                    if pnl > 0.0 { self.wallet.wins += 1; } else { self.wallet.losses += 1; }
+                                    self.wallet.total_fees_paid += pos.buy_fee + sell_fee;
+                                    self.wallet.total_volume += pos.position_size + (pos.shares * current_price);
+                                    self.wallet.trade_history.push(crate::execution::paper::TradeRecord {
+                                        symbol: pos.symbol.clone(),
+                                        r#type: "exit".to_string(),
+                                        question: String::new(),
+                                        direction: pos.direction.clone(),
+                                        entry_price: Some(pos.entry_price),
+                                        exit_price: Some(current_price),
+                                        shares: pos.shares,
+                                        cost: pos.position_size,
+                                        pnl: Some(pnl),
+                                        timestamp: chrono::Local::now().to_rfc3339(),
+                                        close_reason: Some("manual".to_string()),
+                                    });
+                                    info!(symbol=%pos.symbol, pnl=pnl, "Position manually closed");
+                                    // Update chart history
+                                    let mut net_market_value = 0.0;
+                                    for p in &self.wallet.open_positions {
+                                        let (b, a) = self.wallet.get_bid_ask(&p.symbol, &p.direction);
+                                        net_market_value += p.shares * ((b + a) / 2.0);
+                                    }
+                                    self.update_history(self.wallet.balance + net_market_value);
+                                    self.broadcast_state();
+                                }
+                            }
+                        }
+                        _ => {
+                            // Legacy settings format (no _type)
+                            let _ = self.config.update_from_json(cmd);
+                            self.wallet.update_config(self.config.clone());
+                        }
                     }
-                    self.update_history(self.wallet.balance + net_market_value);
                 }
                 _ = broadcast_timer.tick() => { self.broadcast_state(); }
-                Some(update) = self.price_rx.recv() => { self.handle_price_update(update).await; }
-                Some(clob_update) = self.clob_rx.recv() => { self.handle_clob_update(clob_update).await; }
+                Some(update) = self.price_rx.recv() => {
+                    if self.handle_price_update(update).await {
+                        // Push new history point after a position closed
+                        let mut net_market_value = 0.0;
+                        for pos in &self.wallet.open_positions {
+                            let (b, a) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
+                            net_market_value += pos.shares * ((b + a) / 2.0);
+                        }
+                        self.update_history(self.wallet.balance + net_market_value);
+                    }
+                }
+                Some(clob_update) = self.clob_rx.recv() => {
+                    if self.handle_clob_update(clob_update).await {
+                        // Push new history point after a position closed
+                        let mut net_market_value = 0.0;
+                        for pos in &self.wallet.open_positions {
+                            let (b, a) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
+                            net_market_value += pos.shares * ((b + a) / 2.0);
+                        }
+                        self.update_history(self.wallet.balance + net_market_value);
+                    }
+                }
                 Some(market) = self.market_rx.recv() => { self.handle_market_update(market).await; }
                 else => break,
             }
@@ -186,7 +268,7 @@ impl ArbEngine {
         Ok(())
     }
 
-    async fn handle_price_update(&mut self, update: PriceUpdate) {
+    async fn handle_price_update(&mut self, update: PriceUpdate) -> bool {
         let state = self.symbol_states.entry(update.symbol.clone()).or_default();
         if update.source == "binance" {
             state.last_binance = Some((update.price, update.timestamp));
@@ -201,16 +283,17 @@ impl ArbEngine {
 
         if let (Some((b, _)), Some((c, _))) = (state.last_binance, state.last_chainlink) {
             self.wallet.update_btc_prices(&update.symbol, b, c);
-            self.check_for_spike(&update.symbol).await;
+            if self.running { self.check_for_spike(&update.symbol).await; }
         }
-        self.wallet.try_close_position().await;
+        self.wallet.try_close_position().await
     }
 
-    async fn handle_clob_update(&mut self, update: SharePriceUpdate) {
+    async fn handle_clob_update(&mut self, update: SharePriceUpdate) -> bool {
         self.last_clob_update_ts = Some(Instant::now());
         self.wallet.update_share_price(&update.symbol, &update.direction, update.best_bid, update.best_ask);
         self.wallet.try_close_position().await;
-        self.check_for_spike(&update.symbol).await;
+        if self.running { self.check_for_spike(&update.symbol).await; }
+        self.wallet.try_close_position().await
     }
 
     pub async fn handle_market_update(&mut self, market: MarketData) {
