@@ -112,15 +112,28 @@ impl ClobClient {
 
                     for symbol in &self.symbols {
                         if let Some(&end_ts) = self.market_ends.get(symbol) {
-                            if now >= end_ts.saturating_sub(1) { // Refresh slightly before end
+                            if now >= end_ts.saturating_sub(1) {
                                 info!(symbol = %symbol, "Market window ending, refreshing...");
                                 if let Some(new_m) = fetch_current_market(symbol).await {
                                     if new_m.window_end_ts > end_ts {
-                                        // Update tokens
+                                        // Unsubscribe old tokens
+                                        let old_tokens: Vec<String> = self.token_to_symbol.keys().cloned().collect();
+                                        if !old_tokens.is_empty() {
+                                            let unsub_msg = serde_json::json!({
+                                                "assets_ids": old_tokens,
+                                                "operation": "unsubscribe",
+                                            });
+                                            let _ = write.send(Message::Text(unsub_msg.to_string().into())).await;
+                                        }
+
+                                        // Remove old token mappings for this symbol
+                                        self.token_to_symbol.retain(|_, (sym, _)| sym != symbol);
+
+                                        // Insert new tokens
                                         self.token_to_symbol.insert(new_m.up_token_id.clone(), (new_m.symbol.clone(), "UP".to_string()));
                                         self.token_to_symbol.insert(new_m.down_token_id.clone(), (new_m.symbol.clone(), "DOWN".to_string()));
                                         self.market_ends.insert(symbol.clone(), new_m.window_end_ts);
-                                        
+
                                         if let Some(market_tx) = &self.market_sender {
                                             let _ = market_tx.send(new_m).await;
                                         }
@@ -132,7 +145,7 @@ impl ClobClient {
                     }
 
                     if needs_refresh {
-                        return Ok(()); // Reconnect to update subscriptions
+                        return Ok(()); // Reconnect with new subscriptions
                     }
                 }
             }

@@ -15,11 +15,12 @@ pub struct OpenPosition {
     pub entry_binance: f64,
     pub entry_chainlink: f64,
     pub entry_spike: f64,
+    pub ema_offset_at_entry: f64,
     #[serde(skip)]
     pub entry_time: std::time::Instant,
     pub highest_price: f64,
     pub profit_target: f64,
-    pub scale_level: u32, // 1 for first entry, 2 for second, etc.
+    pub scale_level: u32,
 }
 
 #[derive(Serialize, Clone)]
@@ -111,8 +112,10 @@ impl PaperWallet {
         for pos in &mut self.open_positions {
             if pos.symbol == symbol && pos.direction == direction {
                 if direction == "UP" {
+                    // Track highest price reached
                     if mid_price > pos.highest_price { pos.highest_price = mid_price; }
                 } else {
+                    // For DOWN positions, track lowest price reached (shares gain value as price drops)
                     if mid_price < pos.highest_price { pos.highest_price = mid_price; }
                 }
             }
@@ -148,34 +151,33 @@ impl PaperWallet {
             let current_price = self.get_share_price(&pos.symbol, &pos.direction);
             if current_price <= 0.0 { continue; }
 
-            let sell_fee = self.calculate_fee(pos.shares, current_price);
-            let net_revenue = (pos.shares * current_price) - sell_fee;
-            let pnl = net_revenue - (pos.position_size + pos.buy_fee);
-
             let state = self.symbol_states.get(&pos.symbol).cloned().unwrap_or_default();
-            let current_spike = state.last_binance - state.last_chainlink;
-            
-            // Close if next tick is going in opposite direction
-            let mut trend_reversed = false;
-            if pos.direction == "UP" {
-                if current_spike < 0.0 { trend_reversed = true; }
-            } else {
-                if current_spike > 0.0 { trend_reversed = true; }
-            }
+            let adjusted_spike = state.last_binance - state.last_chainlink;
 
-            // Spike Convergence: Close if spike has significantly faded
-            let mut spike_faded = false;
-            if current_spike.abs() < pos.entry_spike.abs() * 0.1 {
-                spike_faded = true;
-            }
+            // Trailing stop: 5% drop from highest (UP) or 5% rise from lowest (DOWN)
+            let trailing_stop_hit = if pos.direction == "UP" {
+                current_price < pos.highest_price * (1.0 - self.config.trailing_stop_pct / 100.0)
+            } else {
+                // For DOWN, highest_price tracks the lowest price seen (best value)
+                current_price > pos.highest_price * (1.0 + self.config.trailing_stop_pct / 100.0)
+            };
+
+            // Spike reversed direction
+            let trend_reversed = if pos.direction == "UP" {
+                adjusted_spike < 0.0
+            } else {
+                adjusted_spike > 0.0
+            };
+
+            // Spike faded to <spike_faded_pct of entry spike
+            let spike_faded = adjusted_spike.abs() < pos.entry_spike.abs() * self.config.spike_faded_pct;
 
             let held_ms = pos.entry_time.elapsed().as_millis();
+            let near_end = held_ms > 295000; // fallback: 4m55s hold time
 
-            // Emergency Exit: near end of window
-            let near_end = held_ms > 240000; // 4 minutes
-
-            if trend_reversed || spike_faded || near_end {
-                let reason = if trend_reversed { "trend_reversed" } 
+            if trailing_stop_hit || trend_reversed || spike_faded || near_end {
+                let reason = if trailing_stop_hit { "trailing_stop" }
+                            else if trend_reversed { "trend_reversed" }
                             else if spike_faded { "spike_faded" }
                             else { "near_end" };
                 to_close.push((idx, reason));
@@ -222,7 +224,7 @@ impl PaperWallet {
         true
     }
 
-    pub async fn open_position(&mut self, symbol: &str, direction: &str, binance: f64, chainlink: f64, spike: f64, _spread_bps: u64, threshold_usd: f64) -> std::result::Result<u32, String> {
+    pub async fn open_position(&mut self, symbol: &str, direction: &str, binance: f64, chainlink: f64, spike: f64, ema_offset: f64, _spread_bps: u64, threshold_usd: f64) -> std::result::Result<u32, String> {
         let current_symbol_positions: Vec<_> = self.open_positions.iter().filter(|p| p.symbol == symbol && p.direction == direction).collect();
         let scale_level = current_symbol_positions.len() as u32 + 1;
 
@@ -236,6 +238,10 @@ impl PaperWallet {
         let entry_price = self.get_share_price(symbol, direction);
         if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }
         if entry_price > self.config.max_entry_price { return Err("PRICE_TOO_HIGH".to_string()); }
+
+        if self.config.execution_delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(self.config.execution_delay_ms)).await;
+        }
         // Removed spread check to allow trading any spread
 
         let position_size = self.balance * self.portfolio_pct * (1.0 / scale_level as f64);
@@ -273,6 +279,7 @@ impl PaperWallet {
             entry_binance: binance,
             entry_chainlink: chainlink,
             entry_spike: spike,
+            ema_offset_at_entry: ema_offset,
             entry_time: std::time::Instant::now(),
             highest_price: entry_price,
             profit_target,

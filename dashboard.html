@@ -104,8 +104,40 @@
         .header-actions {
             display: flex;
             align-items: center;
-            gap: 16px;
+            gap: 10px;
         }
+
+        .mode-switcher {
+            display: flex;
+            background: var(--bg-accent);
+            border: 1px solid var(--border-dim);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .mode-btn {
+            padding: 6px 16px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            transition: all 0.15s;
+            text-transform: uppercase;
+        }
+        .mode-btn.active-sim { background: rgba(59,130,246,0.2); color: var(--color-neutral); }
+        .mode-btn.active-live { background: rgba(244,63,94,0.2); color: var(--color-down); }
+        .live-badge {
+            display: inline-block;
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--color-down);
+            box-shadow: 0 0 6px var(--color-down);
+            margin-right: 5px;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 
         .settings-btn {
             background: var(--bg-accent);
@@ -179,7 +211,8 @@
         .spike-center { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--text-muted); z-index: 2; }
         .spike-fill { position: absolute; height: 100%; top: 0; transition: width 0.1s, left 0.1s; }
 
-        .chart-panel { height: 320px; padding: 10px 20px; flex-shrink: 0; }
+        .chart-panel { height: 320px; padding: 10px 20px; flex-shrink: 0; position: relative; }
+        .chart-panel canvas { position: absolute; top: 10px; left: 20px; right: 20px; bottom: 10px; width: calc(100% - 40px) !important; height: calc(100% - 20px) !important; }
 
         .terminal-panel { 
             flex: 1;
@@ -302,6 +335,35 @@
             cursor: pointer;
             text-transform: uppercase;
         }
+        .spike-mini-chart { height: 50px; margin-top: 8px; position: relative; }
+        .spike-mini-chart canvas { width: 100% !important; height: 50px !important; }
+
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border-dim); }
+        .stat-cell { background: var(--bg-card); padding: 10px 14px; }
+        .stat-label { font-size: 9px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 3px; }
+        .stat-value { font-family: var(--font-mono); font-size: 13px; font-weight: 700; }
+
+        .pnl-bar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 8px; background: var(--border-dim); }
+        .pnl-bar-realized { background: var(--color-up); transition: width 0.3s; }
+        .pnl-bar-unrealized { background: var(--color-neutral); transition: width 0.3s; }
+
+        .threshold-marker {
+            position: absolute;
+            top: 0; bottom: 0;
+            width: 1px;
+            background: var(--color-gold);
+            opacity: 0.6;
+            z-index: 3;
+        }
+        .threshold-label {
+            position: absolute;
+            top: 2px;
+            font-family: var(--font-mono);
+            font-size: 8px;
+            color: var(--color-gold);
+            opacity: 0.8;
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body>
@@ -319,39 +381,39 @@
                 </div>
                 <div class="setting-group">
                     <label class="setting-label">Portfolio Per Trade (%)</label>
-                    <input type="number" id="set-portfolio" class="setting-input" step="0.1" placeholder="e.g. 10">
-                </div>
-                <div class="setting-group">
-                    <label class="setting-label">Min Hold (ms)</label>
-                    <input type="number" id="set-minhold" class="setting-input" placeholder="e.g. 1500">
-                </div>
-                <div class="setting-group">
-                    <label class="setting-label">Timeout (ms)</label>
-                    <input type="number" id="set-timeout" class="setting-input" placeholder="e.g. 10000">
-                </div>
-                <div class="setting-group">
-                    <label class="setting-label">Profit Target (%)</label>
-                    <input type="number" id="set-profit" class="setting-input" step="0.1" placeholder="e.g. 0">
-                </div>
-                <div class="setting-group">
-                    <label class="setting-label">Trailing Stop (%)</label>
-                    <input type="number" id="set-trailing" class="setting-input" step="0.1" placeholder="e.g. 5">
-                </div>
-                <div class="setting-group">
-                    <label class="setting-label">Max Spread (BPS)</label>
-                    <input type="number" id="set-spread" class="setting-input" placeholder="e.g. 100">
+                    <input type="number" id="set-portfolio" class="setting-input" step="0.1" placeholder="e.g. 20">
                 </div>
                 <div class="setting-group">
                     <label class="setting-label">Max Entry Price</label>
                     <input type="number" id="set-maxprice" class="setting-input" step="0.01" placeholder="e.g. 0.70">
                 </div>
                 <div class="setting-group">
+                    <label class="setting-label">Trailing Stop (%)</label>
+                    <input type="number" id="set-trailing" class="setting-input" step="0.1" placeholder="e.g. 10">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Spike Faded Threshold</label>
+                    <input type="number" id="set-spiked-faded" class="setting-input" step="0.01" placeholder="e.g. 0.25">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Profit Target (%)</label>
+                    <input type="number" id="set-profit" class="setting-input" step="0.1" placeholder="e.g. 0">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Max Spread (BPS)</label>
+                    <input type="number" id="set-spread" class="setting-input" placeholder="e.g. 100">
+                </div>
+                <div class="setting-group">
                     <label class="setting-label">Spike Scaling Factor</label>
                     <input type="number" id="set-scaling" class="setting-input" step="0.0001" placeholder="e.g. 0.0001">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">EMA Alpha</label>
-                    <input type="number" id="set-ema" class="setting-input" step="0.01" placeholder="e.g. 0.1">
+                    <label class="setting-label">Fee Rate</label>
+                    <input type="number" id="set-fee" class="setting-input" step="0.001" placeholder="e.g. 0.072">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Execution Delay (ms)</label>
+                    <input type="number" id="set-delay" class="setting-input" placeholder="e.g. 300">
                 </div>
                 <button class="save-btn" onclick="saveSettings()">Save & Apply Changes</button>
             </div>
@@ -365,6 +427,10 @@
                 <h1>ARBTERMINAL <span style="color:var(--text-muted); font-weight:300;">// FLUX</span></h1>
             </div>
             <div class="header-actions">
+                <div class="mode-switcher">
+                    <button class="mode-btn active-sim" id="btn-sim" onclick="switchMode('sim')">SIM</button>
+                    <button class="mode-btn" id="btn-live" onclick="switchMode('live')"><span class="live-badge"></span>LIVE</button>
+                </div>
                 <button class="settings-btn" onclick="openSettings()">Settings</button>
                 <button id="toggle-btn" class="settings-btn" onclick="toggleBot()" style="border-color: var(--color-down); color: var(--color-down);">■ STOP</button>
                 <div class="status-pill">
@@ -380,8 +446,12 @@
                 <div class="m-value" id="v-portfolio">$0.00</div>
             </div>
             <div class="metric-mini">
-                <div class="m-label">Total Session PnL</div>
+                <div class="m-label">Total PnL</div>
                 <div class="m-value" id="v-total-pnl">$0.00</div>
+            </div>
+            <div class="metric-mini">
+                <div class="m-label">Realized PnL</div>
+                <div class="m-value" id="v-realized">$0.00</div>
             </div>
             <div class="metric-mini">
                 <div class="m-label">Unrealized PnL</div>
@@ -390,6 +460,7 @@
             <div class="metric-mini">
                 <div class="m-label">Win Rate</div>
                 <div class="m-value" id="v-winrate">0.0%</div>
+                <div style="font-size:10px; color:var(--text-muted); margin-top:2px;" id="v-trade-count">0 trades</div>
             </div>
             <div class="metric-mini">
                 <div class="m-label">Total Volume</div>
@@ -398,10 +469,6 @@
             <div class="metric-mini">
                 <div class="m-label">Total Fees</div>
                 <div class="m-value" id="v-fees">$0.00</div>
-            </div>
-            <div class="metric-mini">
-                <div class="m-label">Latency Adv.</div>
-                <div class="m-value" id="v-latency" style="color:var(--color-neutral);">0ms</div>
             </div>
         </div>
 
@@ -437,6 +504,11 @@
                         <div class="spike-viz">
                             <div class="spike-center"></div>
                             <div class="spike-fill" id="m-spike-fill"></div>
+                            <div class="threshold-marker" id="spike-threshold-pos" style="left:50%"></div>
+                            <div class="threshold-marker" id="spike-threshold-neg" style="left:50%"></div>
+                        </div>
+                        <div class="spike-mini-chart">
+                            <canvas id="spikeChart"></canvas>
                         </div>
                     </div>
                 </div>
@@ -448,6 +520,32 @@
                     <div style="font-family:var(--font-mono); font-size:10px;" id="count-open">0</div>
                 </div>
                 <div class="list-container" id="list-open"></div>
+            </div>
+
+            <div class="panel" style="flex-shrink:0;">
+                <div class="panel-header"><div class="panel-title">Trade Stats</div></div>
+                <div class="stats-grid" id="stats-grid">
+                    <div class="stat-cell"><div class="stat-label">Avg Win</div><div class="stat-value val-up" id="stat-avg-win">—</div></div>
+                    <div class="stat-cell"><div class="stat-label">Avg Loss</div><div class="stat-value val-down" id="stat-avg-loss">—</div></div>
+                    <div class="stat-cell"><div class="stat-label">Profit Factor</div><div class="stat-value" id="stat-pf">—</div></div>
+                    <div class="stat-cell"><div class="stat-label">Avg Hold</div><div class="stat-value" id="stat-hold">—</div></div>
+                </div>
+                <div style="padding: 10px 14px;">
+                    <div style="display:flex; justify-content:space-between; font-size:9px; color:var(--text-muted); margin-bottom:4px;">
+                        <span>REALIZED</span><span>UNREALIZED</span>
+                    </div>
+                    <div class="pnl-bar">
+                        <div class="pnl-bar-realized" id="pnl-bar-r" style="width:50%"></div>
+                        <div class="pnl-bar-unrealized" id="pnl-bar-u" style="width:50%"></div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:10px; margin-top:4px;">
+                        <span class="val-up" id="pnl-realized-label">$0.00</span>
+                        <span style="color:var(--color-neutral)" id="pnl-unrealized-label">$0.00</span>
+                    </div>
+                    <div style="font-size:9px; color:var(--text-muted); margin-top:6px;">
+                        Fee drag: <span id="stat-fee-drag" style="color:var(--color-gold);">0.00%</span>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -491,9 +589,33 @@
     <script>
         const formatMoney = (val) => '$' + Math.abs(val).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
         const formatMoneySigned = (val) => (val > 0 ? '+$' : val < 0 ? '-$' : '$') + Math.abs(val).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        const formatMs = (ms) => ms < 1000 ? ms + 'ms' : (ms/1000).toFixed(1) + 's';
         
+        // Mode switcher — SIM on :3000, LIVE on :3001
+        const PORTS = { sim: 3000, live: 3001 };
+        let currentMode = window.location.port === '3001' ? 'live' : 'sim';
+
+        const switchMode = (mode) => {
+            if (mode === currentMode) return;
+            const port = PORTS[mode];
+            window.location.href = `http://${window.location.hostname}:${port}`;
+        };
+
+        // Highlight active mode button on load
+        document.getElementById('btn-' + currentMode).classList.add(currentMode === 'live' ? 'active-live' : 'active-sim');
+        if (currentMode === 'live') {
+            document.getElementById('btn-sim').classList.remove('active-sim');
+        }
+
         let myChart = null;
+        let spikeChart = null;
         let startingBalance = 27.0;
+        const spikeHistory = { labels: [], data: [] };
+        const MAX_SPIKE_POINTS = 120;
+
+        // Position age timers
+        let positionEntryTimes = []; // ms timestamps
+        let ageInterval = null;
 
         const initChart = () => {
             const ctx = document.getElementById('mainChart').getContext('2d');
@@ -542,7 +664,55 @@
             });
         };
 
-        const openSettings = () => { document.getElementById('settings-modal').style.display = 'flex'; };
+        const initSpikeChart = () => {
+            const ctx = document.getElementById('spikeChart').getContext('2d');
+            spikeChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        data: [],
+                        borderWidth: 1,
+                        pointRadius: 0,
+                        fill: true,
+                        tension: 0.3,
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59,130,246,0.08)',
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: { duration: 0 },
+                    plugins: { legend: { display: false }, tooltip: { enabled: false } },
+                    scales: {
+                        x: { display: false },
+                        y: { display: false }
+                    }
+                }
+            });
+        };
+
+        const openSettings = async () => {
+            // Always fetch fresh .env values when opening settings
+            try {
+                const res = await fetch('/config');
+                if (res.ok) {
+                    const c = await res.json();
+                    const set = (id, val) => { if (val !== undefined) document.getElementById(id).value = val; };
+                    set('set-threshold', (c.threshold_bps / 100).toFixed(0));
+                    set('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
+                    set('set-maxprice', c.max_entry_price);
+                    set('set-profit', (c.profit_target_pct * 100).toFixed(1));
+                    set('set-trailing', c.trailing_stop_pct);
+                    set('set-spiked-faded', c.spike_faded_pct);
+                    set('set-spread', c.max_spread_bps);
+                    set('set-scaling', c.spike_scaling_factor);
+                    set('set-delay', c.execution_delay_ms);
+                }
+            } catch(e) {}
+            document.getElementById('settings-modal').style.display = 'flex';
+        };
         const closeSettings = () => { document.getElementById('settings-modal').style.display = 'none'; };
 
         const saveSettings = async () => {
@@ -555,14 +725,13 @@
                 _type: 'settings',
                 threshold_bps: Math.round(parseFloat(document.getElementById('set-threshold').value) * 100),
                 portfolio_pct: parseFloat(document.getElementById('set-portfolio').value) / 100,
-                min_hold_ms: parseInt(document.getElementById('set-minhold').value),
-                timeout_ms: parseInt(document.getElementById('set-timeout').value),
                 profit_target_pct: parseFloat(document.getElementById('set-profit').value) / 100,
                 trailing_stop_pct: parseFloat(document.getElementById('set-trailing').value),
+                spike_faded_pct: parseFloat(document.getElementById('set-spiked-faded').value),
                 max_spread_bps: parseInt(document.getElementById('set-spread').value),
                 max_entry_price: parseFloat(document.getElementById('set-maxprice').value),
                 spike_scaling_factor: parseFloat(document.getElementById('set-scaling').value),
-                ema_alpha: parseFloat(document.getElementById('set-ema').value),
+                execution_delay_ms: parseInt(document.getElementById('set-delay').value),
             };
 
             try {
@@ -640,14 +809,13 @@
                 };
                 setIfNotFocused('set-threshold', (c.threshold_bps / 100).toFixed(0));
                 setIfNotFocused('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
-                setIfNotFocused('set-minhold', c.min_hold_ms);
-                setIfNotFocused('set-timeout', c.timeout_ms);
                 setIfNotFocused('set-profit', (c.profit_target_pct * 100).toFixed(1));
                 setIfNotFocused('set-trailing', c.trailing_stop_pct);
+                setIfNotFocused('set-spiked-faded', c.spike_faded_pct);
                 setIfNotFocused('set-spread', c.max_spread_bps);
                 setIfNotFocused('set-maxprice', c.max_entry_price);
                 setIfNotFocused('set-scaling', c.spike_scaling_factor);
-                setIfNotFocused('set-ema', c.ema_alpha);
+                setIfNotFocused('set-delay', c.execution_delay_ms);
             }
 
             document.getElementById('v-portfolio').innerText = formatMoney(totalVal);
@@ -655,13 +823,16 @@
             document.getElementById('v-total-pnl').className = 'm-value ' + (totalPnL >= 0 ? 'val-up' : 'val-down');
             document.getElementById('v-unrealized').innerText = formatMoneySigned(unrealized);
             document.getElementById('v-unrealized').className = 'm-value ' + (unrealized >= 0 ? 'val-up' : 'val-down');
+            const realized = sim.realized_pnl || 0;
+            document.getElementById('v-realized').innerText = formatMoneySigned(realized);
+            document.getElementById('v-realized').className = 'm-value ' + (realized >= 0 ? 'val-up' : 'val-down');
             
             const wins = sim.wins || 0, losses = sim.losses || 0;
             const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100).toFixed(1) : '0.0';
             document.getElementById('v-winrate').innerText = wr + '%';
+            document.getElementById('v-trade-count').innerText = (wins + losses) + ' trades';
             document.getElementById('v-volume').innerText = formatMoney(sim.total_volume || 0);
             document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
-            document.getElementById('v-latency').innerText = (sim.latency_advantage_ms || 0) + 'ms';
 
             let marketData = {};
             if (sim.markets) {
@@ -682,6 +853,28 @@
             bar.style.left = m.spike >= 0 ? '50%' : (50 - spikeMag) + '%';
             bar.style.background = m.spike >= 0 ? 'var(--color-up)' : 'var(--color-down)';
 
+            // Threshold markers
+            if (sim.config) {
+                const threshUsd = sim.config.threshold_bps / 100;
+                const threshPct = Math.min(threshUsd / 100, 1) * 50;
+                document.getElementById('spike-threshold-pos').style.left = (50 + threshPct) + '%';
+                document.getElementById('spike-threshold-neg').style.left = (50 - threshPct) + '%';
+            }
+
+            // Spike mini-chart
+            if (spikeChart) {
+                const now = new Date().toLocaleTimeString([], {hour12:false});
+                spikeHistory.labels.push(now);
+                spikeHistory.data.push(m.spike || 0);
+                if (spikeHistory.labels.length > MAX_SPIKE_POINTS) {
+                    spikeHistory.labels.shift();
+                    spikeHistory.data.shift();
+                }
+                spikeChart.data.labels = spikeHistory.labels;
+                spikeChart.data.datasets[0].data = spikeHistory.data;
+                spikeChart.update();
+            }
+
             if (m.end_ts) {
                 const remaining = Math.max(0, m.end_ts - Math.floor(Date.now() / 1000));
                 const mins = Math.floor(remaining / 60), secs = remaining % 60;
@@ -689,13 +882,43 @@
             }
 
             document.getElementById('count-open').innerText = posArr.length;
+            positionEntryTimes = posArr.map(p => Date.now() - (p.held_ms || 0));
             document.getElementById('list-open').innerHTML = posArr.map((p, idx) => `
                 <div class="pos-item">
-                    <div class="pos-top"><span>${p.side} · LVL ${p.level || 1}</span><span class="pos-pnl ${p.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(p.pnl)}</span></div>
+                    <div class="pos-top">
+                        <span style="font-family:var(--font-mono); font-size:11px; font-weight:700;">BTC 5M ${p.side}</span>
+                        <span class="pos-pnl ${p.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(p.pnl)}</span>
+                    </div>
                     <div style="font-size:10px; color:var(--text-dim);">${p.shares.toFixed(2)} SH @ ${p.entry_price.toFixed(4)} · NOW ${p.current_price.toFixed(4)}</div>
+                    <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">LVL ${p.level || 1} · <span class="pos-age" data-idx="${idx}">${formatMs(p.held_ms || 0)}</span></div>
                     <button class="pos-close-btn" onclick="closePosition(${idx})">CLOSE</button>
                 </div>
             `).join('');
+
+            // Trade stats
+            const exits = (sim.trades || []).filter(t => t.type === 'exit');
+            const winTrades = exits.filter(t => t.pnl > 0);
+            const lossTrades = exits.filter(t => t.pnl <= 0);
+            const avgWin = winTrades.length ? winTrades.reduce((s,t) => s + t.pnl, 0) / winTrades.length : null;
+            const avgLoss = lossTrades.length ? lossTrades.reduce((s,t) => s + t.pnl, 0) / lossTrades.length : null;
+            const grossWin = winTrades.reduce((s,t) => s + t.pnl, 0);
+            const grossLoss = Math.abs(lossTrades.reduce((s,t) => s + t.pnl, 0));
+            const pf = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? '∞' : '—';
+            document.getElementById('stat-avg-win').innerText = avgWin !== null ? formatMoneySigned(avgWin) : '—';
+            document.getElementById('stat-avg-loss').innerText = avgLoss !== null ? formatMoneySigned(avgLoss) : '—';
+            document.getElementById('stat-pf').innerText = pf;
+            document.getElementById('stat-pf').className = 'stat-value ' + (parseFloat(pf) >= 1 ? 'val-up' : 'val-down');
+
+            // PnL breakdown bar
+            const realizedAbs = Math.abs(realized);
+            const unrealizedAbs = Math.abs(unrealized);
+            const total = realizedAbs + unrealizedAbs || 1;
+            document.getElementById('pnl-bar-r').style.width = (realizedAbs / total * 100) + '%';
+            document.getElementById('pnl-bar-u').style.width = (unrealizedAbs / total * 100) + '%';
+            document.getElementById('pnl-realized-label').innerText = formatMoneySigned(realized);
+            document.getElementById('pnl-unrealized-label').innerText = formatMoneySigned(unrealized);
+            const feeDrag = (sim.total_volume || 0) > 0 ? ((sim.total_fees || 0) / (sim.total_volume || 1) * 100).toFixed(3) : '0.000';
+            document.getElementById('stat-fee-drag').innerText = feeDrag + '%';
 
             const trades = (sim.trades || []).slice().reverse().slice(0, 30);
             document.getElementById('list-trades').innerHTML = trades.map(t => {
@@ -738,16 +961,23 @@
                 </div>
             `).join('');
 
-            const settled = (sim.trades || []).filter(t => t.type === 'exit').slice().reverse().slice(0, 10);
-            document.getElementById('list-settled').innerHTML = settled.map(t => `
+            const settled = (sim.trades || []).filter(t => t.type === 'exit').slice().reverse();
+            document.getElementById('list-settled').innerHTML = settled.map(t => {
+                const pnlPct = t.entry_price && t.exit_price
+                    ? ((t.exit_price - t.entry_price) / t.entry_price * 100 * (t.direction === 'DOWN' ? -1 : 1)).toFixed(2)
+                    : '0.00';
+                return `
                 <div class="trade-item">
                     <div class="t-left">
-                        <div class="t-info" style="color:#fff; font-weight:600;">${t.pnl>=0?'PROFIT':'LOSS'}</div>
-                        <div class="t-info">${t.close_reason}</div>
+                        <div class="t-type ${t.pnl>=0?'t-win':'t-loss'}">${t.direction}</div>
+                        <div class="t-info" style="color:var(--text-dim); font-size:10px;">${t.close_reason || ''}</div>
                     </div>
-                    <div class="t-price ${t.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(t.pnl)}</div>
-                </div>
-            `).join('');
+                    <div class="t-price ${t.pnl>=0?'val-up':'val-down'}">
+                        ${formatMoneySigned(t.pnl)}
+                        <div style="font-size:9px; font-weight:400;">${pnlPct}%</div>
+                    </div>
+                </div>`;
+            }).join('');
 
             if (sim.history && sim.history.length > 0) {
                 myChart.data.labels = sim.history.map(h => h.t);
@@ -779,6 +1009,18 @@
         };
 
         initChart();
+        initSpikeChart();
+
+        // Live age timer — updates position hold times every second without a full re-render
+        setInterval(() => {
+            document.querySelectorAll('.pos-age').forEach(el => {
+                const idx = parseInt(el.dataset.idx);
+                if (positionEntryTimes[idx] !== undefined) {
+                    el.innerText = formatMs(Date.now() - positionEntryTimes[idx]);
+                }
+            });
+        }, 1000);
+
         connect();
     </script>
 </body>
