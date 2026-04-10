@@ -13,17 +13,14 @@ use serde_json::{json, Value};
 struct SymbolState {
     pub last_binance: Option<(f64, Instant)>,
     pub last_chainlink: Option<(f64, Instant)>,
-    pub ema_offset: f64,
-    pub has_ema: bool,
-    pub ema_ticks: u32,
     pub last_spike_usd: f64,
     pub market_end_ts: Option<u64>,
     pub question: String,
     pub price_to_beat: Option<f64>,
-    pub price_to_beat_set: bool, // true once we've captured the opening Chainlink price
-    pub btc_history: Vec<(f64, Instant)>, // (price, time) for 500ms momentum
+    pub price_to_beat_set: bool,
+    pub btc_history: Vec<(f64, Instant)>,
     pub last_rejection: Option<(String, Instant)>,
-    pub spike_confirmed_since: Option<(f64, Instant)>, // (direction_sign, time spike first exceeded threshold)
+    pub spike_confirmed_since: Option<(f64, Instant)>,
 }
 
 pub struct ArbEngine {
@@ -34,9 +31,7 @@ pub struct ArbEngine {
     broadcast_tx: broadcast::Sender<String>,
     cmd_rx: mpsc::Receiver<serde_json::Value>,
     pub wallet: PaperWallet,
-    last_trade_time: Option<Instant>,
     symbol_states: HashMap<String, SymbolState>,
-    last_clob_update_ts: Option<Instant>,
     history: Vec<Value>,
     signals: Vec<Value>,
     running: bool,
@@ -61,9 +56,7 @@ impl ArbEngine {
             broadcast_tx,
             cmd_rx,
             wallet,
-            last_trade_time: None,
             symbol_states: HashMap::new(),
-            last_clob_update_ts: None,
             history: Vec::new(),
             signals: Vec::new(),
             running: true,
@@ -351,11 +344,9 @@ impl ArbEngine {
             if update.source == "binance" {
                 state.last_binance = Some((update.price, update.timestamp));
                 state.btc_history.push((update.price, Instant::now()));
-                // Keep only last 2 seconds of history
                 state.btc_history.retain(|(_, t)| t.elapsed().as_millis() < 2000);
             } else {
                 state.last_chainlink = Some((update.price, update.timestamp));
-                state.ema_ticks += 1;
                 if !state.price_to_beat_set {
                     state.price_to_beat = Some(update.price);
                     state.price_to_beat_set = true;
@@ -364,14 +355,31 @@ impl ArbEngine {
             }
         }
 
-        let state = self.symbol_states.get(&update.symbol).unwrap();
-        if let (Some((b, _)), Some((c, _))) = (state.last_binance, state.last_chainlink) {
-            self.wallet.update_btc_prices(&update.symbol, b, c);
-            if self.running { self.check_for_spike(&update.symbol).await; }
-        }
-
         if update.source == "binance" {
             let symbol = update.symbol.clone();
+
+            // Compute fast spike and push to wallet's spike_history for exit decisions
+            let fast_spike = {
+                let s = self.symbol_states.get(&symbol).unwrap();
+                let cutoff = std::time::Duration::from_millis(200);
+                s.btc_history.iter()
+                    .find(|(_, t)| t.elapsed() >= cutoff)
+                    .map(|(p, _)| update.price - p)
+            };
+            if let Some(momentum) = fast_spike {
+                self.wallet.push_spike_momentum(&symbol, momentum);
+            }
+
+            let (b, c) = {
+                let s = self.symbol_states.get(&symbol).unwrap();
+                (s.last_binance.map(|(p,_)| p).unwrap_or(0.0),
+                 s.last_chainlink.map(|(p,_)| p).unwrap_or(0.0))
+            };
+            if b > 0.0 && c > 0.0 {
+                self.wallet.update_btc_prices(&symbol, b, c);
+                if self.running { self.check_for_spike(&symbol).await; }
+            }
+
             let (ptb, end_ts, btc_hist) = {
                 let s = self.symbol_states.get(&symbol);
                 (
@@ -393,12 +401,9 @@ impl ArbEngine {
     }
 
     async fn handle_clob_update(&mut self, update: SharePriceUpdate) -> bool {
-        self.last_clob_update_ts = Some(Instant::now());
         self.wallet.update_share_price(&update.symbol, &update.direction, update.best_bid, update.best_ask);
         self.wallet.flush_pending();
-        let closed = self.wallet.try_close_position().await;
-        if self.running { self.check_for_spike(&update.symbol).await; }
-        closed
+        self.wallet.try_close_position().await
     }
 
     pub async fn handle_market_update(&mut self, market: MarketData) {
@@ -502,7 +507,7 @@ impl ArbEngine {
         if abs_spike > state.last_spike_usd * 1.1 {
             let spread_bps = (((ask - bid) / ((bid + ask) / 2.0)) * 10000.0) as u64;
             let ema_offset = 0.0;
-            match self.wallet.open_position(symbol, direction, binance, chainlink, adjusted_spike, ema_offset, spread_bps, threshold_usd) {
+            match self.wallet.open_position(symbol, direction, adjusted_spike, threshold_usd) {
                 Ok(level) => {
                     let level_str = format!("LEVEL_{}", level);
                     state.last_spike_usd = abs_spike;

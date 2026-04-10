@@ -13,14 +13,10 @@ pub struct OpenPosition {
     pub shares: f64,
     pub position_size: f64,
     pub buy_fee: f64,
-    pub entry_binance: f64,
-    pub entry_chainlink: f64,
     pub entry_spike: f64,
-    pub ema_offset_at_entry: f64,
     #[serde(skip)]
     pub entry_time: std::time::Instant,
     pub highest_price: f64,
-    pub profit_target: f64,
     pub scale_level: u32,
     pub hold_to_resolution: bool,
 }
@@ -57,15 +53,12 @@ struct SymbolMarketState {
 pub struct PendingEntry {
     pub symbol: String,
     pub direction: String,
-    pub binance: f64,
-    pub chainlink: f64,
     pub spike: f64,
     pub entry_price: f64,
     pub scale_level: u32,
     pub position_size: f64,
     pub shares: f64,
     pub buy_fee: f64,
-    pub profit_target: f64,
     pub submitted_at: Instant,
 }
 
@@ -146,15 +139,16 @@ impl PaperWallet {
 
     pub fn update_btc_prices(&mut self, symbol: &str, binance: f64, chainlink: f64) {
         let state = self.symbol_states.entry(symbol.to_string()).or_default();
-        let prev_binance = state.last_binance;
         state.last_binance = binance;
         state.last_chainlink = chainlink;
-        // Store Binance momentum (delta from previous tick) for exit smoothing
-        if prev_binance > 0.0 {
-            let delta = binance - prev_binance;
-            state.spike_history.push(delta);
-            if state.spike_history.len() > 5 { state.spike_history.remove(0); }
-        }
+        // spike_history is updated by engine via update_spike_momentum
+    }
+
+    /// Push the current 200ms momentum value into spike_history for exit smoothing
+    pub fn push_spike_momentum(&mut self, symbol: &str, momentum: f64) {
+        let state = self.symbol_states.entry(symbol.to_string()).or_default();
+        state.spike_history.push(momentum);
+        if state.spike_history.len() > 5 { state.spike_history.remove(0); }
     }
 
     /// Called by engine on each Binance tick to evaluate hold-to-resolution for open positions
@@ -342,7 +336,7 @@ impl PaperWallet {
         true
     }
 
-    pub fn open_position(&mut self, symbol: &str, direction: &str, binance: f64, chainlink: f64, spike: f64, ema_offset: f64, _spread_bps: u64, threshold_usd: f64) -> std::result::Result<u32, String> {
+    pub fn open_position(&mut self, symbol: &str, direction: &str, spike: f64, threshold_usd: f64) -> std::result::Result<u32, String> {
         let existing: Vec<_> = self.open_positions.iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
             .collect();
@@ -371,15 +365,12 @@ impl PaperWallet {
         self.pending_entries.push(PendingEntry {
             symbol: symbol.to_string(),
             direction: direction.to_string(),
-            binance,
-            chainlink,
             spike,
             entry_price,
             scale_level,
             position_size,
             shares,
             buy_fee,
-            profit_target,
             submitted_at: Instant::now(),
         });
 
@@ -425,13 +416,9 @@ impl PaperWallet {
                 shares: p.shares,
                 position_size: p.position_size,
                 buy_fee: p.buy_fee,
-                entry_binance: p.binance,
-                entry_chainlink: p.chainlink,
                 entry_spike: p.spike,
-                ema_offset_at_entry: 0.0,
                 entry_time: Instant::now(),
                 highest_price: p.entry_price,
-                profit_target: p.profit_target,
                 scale_level: p.scale_level,
                 hold_to_resolution: false,
             });

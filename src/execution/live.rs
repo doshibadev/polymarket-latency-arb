@@ -156,13 +156,9 @@ impl LiveWallet {
             shares,
             position_size,
             buy_fee,
-            entry_binance: binance,
-            entry_chainlink: chainlink,
             entry_spike: spike,
-            ema_offset_at_entry: 0.0, // live wallet doesn't track EMA; close logic uses order book directly
             entry_time: Instant::now(),
             highest_price: entry_price,
-            profit_target,
             scale_level,
             hold_to_resolution: false,
         });
