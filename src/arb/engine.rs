@@ -433,7 +433,10 @@ impl ArbEngine {
         if update.source == "binance" {
             let symbol = update.symbol.clone();
 
-            // Compute fast spike and push to wallet's spike_history for exit decisions
+            // Push BTC price to wallet for long-baseline spike calculation (every tick)
+            self.wallet.push_btc_price(&symbol, update.price);
+
+            // Compute fast spike for entry detection
             let fast_spike = {
                 let s = self.symbol_states.get(&symbol).unwrap();
                 let cutoff = std::time::Duration::from_millis(200);
@@ -442,7 +445,7 @@ impl ArbEngine {
                     .map(|(p, _)| update.price - p)
             };
             if let Some(momentum) = fast_spike {
-                self.wallet.push_spike_momentum(&symbol, momentum, update.price);
+                self.wallet.push_spike_momentum(&symbol, momentum);
             }
 
             let (b, c) = {

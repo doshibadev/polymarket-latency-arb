@@ -185,32 +185,32 @@ impl PaperWallet {
         // spike_history is updated by engine via update_spike_momentum
     }
 
-    /// Push the current momentum value into ring buffer for exit smoothing
-    /// Also push BTC price for long-baseline spike calculation
-    pub fn push_spike_momentum(&mut self, symbol: &str, momentum: f64, btc_price: f64) {
+    /// Push BTC price for long-baseline spike calculation (called every tick)
+    pub fn push_btc_price(&mut self, symbol: &str, btc_price: f64) {
         let state = self.symbol_states.entry(symbol.to_string()).or_default();
-        
-        // Ring buffer for spike momentum
-        state.spike_history[state.spike_history_idx] = momentum;
-        state.spike_history_idx = (state.spike_history_idx + 1) % 16;
-        if state.spike_history_len < 16 { state.spike_history_len += 1; }
-        
-        // Ring buffer for BTC price history (for long-baseline spike)
         state.btc_price_history[state.btc_history_idx] = (btc_price, Instant::now());
         state.btc_history_idx = (state.btc_history_idx + 1) % 64;
         if state.btc_history_len < 64 { state.btc_history_len += 1; }
     }
     
-    /// Get spike measured from 1.5s ago (matches Polymarket delay)
+    /// Push the current momentum value into ring buffer for exit smoothing
+    pub fn push_spike_momentum(&mut self, symbol: &str, momentum: f64) {
+        let state = self.symbol_states.entry(symbol.to_string()).or_default();
+        state.spike_history[state.spike_history_idx] = momentum;
+        state.spike_history_idx = (state.spike_history_idx + 1) % 16;
+        if state.spike_history_len < 16 { state.spike_history_len += 1; }
+    }
+    
+    /// Get spike measured from 1.0s ago (matches Polymarket delay window)
     fn get_long_baseline_spike(&self, symbol: &str, current_price: f64) -> f64 {
         let state = match self.symbol_states.get(symbol) {
             Some(s) => s,
             None => return 0.0,
         };
-        let cutoff = std::time::Duration::from_millis(1500);
+        let cutoff = std::time::Duration::from_millis(1000);
         let now = Instant::now();
         
-        // Find price from ~1.5s ago
+        // Find price from ~1.0s ago
         for i in 0..state.btc_history_len {
             let idx = if state.btc_history_idx >= i + 1 {
                 state.btc_history_idx - i - 1
