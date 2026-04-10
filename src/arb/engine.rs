@@ -133,9 +133,9 @@ impl ArbEngine {
             let binance = state.last_binance.map(|(p, _)| p).unwrap_or(0.0);
             let chainlink = state.last_chainlink.map(|(p, _)| p).unwrap_or(0.0);
 
-            // Spike delta = Binance momentum over last 1 second
+            // Spike delta = Binance momentum over last 500ms
             let spike = {
-                let cutoff = std::time::Duration::from_millis(1000);
+                let cutoff = std::time::Duration::from_millis(500);
                 let baseline = state.btc_history.iter()
                     .find(|(_, t)| t.elapsed() >= cutoff)
                     .map(|(p, _)| *p);
@@ -425,16 +425,30 @@ impl ArbEngine {
         // Need to re-fetch state to modify it
         let state = self.symbol_states.get_mut(symbol).unwrap();
 
-        // Use Binance momentum (rate of change) as spike signal, not Binance-Chainlink gap
-        let adjusted_spike = {
-            let cutoff = std::time::Duration::from_millis(1000);
+        // Dual-window spike detection:
+        // Fast (200ms): detects spike early, starts sustain timer
+        // Slow (1000ms): confirms spike is real and not a flash reversal
+        let fast_spike = {
+            let cutoff = std::time::Duration::from_millis(200);
             let baseline = state.btc_history.iter()
                 .find(|(_, t)| t.elapsed() >= cutoff)
                 .map(|(p, _)| *p);
             match baseline { Some(b) => binance - b, None => return }
         };
+
+        let slow_spike = {
+            let cutoff = std::time::Duration::from_millis(1000);
+            state.btc_history.iter()
+                .find(|(_, t)| t.elapsed() >= cutoff)
+                .map(|(p, _)| binance - p)
+                .unwrap_or(fast_spike) // fall back to fast if not enough history
+        };
+
+        // Use fast spike for direction/magnitude, slow spike for confirmation
+        let adjusted_spike = fast_spike;
         let abs_spike = adjusted_spike.abs();
         let threshold_usd = self.config.threshold_bps as f64 / 100.0;
+        let confirmed = slow_spike.signum() == fast_spike.signum() && slow_spike.abs() >= threshold_usd * 0.5;
 
         if abs_spike < threshold_usd { 
             state.last_spike_usd = 0.0;
@@ -454,7 +468,7 @@ impl ArbEngine {
             }
         };
 
-        if !spike_sustained {
+        if !spike_sustained || !confirmed {
             return;
         }
         let (bid, ask) = self.wallet.get_bid_ask(symbol, direction);
