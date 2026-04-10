@@ -350,6 +350,10 @@ impl PaperWallet {
         let entry_price = self.get_share_price(symbol, direction);
         if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }
         if entry_price > self.config.max_entry_price { return Err("PRICE_TOO_HIGH".to_string()); }
+        if entry_price < self.config.min_entry_price { return Err("PRICE_TOO_LOW".to_string()); }
+        if (entry_price - 0.5).abs() < self.config.min_price_distance {
+            return Err("PRICE_TOO_CLOSE_TO_HALF".to_string());
+        }
 
         let position_size = self.balance * self.portfolio_pct * (1.0 / scale_level as f64);
         let shares = position_size / entry_price;

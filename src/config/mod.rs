@@ -18,7 +18,9 @@ pub struct AppConfig {
     pub execution_delay_ms: u64,
     pub hold_margin_per_second: f64, // required $ margin per second remaining to hold to resolution
     pub hold_max_seconds: u64,       // only activate hold mode when <= this many seconds remain
-    pub hold_max_crossings: usize,   // max price-to-beat crossings in history before refusing to hold
+    pub hold_max_crossings: usize,
+    pub min_price_distance: f64,
+    pub min_entry_price: f64,
 }
 
 impl AppConfig {
@@ -42,6 +44,8 @@ impl AppConfig {
             hold_margin_per_second: env::var("HOLD_MARGIN_PER_SECOND").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5),
             hold_max_seconds: env::var("HOLD_MAX_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(90),
             hold_max_crossings: env::var("HOLD_MAX_CROSSINGS").ok().and_then(|v| v.parse().ok()).unwrap_or(2),
+            min_price_distance: env::var("MIN_PRICE_DISTANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.05),
+            min_entry_price: env::var("MIN_ENTRY_PRICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.10),
         })
     }
 
