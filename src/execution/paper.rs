@@ -146,11 +146,15 @@ impl PaperWallet {
 
     pub fn update_btc_prices(&mut self, symbol: &str, binance: f64, chainlink: f64) {
         let state = self.symbol_states.entry(symbol.to_string()).or_default();
+        let prev_binance = state.last_binance;
         state.last_binance = binance;
         state.last_chainlink = chainlink;
-        let spike = binance - chainlink;
-        state.spike_history.push(spike);
-        if state.spike_history.len() > 5 { state.spike_history.remove(0); }
+        // Store Binance momentum (delta from previous tick) for exit smoothing
+        if prev_binance > 0.0 {
+            let delta = binance - prev_binance;
+            state.spike_history.push(delta);
+            if state.spike_history.len() > 5 { state.spike_history.remove(0); }
+        }
     }
 
     /// Called by engine on each Binance tick to evaluate hold-to-resolution for open positions
@@ -247,9 +251,9 @@ impl PaperWallet {
             if current_price <= 0.0 { continue; }
 
             let state = self.symbol_states.get(&pos.symbol).cloned().unwrap_or_default();
-            // Use smoothed spike (avg of last 5 ticks) to avoid single-tick noise triggering exits
+            // Use smoothed Binance momentum for exit decisions
             let adjusted_spike = if state.spike_history.is_empty() {
-                state.last_binance - state.last_chainlink
+                0.0
             } else {
                 state.spike_history.iter().sum::<f64>() / state.spike_history.len() as f64
             };
@@ -339,7 +343,7 @@ impl PaperWallet {
             .count();
         let scale_level = (existing.len() + pending_same) as u32 + 1;
 
-        if scale_level > 3 { return Err("MAX_SCALE_LEVEL".to_string()); }
+        if scale_level > 1 { return Err("MAX_SCALE_LEVEL".to_string()); }
 
         let entry_price = self.get_share_price(symbol, direction);
         if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }

@@ -32,28 +32,47 @@ async fn run_binance_direct(tx: mpsc::Sender<PriceUpdate>) -> Result<(), Box<dyn
         match connect_async(url).await {
             Ok((ws_stream, _)) => {
                 info!("Direct Binance WebSocket connected");
-                let (_, mut read) = ws_stream.split();
-                while let Some(Ok(Message::Text(text))) = read.next().await {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(price_str) = val.get("p").and_then(|v| v.as_str()) {
-                            if let Ok(price) = price_str.parse::<f64>() {
-                                let _ = tx.send(PriceUpdate {
-                                    symbol: "BTC".to_string(),
-                                    price,
-                                    timestamp: Instant::now(),
-                                    source: "binance".to_string(),
-                                }).await;
+                let (mut write, mut read) = ws_stream.split();
+                let mut ping_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+                loop {
+                    tokio::select! {
+                        msg = read.next() => {
+                            match msg {
+                                Some(Ok(Message::Text(text))) => {
+                                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                                        if let Some(price_str) = val.get("p").and_then(|v| v.as_str()) {
+                                            if let Ok(price) = price_str.parse::<f64>() {
+                                                let _ = tx.send(PriceUpdate {
+                                                    symbol: "BTC".to_string(),
+                                                    price,
+                                                    timestamp: Instant::now(),
+                                                    source: "binance".to_string(),
+                                                }).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                Some(Ok(Message::Ping(payload))) => {
+                                    let _ = write.send(Message::Pong(payload)).await;
+                                }
+                                Some(Ok(Message::Close(_))) | None => break,
+                                Some(Err(e)) => { error!("Direct Binance error: {}", e); break; }
+                                _ => {}
                             }
+                        }
+                        _ = ping_interval.tick() => {
+                            if write.send(Message::Ping(vec![].into())).await.is_err() { break; }
                         }
                     }
                 }
-                error!("Direct Binance WebSocket disconnected, reconnecting...");
+                error!("Direct Binance WebSocket disconnected, reconnecting in 1s...");
             }
             Err(e) => {
                 error!("Direct Binance connect failed: {}, retrying in 3s", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             }
         }
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
 }
 
@@ -70,6 +89,12 @@ impl RtdsStream {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = "wss://ws-live-data.polymarket.com";
         info!("Connecting to Polymarket RTDS: {}", url);
+
+        // Spawn direct Binance stream once — it manages its own reconnects
+        let tx_binance = tx.clone();
+        tokio::spawn(async move {
+            let _ = run_binance_direct(tx_binance).await;
+        });
 
         loop {
             if let Err(e) = self.connect_and_stream(&url, &tx).await {
@@ -105,12 +130,6 @@ impl RtdsStream {
         ws_stream.send(Message::Text(chainlink_sub.to_string().into())).await?;
 
         info!("RTDS connected, subscribed to BTC (Binance & Chainlink)");
-
-        // Also spawn a direct Binance WebSocket for lower latency Binance prices
-        let tx_binance = tx.clone();
-        tokio::spawn(async move {
-            let _ = run_binance_direct(tx_binance).await;
-        });
         let (mut write, mut read) = ws_stream.split();
         let mut heartbeat = tokio::time::interval(tokio::time::Duration::from_secs(5));
 

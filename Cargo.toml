@@ -3,6 +3,15 @@ name = "polymarket-latency-arb"
 version = "0.1.0"
 edition = "2021"
 
+[profile.dev]
+opt-level = 0
+debug = 0        # skip debug symbols = faster link
+
+[profile.release]
+opt-level = 3
+lto = "thin"     # faster than full LTO, still good optimization
+codegen-units = 1
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive", "rc"] }

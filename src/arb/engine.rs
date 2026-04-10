@@ -20,7 +20,8 @@ struct SymbolState {
     pub market_end_ts: Option<u64>,
     pub question: String,
     pub price_to_beat: Option<f64>,
-    pub btc_history: Vec<f64>, // rolling ~30 ticks for trend/crossing analysis
+    pub price_to_beat_set: bool, // true once we've captured the opening Chainlink price
+    pub btc_history: Vec<(f64, Instant)>, // (price, time) for 500ms momentum
     pub last_rejection: Option<(String, Instant)>,
 }
 
@@ -131,14 +132,24 @@ impl ArbEngine {
             let binance = state.last_binance.map(|(p, _)| p).unwrap_or(0.0);
             let chainlink = state.last_chainlink.map(|(p, _)| p).unwrap_or(0.0);
 
+            // Spike delta = Binance momentum over last 500ms
+            let spike = {
+                let cutoff = std::time::Duration::from_millis(500);
+                let baseline = state.btc_history.iter()
+                    .find(|(_, t)| t.elapsed() >= cutoff)
+                    .map(|(p, _)| *p);
+                match baseline { Some(b) => binance - b, None => 0.0 }
+            };
+
             markets.insert(symbol.clone(), json!({
                 "question": state.question,
                 "up_price": (up_b + up_a) / 2.0,
                 "down_price": (dn_b + dn_a) / 2.0,
                 "binance": binance,
                 "chainlink": chainlink,
-                "spike": binance - chainlink,
+                "spike": spike,
                 "ema_offset": 0.0,
+                "price_to_beat": state.price_to_beat,
                 "end_ts": state.market_end_ts
             }));
         }
@@ -338,11 +349,17 @@ impl ArbEngine {
             let state = self.symbol_states.entry(update.symbol.clone()).or_default();
             if update.source == "binance" {
                 state.last_binance = Some((update.price, update.timestamp));
-                state.btc_history.push(update.price);
-                if state.btc_history.len() > 30 { state.btc_history.remove(0); }
+                state.btc_history.push((update.price, Instant::now()));
+                // Keep only last 2 seconds of history
+                state.btc_history.retain(|(_, t)| t.elapsed().as_millis() < 2000);
             } else {
                 state.last_chainlink = Some((update.price, update.timestamp));
                 state.ema_ticks += 1;
+                if !state.price_to_beat_set {
+                    state.price_to_beat = Some(update.price);
+                    state.price_to_beat_set = true;
+                    info!(symbol=%update.symbol, price_to_beat=update.price, "Price to beat set from first Chainlink tick");
+                }
             }
         }
 
@@ -359,7 +376,7 @@ impl ArbEngine {
                 (
                     s.and_then(|s| s.price_to_beat),
                     s.and_then(|s| s.market_end_ts),
-                    s.map(|s| s.btc_history.clone()).unwrap_or_default(),
+                    s.map(|s| s.btc_history.iter().map(|(p,_)| *p).collect::<Vec<_>>()).unwrap_or_default(),
                 )
             };
             self.wallet.update_hold_status(
@@ -388,15 +405,8 @@ impl ArbEngine {
         state.market_end_ts = Some(market.window_end_ts);
         state.question = market.question.clone();
         // Parse price to beat from question e.g. "Will BTC be above $83,450.00 at 14:35?"
-        state.price_to_beat = market.question
-            .split('$')
-            .nth(1)
-            .and_then(|s| s.split_whitespace().next())
-            .map(|s| s.replace(',', ""))
-            .and_then(|s| s.parse::<f64>().ok());
-        if let Some(ptb) = state.price_to_beat {
-            info!(symbol=%market.symbol, price_to_beat=ptb, "Market price to beat parsed");
-        }
+        state.price_to_beat = None; // will be set from first Chainlink tick of new window
+        state.price_to_beat_set = false;
         state.btc_history.clear();
         self.wallet.set_market_info(&market.symbol, market.question);
         self.wallet.reset_prices(&market.symbol);
@@ -413,15 +423,17 @@ impl ArbEngine {
 
         // Need to re-fetch state to modify it
         let state = self.symbol_states.get_mut(symbol).unwrap();
-        
-        let adjusted_spike = binance - chainlink;
+
+        // Use Binance momentum (rate of change) as spike signal, not Binance-Chainlink gap
+        let adjusted_spike = {
+            let cutoff = std::time::Duration::from_millis(500);
+            let baseline = state.btc_history.iter()
+                .find(|(_, t)| t.elapsed() >= cutoff)
+                .map(|(p, _)| *p);
+            match baseline { Some(b) => binance - b, None => return }
+        };
         let abs_spike = adjusted_spike.abs();
         let threshold_usd = self.config.threshold_bps as f64 / 100.0;
-
-        // Don't trade until EMA has warmed up (avoid initialization artifacts)
-        if state.ema_ticks < 10 {
-            return;
-        }
 
         if abs_spike < threshold_usd { 
             state.last_spike_usd = 0.0; 

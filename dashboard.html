@@ -195,9 +195,9 @@
         .m-label { font-size: 9px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px; }
         .m-value { font-family: var(--font-mono); font-size: 16px; font-weight: 700; }
 
-        .left-side { display: flex; flex-direction: column; gap: 20px; height: 860px; }
+        .left-side { display: flex; flex-direction: column; gap: 20px; min-height: 860px; }
         .center-side { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
-        .right-side { display: flex; flex-direction: column; gap: 20px; height: 860px; }
+        .right-side { display: flex; flex-direction: column; gap: 20px; min-height: 860px; }
 
         .market-summary { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
         .m-question { font-size: 13px; font-weight: 500; line-height: 1.4; }
@@ -473,7 +473,7 @@
         </div>
 
         <div class="left-side">
-            <div class="panel">
+            <div class="panel" style="flex-shrink:0;">
                 <div class="panel-header"><div class="panel-title">Active Market</div></div>
                 <div class="market-summary">
                     <div class="m-question" id="m-question">FETCHING MARKET DATA...</div>
@@ -486,6 +486,10 @@
                     <div class="price-line">
                         <span class="p-label">CHAINLINK BTC</span>
                         <span class="p-val" id="m-chainlink">$0.00</span>
+                    </div>
+                    <div class="price-line">
+                        <span class="p-label">PRICE TO BEAT</span>
+                        <span class="p-val" style="color:var(--color-gold);" id="m-ptb">—</span>
                     </div>
                     <div class="price-line">
                         <span class="p-label">POLY UP</span>
@@ -514,7 +518,7 @@
                 </div>
             </div>
 
-            <div class="panel" style="flex:1; min-height:0; overflow:hidden;">
+            <div class="panel" style="height:250px; overflow:hidden;">
                 <div class="panel-header">
                     <div class="panel-title">Open Positions</div>
                     <div style="font-family:var(--font-mono); font-size:10px;" id="count-open">0</div>
@@ -570,7 +574,7 @@
         </div>
 
         <div class="right-side">
-            <div class="panel" style="flex:1; min-height:0; overflow:hidden;">
+            <div class="panel" style="height:400px; overflow:hidden;">
                 <div class="panel-header">
                     <div class="panel-title">Execution Log</div>
                 </div>
@@ -843,6 +847,12 @@
             document.getElementById('m-question').innerText = (m.question || 'AWAITING DATA...').toUpperCase();
             document.getElementById('m-binance').innerText = '$' + (m.binance || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
             document.getElementById('m-chainlink').innerText = '$' + (m.chainlink || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+            if (m.price_to_beat) {
+                const margin = (m.binance || 0) - m.price_to_beat;
+                const sign = margin >= 0 ? '+' : '';
+                document.getElementById('m-ptb').innerText = '$' + m.price_to_beat.toLocaleString(undefined, {minimumFractionDigits: 2}) + ' (' + sign + '$' + margin.toFixed(2) + ')';
+                document.getElementById('m-ptb').style.color = margin >= 0 ? 'var(--color-up)' : 'var(--color-down)';
+            }
             document.getElementById('m-up').innerText = (m.up_price || 0).toFixed(4);
             document.getElementById('m-down').innerText = (m.down_price || 0).toFixed(4);
             document.getElementById('m-spike').innerText = (m.spike || 0).toFixed(2);
