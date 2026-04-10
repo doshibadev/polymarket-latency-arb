@@ -225,6 +225,38 @@ impl PaperWallet {
         0.0
     }
 
+    /// Check if price is consolidating (not moving much in last 500ms)
+    /// Returns true if price range in last 500ms is less than threshold
+    fn is_consolidating(&self, symbol: &str, threshold: f64) -> bool {
+        let state = match self.symbol_states.get(symbol) {
+            Some(s) => s,
+            None => return false,
+        };
+        let cutoff = std::time::Duration::from_millis(500);
+        let now = Instant::now();
+        
+        let mut recent_prices: Vec<f64> = Vec::new();
+        for i in 0..state.btc_history_len {
+            let idx = if state.btc_history_idx >= i + 1 {
+                state.btc_history_idx - i - 1
+            } else {
+                64 - (i + 1 - state.btc_history_idx)
+            };
+            let (price, time) = state.btc_price_history[idx];
+            if now.duration_since(time) <= cutoff {
+                recent_prices.push(price);
+            }
+        }
+        
+        if recent_prices.len() < 3 {
+            return false;
+        }
+        
+        let max_price = recent_prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min_price = recent_prices.iter().cloned().fold(f64::INFINITY, f64::min);
+        (max_price - min_price).abs() < threshold
+    }
+
     /// Called by engine on each Binance tick to evaluate hold-to-resolution for open positions
     pub fn update_hold_status(
         &mut self,
@@ -357,10 +389,13 @@ impl PaperWallet {
                 long_spike > (pos.entry_spike.abs() * 0.2)
             };
 
-            // Spike faded: below 30% of PEAK for 500ms
+            // Spike faded: below 30% of PEAK for 500ms AND not consolidating
+            // Consolidation = price hasn't moved more than $20 in last 500ms
+            let consolidating = self.is_consolidating(&pos.symbol, 20.0);
             let spike_low = long_spike.abs() < new_peak * 0.3;
             spike_low_updates.push((idx, spike_low));
-            let spike_faded = spike_low && pos.spike_low_since.map_or(false, |t| t.elapsed().as_millis() >= 500);
+            // Don't trigger spike_faded if consolidating (sideways is not a fade)
+            let spike_faded = spike_low && !consolidating && pos.spike_low_since.map_or(false, |t| t.elapsed().as_millis() >= 500);
 
             let near_end = pos.entry_time.elapsed().as_millis() > 295000;
 
