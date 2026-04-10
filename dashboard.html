@@ -181,7 +181,7 @@
         .metrics-bar {
             grid-column: 1 / -1;
             display: grid;
-            grid-template-columns: repeat(7, 1fr);
+            grid-template-columns: repeat(8, 1fr);
             gap: 12px;
         }
 
@@ -407,11 +407,11 @@
                     <label class="setting-label">Spike Scaling Factor</label>
                     <input type="number" id="set-scaling" class="setting-input" step="0.0001" placeholder="e.g. 0.0001">
                 </div>
-                <div class="setting-group">
+                <div class="setting-group sim-only">
                     <label class="setting-label">Fee Rate</label>
                     <input type="number" id="set-fee" class="setting-input" step="0.001" placeholder="e.g. 0.072">
                 </div>
-                <div class="setting-group">
+                <div class="setting-group sim-only">
                     <label class="setting-label">Execution Delay (ms)</label>
                     <input type="number" id="set-delay" class="setting-input" placeholder="e.g. 300">
                 </div>
@@ -428,9 +428,10 @@
             </div>
             <div class="header-actions">
                 <div class="mode-switcher">
-                    <button class="mode-btn active-sim" id="btn-sim" onclick="switchMode('sim')">SIM</button>
-                    <button class="mode-btn" id="btn-live" onclick="switchMode('live')"><span class="live-badge"></span>LIVE</button>
+                    <button class="mode-btn active-sim" id="btn-sim" onclick="switchMode('sim')" title="Set PAPER_TRADING=true in .env">SIM</button>
+                    <button class="mode-btn" id="btn-live" onclick="switchMode('live')" title="Set PAPER_TRADING=false in .env"><span class="live-badge"></span>LIVE</button>
                 </div>
+                <div id="wallet-address" style="font-family:var(--font-mono); font-size:10px; color:var(--text-muted); display:none;"></div>
                 <button class="settings-btn" onclick="openSettings()">Settings</button>
                 <button id="toggle-btn" class="settings-btn" onclick="toggleBot()" style="border-color: var(--color-down); color: var(--color-down);">■ STOP</button>
                 <div class="status-pill">
@@ -444,6 +445,10 @@
             <div class="metric-mini">
                 <div class="m-label">Portfolio Value</div>
                 <div class="m-value" id="v-portfolio">$0.00</div>
+            </div>
+            <div class="metric-mini">
+                <div class="m-label">Wallet Balance</div>
+                <div class="m-value" id="v-balance">$0.00</div>
             </div>
             <div class="metric-mini">
                 <div class="m-label">Total PnL</div>
@@ -595,21 +600,27 @@
         const formatMoneySigned = (val) => (val > 0 ? '+$' : val < 0 ? '-$' : '$') + Math.abs(val).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
         const formatMs = (ms) => ms < 1000 ? ms + 'ms' : (ms/1000).toFixed(1) + 's';
         
-        // Mode switcher — SIM on :3000, LIVE on :3001
-        const PORTS = { sim: 3000, live: 3001 };
-        let currentMode = window.location.port === '3001' ? 'live' : 'sim';
+        // Mode display — driven by server broadcast, not port
+        let currentMode = 'sim';
 
-        const switchMode = (mode) => {
-            if (mode === currentMode) return;
-            const port = PORTS[mode];
-            window.location.href = `http://${window.location.hostname}:${port}`;
+        const updateMode = (isLive) => {
+            const btnSim = document.getElementById('btn-sim');
+            const btnLive = document.getElementById('btn-live');
+            if (isLive) {
+                btnLive.classList.add('active-live');
+                btnLive.classList.remove('active-sim');
+                btnSim.classList.remove('active-sim');
+            } else {
+                btnSim.classList.add('active-sim');
+                btnSim.classList.remove('active-live');
+                btnLive.classList.remove('active-live');
+            }
         };
 
-        // Highlight active mode button on load
-        document.getElementById('btn-' + currentMode).classList.add(currentMode === 'live' ? 'active-live' : 'active-sim');
-        if (currentMode === 'live') {
-            document.getElementById('btn-sim').classList.remove('active-sim');
-        }
+        const switchMode = (mode) => {
+            // Mode is determined by PAPER_TRADING in .env — buttons are display only
+            // To switch modes, change PAPER_TRADING in .env and restart the bot
+        };
 
         let myChart = null;
         let spikeChart = null;
@@ -698,7 +709,12 @@
         };
 
         const openSettings = async () => {
-            // Always fetch fresh .env values when opening settings
+            const isLive = document.getElementById('btn-live').classList.contains('active-live');
+            // Show/hide simulation-only fields
+            document.querySelectorAll('.sim-only').forEach(el => {
+                el.style.display = isLive ? 'none' : '';
+            });
+            // Fetch fresh .env values
             try {
                 const res = await fetch('/config');
                 if (res.ok) {
@@ -804,6 +820,17 @@
                     btn.style.color = 'var(--color-up)';
                 }
             }
+            if (typeof sim.is_live === 'boolean') {
+                updateMode(sim.is_live);
+                const addrEl = document.getElementById('wallet-address');
+                if (sim.is_live && sim.wallet_address) {
+                    const addr = sim.wallet_address;
+                    addrEl.innerText = addr.slice(0, 6) + '...' + addr.slice(-4);
+                    addrEl.style.display = 'block';
+                } else {
+                    addrEl.style.display = 'none';
+                }
+            }
 
             if (sim.config) {
                 const c = sim.config;
@@ -823,6 +850,7 @@
             }
 
             document.getElementById('v-portfolio').innerText = formatMoney(totalVal);
+            document.getElementById('v-balance').innerText = formatMoney(sim.balance || 0);
             document.getElementById('v-total-pnl').innerText = formatMoneySigned(totalPnL);
             document.getElementById('v-total-pnl').className = 'm-value ' + (totalPnL >= 0 ? 'val-up' : 'val-down');
             document.getElementById('v-unrealized').innerText = formatMoneySigned(unrealized);
@@ -848,7 +876,7 @@
             document.getElementById('m-binance').innerText = '$' + (m.binance || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
             document.getElementById('m-chainlink').innerText = '$' + (m.chainlink || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
             if (m.price_to_beat) {
-                const margin = (m.binance || 0) - m.price_to_beat;
+                const margin = (m.chainlink || 0) - m.price_to_beat;
                 const sign = margin >= 0 ? '+' : '';
                 document.getElementById('m-ptb').innerText = '$' + m.price_to_beat.toLocaleString(undefined, {minimumFractionDigits: 2}) + ' (' + sign + '$' + margin.toFixed(2) + ')';
                 document.getElementById('m-ptb').style.color = margin >= 0 ? 'var(--color-up)' : 'var(--color-down)';

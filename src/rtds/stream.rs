@@ -96,10 +96,15 @@ impl RtdsStream {
             let _ = run_binance_direct(tx_binance).await;
         });
 
+        let mut backoff_secs = 3u64;
         loop {
-            if let Err(e) = self.connect_and_stream(&url, &tx).await {
-                error!(error = %e, "RTDS WebSocket error, reconnecting in 3s");
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            match self.connect_and_stream(&url, &tx).await {
+                Ok(_) => { backoff_secs = 3; }
+                Err(e) => {
+                    error!(error = %e, backoff = backoff_secs, "RTDS WebSocket error, reconnecting...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(60); // max 60s backoff
+                }
             }
         }
     }

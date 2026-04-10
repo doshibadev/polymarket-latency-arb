@@ -8,6 +8,7 @@ pub mod server;
 
 use arb::ArbEngine;
 use config::AppConfig;
+use execution::LiveWallet;
 use polymarket::{ClobClient, fetch_current_market, MarketData};
 use tokio::sync::{mpsc, broadcast};
 use tracing_subscriber::EnvFilter;
@@ -64,7 +65,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Arb Engine
-    let mut engine = ArbEngine::new(config, price_rx, clob_rx, market_rx, broadcast_tx, cmd_rx);
+    let mut engine = ArbEngine::new(config.clone(), price_rx, clob_rx, market_rx, broadcast_tx, cmd_rx);
+
+    // Live trading mode
+    if !config.paper_trading {
+        tracing::info!("LIVE TRADING MODE — initializing live wallet...");
+        match execution::LiveWallet::new(config).await {
+            Ok(lw) => {
+                engine.live_wallet = Some(lw);
+                tracing::info!("Live wallet ready");
+            }
+            Err(e) => {
+                return Err(format!("Failed to initialize live wallet: {}", e).into());
+            }
+        }
+    } else {
+        tracing::info!("Paper trading mode");
+    }
     
     // Initialize engine with current markets
     for m in initial_markets {

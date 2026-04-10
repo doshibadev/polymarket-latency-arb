@@ -156,6 +156,7 @@ impl PaperWallet {
         &mut self,
         symbol: &str,
         btc_history: &[f64],
+        current_chainlink: f64,
         price_to_beat: Option<f64>,
         end_ts: Option<u64>,
         hold_margin_per_second: f64,
@@ -173,7 +174,10 @@ impl PaperWallet {
         };
 
         let ptb = match price_to_beat { Some(p) => p, None => return };
-        let current_btc = match btc_history.last() { Some(&p) => p, None => return };
+        // Use Chainlink price for margin — market resolves against Chainlink
+        let current_btc = if current_chainlink > 0.0 { current_chainlink } else {
+            match btc_history.last() { Some(&p) => p, None => return }
+        };
 
         for pos in &mut self.open_positions {
             if pos.symbol != symbol { continue; }
@@ -359,6 +363,7 @@ impl PaperWallet {
         let shares = position_size / entry_price;
         let buy_fee = self.calculate_fee(shares, entry_price);
         if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
+        if position_size < 1.0 { return Err("BELOW_MIN_ORDER_SIZE".to_string()); }
 
         // Reserve balance immediately so concurrent entries don't over-allocate
         self.balance -= position_size + buy_fee;
@@ -383,7 +388,11 @@ impl PaperWallet {
 
     /// Call on every tick — promotes pending entries to open positions after execution delay
     pub fn flush_pending(&mut self) {
-        let delay = std::time::Duration::from_millis(self.config.execution_delay_ms);
+        let delay = if self.config.paper_trading {
+            std::time::Duration::from_millis(self.config.execution_delay_ms)
+        } else {
+            std::time::Duration::ZERO
+        };
         let mut promoted = Vec::new();
         self.pending_entries.retain(|p| {
             if p.submitted_at.elapsed() >= delay {

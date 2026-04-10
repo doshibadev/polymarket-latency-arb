@@ -1,12 +1,13 @@
 use crate::config::AppConfig;
 use crate::error::Result;
 use crate::execution::PaperWallet;
+use crate::execution::LiveWallet;
 use crate::polymarket::{MarketData, SharePriceUpdate};
 use crate::rtds::PriceUpdate;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, broadcast};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use serde_json::{json, Value};
 
 #[derive(Default)]
@@ -15,6 +16,7 @@ struct SymbolState {
     pub last_chainlink: Option<(f64, Instant)>,
     pub last_spike_usd: f64,
     pub market_end_ts: Option<u64>,
+    pub condition_id: Option<String>,
     pub question: String,
     pub price_to_beat: Option<f64>,
     pub price_to_beat_set: bool,
@@ -31,6 +33,7 @@ pub struct ArbEngine {
     broadcast_tx: broadcast::Sender<String>,
     cmd_rx: mpsc::Receiver<serde_json::Value>,
     pub wallet: PaperWallet,
+    pub live_wallet: Option<LiveWallet>,
     symbol_states: HashMap<String, SymbolState>,
     history: Vec<Value>,
     signals: Vec<Value>,
@@ -56,11 +59,26 @@ impl ArbEngine {
             broadcast_tx,
             cmd_rx,
             wallet,
+            live_wallet: None,
             symbol_states: HashMap::new(),
             history: Vec::new(),
             signals: Vec::new(),
-            running: true,
+            running: false, // starts paused — user must press START
         }
+    }
+
+    fn current_balance(&self) -> f64 {
+        self.live_wallet.as_ref().map(|lw| lw.balance).unwrap_or(self.wallet.balance)
+    }
+
+    fn current_net_market_value(&self) -> f64 {
+        let positions = self.live_wallet.as_ref()
+            .map(|lw| &lw.open_positions)
+            .unwrap_or(&self.wallet.open_positions);
+        positions.iter().map(|pos| {
+            let (b, a) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
+            pos.shares * ((b + a) / 2.0)
+        }).sum()
     }
 
     fn add_signal(&mut self, symbol: &str, direction: &str, spike: f64, status: &str, reason: Option<String>) {
@@ -83,12 +101,18 @@ impl ArbEngine {
     }
 
     fn broadcast_state(&self) {
-        tracing::debug!("Broadcasting state: {} markets, balance: {}", self.symbol_states.len(), self.wallet.balance);
+        let (balance, open_positions_ref, trade_history_ref, wins, losses, fees, volume, starting_balance) =
+            if let Some(lw) = &self.live_wallet {
+                (&lw.balance, &lw.open_positions, &lw.trade_history, lw.wins, lw.losses, lw.total_fees_paid, lw.total_volume, lw.starting_balance)
+            } else {
+                (&self.wallet.balance, &self.wallet.open_positions, &self.wallet.trade_history, self.wallet.wins, self.wallet.losses, self.wallet.total_fees_paid, self.wallet.total_volume, self.wallet.starting_balance)
+            };
+
         let mut unrealized_pnl = 0.0;
         let mut net_market_value = 0.0;
         let mut positions = Vec::new();
 
-        for pos in &self.wallet.open_positions {
+        for pos in open_positions_ref {
             let (up_p, down_p) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
             let current_price = (up_p + down_p) / 2.0;
             let current_value = pos.shares * current_price;
@@ -111,12 +135,22 @@ impl ArbEngine {
             }));
         }
 
-        let total_val = self.wallet.balance + net_market_value;
-        let total_pnl = total_val - self.wallet.starting_balance;
-        let realized_pnl: f64 = self.wallet.trade_history.iter()
+        let total_val = balance + net_market_value;
+        let total_pnl = total_val - starting_balance;
+        let realized_pnl: f64 = trade_history_ref.iter()
             .filter(|t| t.r#type == "exit")
             .filter_map(|t| t.pnl)
             .sum();
+
+        let wallet_address = self.live_wallet.as_ref()
+            .map(|_| std::env::var("POLYMARKET_PRIVATE_KEY").ok()
+                .and_then(|pk| {
+                    use std::str::FromStr;
+                    polymarket_client_sdk::auth::LocalSigner::<k256::ecdsa::SigningKey>::from_str(&pk).ok()
+                        .map(|s| format!("{:?}", polymarket_client_sdk::auth::Signer::address(&s)))
+                })
+                .unwrap_or_default()
+            );
 
         let mut markets = HashMap::new();
         for (symbol, state) in &self.symbol_states {
@@ -126,7 +160,6 @@ impl ArbEngine {
             let binance = state.last_binance.map(|(p, _)| p).unwrap_or(0.0);
             let chainlink = state.last_chainlink.map(|(p, _)| p).unwrap_or(0.0);
 
-            // Spike delta = Binance momentum over last 500ms
             let spike = {
                 let cutoff = std::time::Duration::from_millis(500);
                 let baseline = state.btc_history.iter()
@@ -149,22 +182,24 @@ impl ArbEngine {
         }
 
         let state = json!({
-            "balance": self.wallet.balance,
-            "starting_balance": self.wallet.starting_balance,
+            "balance": balance,
+            "starting_balance": starting_balance,
             "total_portfolio_value": total_val,
             "unrealized_pnl": unrealized_pnl,
             "realized_pnl": realized_pnl,
             "total_pnl": total_pnl,
-            "wins": self.wallet.wins,
-            "losses": self.wallet.losses,
-            "total_fees": self.wallet.total_fees_paid,
-            "total_volume": self.wallet.total_volume,
+            "wins": wins,
+            "losses": losses,
+            "total_fees": fees,
+            "total_volume": volume,
             "positions": positions,
-            "trades": self.wallet.trade_history,
+            "trades": trade_history_ref,
             "history": self.history,
             "signals": self.signals,
             "markets": markets,
+            "wallet_address": wallet_address,
             "running": self.running,
+            "is_live": self.live_wallet.is_some(),
             "config": {
                 "threshold_bps": self.config.threshold_bps,
                 "portfolio_pct": self.config.portfolio_pct,
@@ -188,7 +223,7 @@ impl ArbEngine {
         info!("Arb Engine V2 running");
 
         // Push initial portfolio value (just cash)
-        self.update_history(self.wallet.balance);
+        self.update_history(self.current_balance());
 
         let mut broadcast_timer = tokio::time::interval(Duration::from_millis(500));
         let mut spike_poll = tokio::time::interval(Duration::from_millis(100));
@@ -203,6 +238,13 @@ impl ArbEngine {
                             info!("Settings updated");
                         }
                         Some("start") => {
+                            if let Some(lw) = &self.live_wallet {
+                                info!("Running on-chain approval check before starting live trading...");
+                                match lw.ensure_approvals().await {
+                                    Ok(_) => info!("Approvals confirmed"),
+                                    Err(e) => warn!("Approval check failed (continuing anyway): {}", e),
+                                }
+                            }
                             self.running = true;
                             info!("Bot started");
                         }
@@ -244,7 +286,7 @@ impl ArbEngine {
                                         let (b, a) = self.wallet.get_bid_ask(&p.symbol, &p.direction);
                                         net_market_value += p.shares * ((b + a) / 2.0);
                                     }
-                                    self.update_history(self.wallet.balance + net_market_value);
+                                    let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
                                     self.broadcast_state();
                                 }
                             }
@@ -257,6 +299,25 @@ impl ArbEngine {
                     }
                 }
                 _ = broadcast_timer.tick() => {
+                    // Sync live wallet state from Polymarket (ground truth)
+                    if let Some(lw) = &mut self.live_wallet {
+                        lw.sync_from_clob().await;
+                    }
+
+                    // Auto-redeem resolved markets in live mode
+                    if self.live_wallet.is_some() {
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                        let resolved: Vec<String> = self.symbol_states.values()
+                            .filter(|s| s.market_end_ts.map_or(false, |end| now > end + 30)) // 30s after end
+                            .filter_map(|s| s.condition_id.clone())
+                            .collect();
+                        for condition_id in resolved {
+                            if let Some(lw) = &self.live_wallet {
+                                info!(condition_id=%condition_id, "Auto-redeeming resolved market");
+                                lw.redeem_resolved_positions(&condition_id).await;
+                            }
+                        }
+                    }
                     // Force-close all positions if any market is within 5 seconds of ending
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
                     let market_ending = self.symbol_states.values()
@@ -294,7 +355,7 @@ impl ArbEngine {
                             let (b, a) = self.wallet.get_bid_ask(&p.symbol, &p.direction);
                             net_market_value += p.shares * ((b + a) / 2.0);
                         }
-                        self.update_history(self.wallet.balance + net_market_value);
+                        let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
                     }
                     self.broadcast_state();
                 }
@@ -305,7 +366,7 @@ impl ArbEngine {
                             let (b, a) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
                             net_market_value += pos.shares * ((b + a) / 2.0);
                         }
-                        self.update_history(self.wallet.balance + net_market_value);
+                        let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
                         // Reset spike gate so next spike triggers a fresh entry
                         for state in self.symbol_states.values_mut() { state.last_spike_usd = 0.0; }
                     }
@@ -317,7 +378,7 @@ impl ArbEngine {
                             let (b, a) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
                             net_market_value += pos.shares * ((b + a) / 2.0);
                         }
-                        self.update_history(self.wallet.balance + net_market_value);
+                        let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
                         // Reset spike gate so next spike triggers a fresh entry
                         for state in self.symbol_states.values_mut() { state.last_spike_usd = 0.0; }
                     }
@@ -347,6 +408,7 @@ impl ArbEngine {
                 state.btc_history.retain(|(_, t)| t.elapsed().as_millis() < 2000);
             } else {
                 state.last_chainlink = Some((update.price, update.timestamp));
+                // Use first Chainlink tick of new window as price to beat (fallback)
                 if !state.price_to_beat_set {
                     state.price_to_beat = Some(update.price);
                     state.price_to_beat_set = true;
@@ -380,16 +442,17 @@ impl ArbEngine {
                 if self.running { self.check_for_spike(&symbol).await; }
             }
 
-            let (ptb, end_ts, btc_hist) = {
+            let (ptb, end_ts, btc_hist, chainlink) = {
                 let s = self.symbol_states.get(&symbol);
                 (
                     s.and_then(|s| s.price_to_beat),
                     s.and_then(|s| s.market_end_ts),
                     s.map(|s| s.btc_history.iter().map(|(p,_)| *p).collect::<Vec<_>>()).unwrap_or_default(),
+                    s.and_then(|s| s.last_chainlink).map(|(p,_)| p).unwrap_or(0.0),
                 )
             };
             self.wallet.update_hold_status(
-                &symbol, &btc_hist, ptb, end_ts,
+                &symbol, &btc_hist, chainlink, ptb, end_ts,
                 self.config.hold_margin_per_second,
                 self.config.hold_max_seconds,
                 self.config.hold_max_crossings,
@@ -407,13 +470,21 @@ impl ArbEngine {
     }
 
     pub async fn handle_market_update(&mut self, market: MarketData) {
-        let state = self.symbol_states.entry(market.symbol.clone()).or_default();
-        state.market_end_ts = Some(market.window_end_ts);
-        state.question = market.question.clone();
-        // Parse price to beat from question e.g. "Will BTC be above $83,450.00 at 14:35?"
-        state.price_to_beat = None; // will be set from first Chainlink tick of new window
-        state.price_to_beat_set = false;
-        state.btc_history.clear();
+        let symbol_clone = market.symbol.clone();
+
+        {
+            let state = self.symbol_states.entry(market.symbol.clone()).or_default();
+            state.market_end_ts = Some(market.window_end_ts);
+            state.condition_id = Some(market.condition_id.clone());
+            state.question = market.question.clone();
+            state.price_to_beat = None;
+            state.price_to_beat_set = false;
+            state.btc_history.clear();
+        }
+        // Register token IDs in live wallet so it can place orders
+        if let Some(lw) = &mut self.live_wallet {
+            lw.register_tokens(&market.up_token_id, &market.down_token_id, &market.symbol);
+        }
         self.wallet.set_market_info(&market.symbol, market.question);
         self.wallet.reset_prices(&market.symbol);
     }
@@ -505,13 +576,31 @@ impl ArbEngine {
 
         // New spike or significantly larger spike for scaling in
         if abs_spike > state.last_spike_usd * 1.1 {
-            let spread_bps = (((ask - bid) / ((bid + ask) / 2.0)) * 10000.0) as u64;
-            let ema_offset = 0.0;
             match self.wallet.open_position(symbol, direction, adjusted_spike, threshold_usd) {
                 Ok(level) => {
-                    let level_str = format!("LEVEL_{}", level);
                     state.last_spike_usd = abs_spike;
-                    self.add_signal(symbol, direction, adjusted_spike, "EXECUTED", Some(level_str));
+
+                    if self.live_wallet.is_some() {
+                        // In live mode: fire real order and signal based on its result
+                        let entry_price = self.wallet.open_positions.last()
+                            .map(|p| p.entry_price).unwrap_or(0.0);
+                        let sym = symbol.to_string();
+                        let dir = direction.to_string();
+                        let spk = adjusted_spike;
+                        let ep = entry_price;
+                        if let Some(lw) = &mut self.live_wallet {
+                            match lw.open_position(&sym, &dir, spk, ep).await {
+                                Ok(live_level) => {
+                                    self.add_signal(&sym, &dir, spk, "EXECUTED", Some(format!("LIVE_LEVEL_{}", live_level)));
+                                }
+                                Err(e) => {
+                                    self.add_signal(&sym, &dir, spk, "REJECTED", Some(format!("LIVE:{}", e)));
+                                }
+                            }
+                        }
+                    } else {
+                        self.add_signal(symbol, direction, adjusted_spike, "EXECUTED", Some(format!("LEVEL_{}", level)));
+                    }
                 }
                 Err(reason) => {
                     let state = self.symbol_states.get_mut(symbol).unwrap();
