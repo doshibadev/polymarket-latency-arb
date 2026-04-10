@@ -53,6 +53,19 @@ pub async fn ensure_approvals(signer: &K256Signer) -> Result<(), Box<dyn std::er
         .await?;
 
     let owner = signer.address();
+
+    // Check POL balance first — write txs need gas
+    use alloy::providers::Provider;
+    let pol_balance = provider.get_balance(owner).await.unwrap_or_default();
+    let pol_f64 = pol_balance.to::<u128>() as f64 / 1e18;
+    if pol_f64 < 0.001 {
+        return Err(format!(
+            "Insufficient POL for gas: {:.6} POL. Send at least 0.1 POL to {} to pay for approval transactions.",
+            pol_f64, owner
+        ).into());
+    }
+    info!(pol_balance = pol_f64, "POL balance sufficient for approvals");
+
     let usdc = IERC20::new(USDC, provider.clone());
     let ctf = IERC1155::new(CTF, provider.clone());
 

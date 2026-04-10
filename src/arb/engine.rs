@@ -280,6 +280,12 @@ impl ArbEngine {
                                         close_reason: Some("manual".to_string()),
                                     });
                                     info!(symbol=%pos.symbol, pnl=pnl, "Position manually closed");
+                                    // Mirror to live wallet
+                                    if let Some(lw) = &mut self.live_wallet {
+                                        if let Some(live_idx) = lw.open_positions.iter().position(|p| p.symbol == pos.symbol && p.direction == pos.direction) {
+                                            lw.close_position_at(live_idx, current_price, "manual").await;
+                                        }
+                                    }
                                     // Update chart history
                                     let mut net_market_value = 0.0;
                                     for p in &self.wallet.open_positions {
@@ -327,6 +333,13 @@ impl ArbEngine {
                         for idx in indices {
                             let pos = self.wallet.open_positions.remove(idx);
                             let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
+
+                            // Mirror to live wallet
+                            if let Some(lw) = &mut self.live_wallet {
+                                if let Some(live_idx) = lw.open_positions.iter().position(|p| p.symbol == pos.symbol && p.direction == pos.direction) {
+                                    lw.close_position_at(live_idx, current_price, "market_end").await;
+                                }
+                            }
                             let sell_fee = self.wallet.calculate_fee(pos.shares, current_price);
                             let net_revenue = (pos.shares * current_price) - sell_fee;
                             let pnl = net_revenue - (pos.position_size + pos.buy_fee);
@@ -460,7 +473,44 @@ impl ArbEngine {
         }
 
         self.wallet.flush_pending();
-        self.wallet.try_close_position().await
+        let closed = self.wallet.try_close_position().await;
+
+        // Mirror closes to live wallet
+        if closed && self.live_wallet.is_some() {
+            // Find positions that were just closed (in trade_history but not in open_positions)
+            let recent_exits: Vec<_> = self.wallet.trade_history.iter().rev()
+                .take_while(|t| t.r#type == "exit")
+                .filter(|t| {
+                    // Only exits from last 500ms
+                    chrono::Local::now().timestamp_millis() -
+                        chrono::DateTime::parse_from_rfc3339(&t.timestamp)
+                            .map(|d| d.timestamp_millis()).unwrap_or(0) < 500
+                })
+                .map(|t| (t.symbol.clone(), t.direction.clone(), t.exit_price.unwrap_or(0.0), t.close_reason.clone()))
+                .collect();
+
+            for (sym, dir, price, reason) in recent_exits {
+                if let Some(lw) = &mut self.live_wallet {
+                    // Find matching position index in live wallet
+                    if let Some(idx) = lw.open_positions.iter().position(|p| p.symbol == sym && p.direction == dir) {
+                        let reason_str = reason.as_deref().unwrap_or("exit");
+                        // Convert to &'static str for the interface
+                        let r: &'static str = match reason_str {
+                            "trailing_stop" => "trailing_stop",
+                            "trend_reversed" => "trend_reversed",
+                            "spike_faded" => "spike_faded",
+                            "near_end" => "near_end",
+                            "market_end" => "market_end",
+                            "manual" => "manual",
+                            _ => "exit",
+                        };
+                        lw.close_position_at(idx, price, r).await;
+                    }
+                }
+            }
+        }
+
+        closed
     }
 
     async fn handle_clob_update(&mut self, update: SharePriceUpdate) -> bool {
@@ -576,20 +626,18 @@ impl ArbEngine {
 
         // New spike or significantly larger spike for scaling in
         if abs_spike > state.last_spike_usd * 1.1 {
+            // Get entry price BEFORE open_position (pending entry hasn't been promoted yet)
+            let entry_price = self.wallet.get_share_price(symbol, direction);
             match self.wallet.open_position(symbol, direction, adjusted_spike, threshold_usd) {
                 Ok(level) => {
                     state.last_spike_usd = abs_spike;
 
                     if self.live_wallet.is_some() {
-                        // In live mode: fire real order and signal based on its result
-                        let entry_price = self.wallet.open_positions.last()
-                            .map(|p| p.entry_price).unwrap_or(0.0);
                         let sym = symbol.to_string();
                         let dir = direction.to_string();
                         let spk = adjusted_spike;
-                        let ep = entry_price;
                         if let Some(lw) = &mut self.live_wallet {
-                            match lw.open_position(&sym, &dir, spk, ep).await {
+                            match lw.open_position(&sym, &dir, spk, entry_price).await {
                                 Ok(live_level) => {
                                     self.add_signal(&sym, &dir, spk, "EXECUTED", Some(format!("LIVE_LEVEL_{}", live_level)));
                                 }
