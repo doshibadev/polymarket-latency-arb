@@ -316,13 +316,13 @@ impl ArbEngine {
                 }
                 Some(market) = self.market_rx.recv() => { self.handle_market_update(market).await; }
                 _ = spike_poll.tick() => {
-                    // Poll for spikes on a timer so we don't miss moves between Chainlink ticks
                     if self.running {
                         let symbols: Vec<String> = self.symbol_states.keys().cloned().collect();
                         for symbol in symbols {
                             self.check_for_spike(&symbol).await;
                         }
                     }
+                    self.wallet.flush_pending();
                 }
                 else => break,
             }
@@ -343,12 +343,14 @@ impl ArbEngine {
             self.wallet.update_btc_prices(&update.symbol, b, c);
             if self.running { self.check_for_spike(&update.symbol).await; }
         }
+        self.wallet.flush_pending();
         self.wallet.try_close_position().await
     }
 
     async fn handle_clob_update(&mut self, update: SharePriceUpdate) -> bool {
         self.last_clob_update_ts = Some(Instant::now());
         self.wallet.update_share_price(&update.symbol, &update.direction, update.best_bid, update.best_ask);
+        self.wallet.flush_pending();
         let closed = self.wallet.try_close_position().await;
         if self.running { self.check_for_spike(&update.symbol).await; }
         closed
@@ -420,7 +422,7 @@ impl ArbEngine {
         if abs_spike > state.last_spike_usd * 1.1 {
             let spread_bps = (((ask - bid) / ((bid + ask) / 2.0)) * 10000.0) as u64;
             let ema_offset = 0.0;
-            match self.wallet.open_position(symbol, direction, binance, chainlink, adjusted_spike, ema_offset, spread_bps, threshold_usd).await {
+            match self.wallet.open_position(symbol, direction, binance, chainlink, adjusted_spike, ema_offset, spread_bps, threshold_usd) {
                 Ok(level) => {
                     let level_str = format!("LEVEL_{}", level);
                     state.last_spike_usd = abs_spike;

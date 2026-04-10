@@ -1,6 +1,7 @@
 use tracing::{debug, info};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::time::Instant;
 use crate::config::AppConfig;
 
 /// An open scalp position
@@ -49,6 +50,23 @@ struct SymbolMarketState {
     pub last_chainlink: f64,
 }
 
+/// A pending entry waiting for execution delay to elapse
+#[derive(Clone)]
+pub struct PendingEntry {
+    pub symbol: String,
+    pub direction: String,
+    pub binance: f64,
+    pub chainlink: f64,
+    pub spike: f64,
+    pub entry_price: f64,
+    pub scale_level: u32,
+    pub position_size: f64,
+    pub shares: f64,
+    pub buy_fee: f64,
+    pub profit_target: f64,
+    pub submitted_at: Instant,
+}
+
 pub struct PaperWallet {
     pub balance: f64,
     pub starting_balance: f64,
@@ -59,6 +77,7 @@ pub struct PaperWallet {
     pub total_volume: f64,
     pub portfolio_pct: f64,
     pub open_positions: Vec<OpenPosition>,
+    pub pending_entries: Vec<PendingEntry>,
     pub trade_history: Vec<TradeRecord>,
     symbol_states: HashMap<String, SymbolMarketState>,
     config: AppConfig,
@@ -76,6 +95,7 @@ impl PaperWallet {
             total_volume: 0.0,
             portfolio_pct: config.portfolio_pct,
             open_positions: Vec::new(),
+            pending_entries: Vec::new(),
             trade_history: Vec::new(),
             symbol_states: HashMap::new(),
             config,
@@ -225,69 +245,99 @@ impl PaperWallet {
         true
     }
 
-    pub async fn open_position(&mut self, symbol: &str, direction: &str, binance: f64, chainlink: f64, spike: f64, ema_offset: f64, _spread_bps: u64, threshold_usd: f64) -> std::result::Result<u32, String> {
-        let current_symbol_positions: Vec<_> = self.open_positions.iter().filter(|p| p.symbol == symbol && p.direction == direction).collect();
-        let scale_level = current_symbol_positions.len() as u32 + 1;
+    pub fn open_position(&mut self, symbol: &str, direction: &str, binance: f64, chainlink: f64, spike: f64, ema_offset: f64, _spread_bps: u64, threshold_usd: f64) -> std::result::Result<u32, String> {
+        let existing: Vec<_> = self.open_positions.iter()
+            .filter(|p| p.symbol == symbol && p.direction == direction)
+            .collect();
+        let pending_same = self.pending_entries.iter()
+            .filter(|p| p.symbol == symbol && p.direction == direction)
+            .count();
+        let scale_level = (existing.len() + pending_same) as u32 + 1;
 
         if scale_level > 3 { return Err("MAX_SCALE_LEVEL".to_string()); }
-
-        if scale_level > 1 {
-            let last_entry_spike = current_symbol_positions.last().unwrap().entry_spike.abs();
-            if spike.abs() < last_entry_spike * 1.5 { return Err("SPIKE_NOT_GROWING".to_string()); }
-        }
 
         let entry_price = self.get_share_price(symbol, direction);
         if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }
         if entry_price > self.config.max_entry_price { return Err("PRICE_TOO_HIGH".to_string()); }
-
-        if self.config.execution_delay_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(self.config.execution_delay_ms)).await;
-        }
-        // Removed spread check to allow trading any spread
 
         let position_size = self.balance * self.portfolio_pct * (1.0 / scale_level as f64);
         let shares = position_size / entry_price;
         let buy_fee = self.calculate_fee(shares, entry_price);
         if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
 
+        // Reserve balance immediately so concurrent entries don't over-allocate
         self.balance -= position_size + buy_fee;
 
         let spike_bonus = (spike.abs() - threshold_usd) * self.config.spike_scaling_factor;
         let profit_target = entry_price * (1.0 + self.config.profit_target_pct + spike_bonus);
 
-        let state = self.symbol_states.get(symbol).cloned().unwrap_or_default();
-        self.trade_history.push(TradeRecord {
-            symbol: symbol.to_string(),
-            r#type: "entry".to_string(),
-            question: state.question,
-            direction: direction.to_string(),
-            entry_price: Some(entry_price),
-            exit_price: None,
-            shares,
-            cost: position_size,
-            pnl: None,
-            timestamp: chrono::Local::now().to_rfc3339(),
-            close_reason: None,
-        });
-
-        self.open_positions.push(OpenPosition {
+        self.pending_entries.push(PendingEntry {
             symbol: symbol.to_string(),
             direction: direction.to_string(),
+            binance,
+            chainlink,
+            spike,
             entry_price,
-            shares,
-            position_size,
-            buy_fee,
-            entry_binance: binance,
-            entry_chainlink: chainlink,
-            entry_spike: spike,
-            ema_offset_at_entry: ema_offset,
-            entry_time: std::time::Instant::now(),
-            highest_price: entry_price,
-            profit_target,
             scale_level,
+            position_size,
+            shares,
+            buy_fee,
+            profit_target,
+            submitted_at: Instant::now(),
         });
 
-        info!(symbol=%symbol, level=scale_level, "Position opened");
         Ok(scale_level)
+    }
+
+    /// Call on every tick — promotes pending entries to open positions after execution delay
+    pub fn flush_pending(&mut self) {
+        let delay = std::time::Duration::from_millis(self.config.execution_delay_ms);
+        let mut promoted = Vec::new();
+        self.pending_entries.retain(|p| {
+            if p.submitted_at.elapsed() >= delay {
+                promoted.push(p.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        for p in promoted {
+            let state = self.symbol_states.get(&p.symbol).cloned().unwrap_or_default();
+            self.trade_history.push(TradeRecord {
+                symbol: p.symbol.clone(),
+                r#type: "entry".to_string(),
+                question: state.question,
+                direction: p.direction.clone(),
+                entry_price: Some(p.entry_price),
+                exit_price: None,
+                shares: p.shares,
+                cost: p.position_size,
+                pnl: None,
+                timestamp: chrono::Local::now().to_rfc3339(),
+                close_reason: None,
+            });
+            let sym = p.symbol.clone();
+            let dir = p.direction.clone();
+            let price = p.entry_price;
+            let level = p.scale_level;
+            self.open_positions.push(OpenPosition {
+                symbol: p.symbol,
+                direction: p.direction,
+                entry_price: p.entry_price,
+                shares: p.shares,
+                position_size: p.position_size,
+                buy_fee: p.buy_fee,
+                entry_binance: p.binance,
+                entry_chainlink: p.chainlink,
+                entry_spike: p.spike,
+                ema_offset_at_entry: 0.0,
+                entry_time: Instant::now(),
+                highest_price: p.entry_price,
+                profit_target: p.profit_target,
+                scale_level: p.scale_level,
+            });
+            info!(symbol=%sym, direction=%dir, price=price, level=level, "Position opened after delay");
+        }
     }
 }
