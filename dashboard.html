@@ -976,11 +976,13 @@
                 const pnlPct = t.entry_price && t.exit_price
                     ? ((t.exit_price - t.entry_price) / t.entry_price * 100 * (t.direction === 'DOWN' ? -1 : 1)).toFixed(2)
                     : '0.00';
+                const time = new Date(t.timestamp).toLocaleTimeString([], {hour12:false});
                 return `
                 <div class="trade-item">
                     <div class="t-left">
                         <div class="t-type ${t.pnl>=0?'t-win':'t-loss'}">${t.direction}</div>
                         <div class="t-info" style="color:var(--text-dim); font-size:10px;">${t.close_reason || ''}</div>
+                        <div style="font-size:9px; color:var(--text-muted);">${time}</div>
                     </div>
                     <div class="t-price ${t.pnl>=0?'val-up':'val-down'}">
                         ${formatMoneySigned(t.pnl)}

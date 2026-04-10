@@ -214,16 +214,24 @@ impl PaperWallet {
                 continue;
             }
 
-            // Check trend: is BTC moving in our favor over last 10 ticks?
+            // Check trend: BTC must be consistently on correct side AND accelerating away from ptb
             let trend_ok = if btc_history.len() >= 10 {
                 let recent = &btc_history[btc_history.len()-10..];
+                // All recent ticks must be on the correct side of price-to-beat
+                let all_correct_side = if pos.direction == "UP" {
+                    recent.iter().all(|&p| p > ptb)
+                } else {
+                    recent.iter().all(|&p| p < ptb)
+                };
+                // Trend must be moving away from price-to-beat (not just sideways)
                 let slope = recent.last().unwrap() - recent.first().unwrap();
-                if pos.direction == "UP" { slope >= 0.0 } else { slope <= 0.0 }
-            } else { true };
+                let moving_away = if pos.direction == "UP" { slope > 0.0 } else { slope < 0.0 };
+                all_correct_side && moving_away
+            } else { false }; // not enough history = don't hold
 
-            // Required margin check
+            // Required margin check — stricter: 2x the normal requirement for high confidence
             let required_margin = hold_margin_per_second * time_remaining as f64;
-            pos.hold_to_resolution = margin >= required_margin && trend_ok;
+            pos.hold_to_resolution = margin >= required_margin && trend_ok && crossings == 0;
         }
     }
 

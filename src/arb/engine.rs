@@ -23,6 +23,7 @@ struct SymbolState {
     pub price_to_beat_set: bool, // true once we've captured the opening Chainlink price
     pub btc_history: Vec<(f64, Instant)>, // (price, time) for 500ms momentum
     pub last_rejection: Option<(String, Instant)>,
+    pub spike_confirmed_since: Option<(f64, Instant)>, // (direction_sign, time spike first exceeded threshold)
 }
 
 pub struct ArbEngine {
@@ -132,9 +133,9 @@ impl ArbEngine {
             let binance = state.last_binance.map(|(p, _)| p).unwrap_or(0.0);
             let chainlink = state.last_chainlink.map(|(p, _)| p).unwrap_or(0.0);
 
-            // Spike delta = Binance momentum over last 500ms
+            // Spike delta = Binance momentum over last 1 second
             let spike = {
-                let cutoff = std::time::Duration::from_millis(500);
+                let cutoff = std::time::Duration::from_millis(1000);
                 let baseline = state.btc_history.iter()
                     .find(|(_, t)| t.elapsed() >= cutoff)
                     .map(|(p, _)| *p);
@@ -426,7 +427,7 @@ impl ArbEngine {
 
         // Use Binance momentum (rate of change) as spike signal, not Binance-Chainlink gap
         let adjusted_spike = {
-            let cutoff = std::time::Duration::from_millis(500);
+            let cutoff = std::time::Duration::from_millis(1000);
             let baseline = state.btc_history.iter()
                 .find(|(_, t)| t.elapsed() >= cutoff)
                 .map(|(p, _)| *p);
@@ -436,11 +437,26 @@ impl ArbEngine {
         let threshold_usd = self.config.threshold_bps as f64 / 100.0;
 
         if abs_spike < threshold_usd { 
-            state.last_spike_usd = 0.0; 
+            state.last_spike_usd = 0.0;
+            state.spike_confirmed_since = None;
             return; 
         }
 
         let direction = if adjusted_spike > 0.0 { "UP" } else { "DOWN" };
+        let direction_sign = if adjusted_spike > 0.0 { 1.0f64 } else { -1.0f64 };
+
+        // Require spike to be sustained for 200ms in the same direction before entering
+        let spike_sustained = match state.spike_confirmed_since {
+            Some((sign, t)) if sign == direction_sign => t.elapsed().as_millis() >= 300,
+            _ => {
+                state.spike_confirmed_since = Some((direction_sign, Instant::now()));
+                false
+            }
+        };
+
+        if !spike_sustained {
+            return;
+        }
         let (bid, ask) = self.wallet.get_bid_ask(symbol, direction);
         
         if bid <= 0.0 || ask <= 0.0 {
