@@ -164,6 +164,7 @@ impl LiveWallet {
             highest_price: entry_price,
             profit_target,
             scale_level,
+            hold_to_resolution: false,
         });
 
         Ok(scale_level)

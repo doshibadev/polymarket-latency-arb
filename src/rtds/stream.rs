@@ -25,6 +25,38 @@ pub struct PriceUpdate {
     pub source: String, // "binance" or "chainlink"
 }
 
+/// Direct Binance WebSocket for low-latency BTC price (~10ms updates vs RTDS relay ~50ms)
+async fn run_binance_direct(tx: mpsc::Sender<PriceUpdate>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let url = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade";
+    loop {
+        match connect_async(url).await {
+            Ok((ws_stream, _)) => {
+                info!("Direct Binance WebSocket connected");
+                let (_, mut read) = ws_stream.split();
+                while let Some(Ok(Message::Text(text))) = read.next().await {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(price_str) = val.get("p").and_then(|v| v.as_str()) {
+                            if let Ok(price) = price_str.parse::<f64>() {
+                                let _ = tx.send(PriceUpdate {
+                                    symbol: "BTC".to_string(),
+                                    price,
+                                    timestamp: Instant::now(),
+                                    source: "binance".to_string(),
+                                }).await;
+                            }
+                        }
+                    }
+                }
+                error!("Direct Binance WebSocket disconnected, reconnecting...");
+            }
+            Err(e) => {
+                error!("Direct Binance connect failed: {}, retrying in 3s", e);
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    }
+}
+
 pub struct RtdsStream {}
 
 impl RtdsStream {
@@ -74,6 +106,11 @@ impl RtdsStream {
 
         info!("RTDS connected, subscribed to BTC (Binance & Chainlink)");
 
+        // Also spawn a direct Binance WebSocket for lower latency Binance prices
+        let tx_binance = tx.clone();
+        tokio::spawn(async move {
+            let _ = run_binance_direct(tx_binance).await;
+        });
         let (mut write, mut read) = ws_stream.split();
         let mut heartbeat = tokio::time::interval(tokio::time::Duration::from_secs(5));
 

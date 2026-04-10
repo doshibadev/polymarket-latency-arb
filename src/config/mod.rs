@@ -16,6 +16,9 @@ pub struct AppConfig {
     pub spike_scaling_factor: f64,
     pub ema_alpha: f64,
     pub execution_delay_ms: u64,
+    pub hold_margin_per_second: f64, // required $ margin per second remaining to hold to resolution
+    pub hold_max_seconds: u64,       // only activate hold mode when <= this many seconds remain
+    pub hold_max_crossings: usize,   // max price-to-beat crossings in history before refusing to hold
 }
 
 impl AppConfig {
@@ -36,6 +39,9 @@ impl AppConfig {
             spike_scaling_factor: env::var("SPIKE_SCALING_FACTOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0001),
             ema_alpha: env::var("EMA_ALPHA").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1),
             execution_delay_ms: env::var("EXECUTION_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(300),
+            hold_margin_per_second: env::var("HOLD_MARGIN_PER_SECOND").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5),
+            hold_max_seconds: env::var("HOLD_MAX_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(90),
+            hold_max_crossings: env::var("HOLD_MAX_CROSSINGS").ok().and_then(|v| v.parse().ok()).unwrap_or(2),
         })
     }
 

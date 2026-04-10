@@ -22,6 +22,7 @@ pub struct OpenPosition {
     pub highest_price: f64,
     pub profit_target: f64,
     pub scale_level: u32,
+    pub hold_to_resolution: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -152,6 +153,76 @@ impl PaperWallet {
         if state.spike_history.len() > 5 { state.spike_history.remove(0); }
     }
 
+    /// Called by engine on each Binance tick to evaluate hold-to-resolution for open positions
+    pub fn update_hold_status(
+        &mut self,
+        symbol: &str,
+        btc_history: &[f64],
+        price_to_beat: Option<f64>,
+        end_ts: Option<u64>,
+        hold_margin_per_second: f64,
+        hold_max_seconds: u64,
+        hold_max_crossings: usize,
+    ) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let time_remaining = match end_ts {
+            Some(e) if e > now_secs => e - now_secs,
+            _ => return,
+        };
+
+        let ptb = match price_to_beat { Some(p) => p, None => return };
+        let current_btc = match btc_history.last() { Some(&p) => p, None => return };
+
+        for pos in &mut self.open_positions {
+            if pos.symbol != symbol { continue; }
+
+            let margin = if pos.direction == "UP" {
+                current_btc - ptb
+            } else {
+                ptb - current_btc
+            };
+
+            // If BTC has crossed price_to_beat → close immediately, don't hold
+            if margin <= 0.0 {
+                pos.hold_to_resolution = false;
+                continue;
+            }
+
+            // Only consider holding in the last hold_max_seconds
+            if time_remaining > hold_max_seconds {
+                pos.hold_to_resolution = false;
+                continue;
+            }
+
+            // Count crossings in btc_history
+            let crossings = btc_history.windows(2).filter(|w| {
+                let was_above = w[0] > ptb;
+                let is_above = w[1] > ptb;
+                was_above != is_above
+            }).count();
+
+            if crossings > hold_max_crossings {
+                pos.hold_to_resolution = false;
+                continue;
+            }
+
+            // Check trend: is BTC moving in our favor over last 10 ticks?
+            let trend_ok = if btc_history.len() >= 10 {
+                let recent = &btc_history[btc_history.len()-10..];
+                let slope = recent.last().unwrap() - recent.first().unwrap();
+                if pos.direction == "UP" { slope >= 0.0 } else { slope <= 0.0 }
+            } else { true };
+
+            // Required margin check
+            let required_margin = hold_margin_per_second * time_remaining as f64;
+            pos.hold_to_resolution = margin >= required_margin && trend_ok;
+        }
+    }
+
     pub fn calculate_fee(&self, shares: f64, price: f64) -> f64 {
         let fee = shares * self.config.crypto_fee_rate * price * (1.0 - price);
         if fee < 0.00001 { 0.0 } else { (fee * 100000.0).round() / 100000.0 }
@@ -203,16 +274,21 @@ impl PaperWallet {
             let spike_faded = adjusted_spike.abs() < pos.entry_spike.abs() * self.config.spike_faded_pct;
 
             let held_ms = pos.entry_time.elapsed().as_millis();
-            let near_end = held_ms > 295000; // fallback: 4m55s hold time
+            let near_end = held_ms > 295000;
 
-            if trailing_stop_hit || trend_reversed || spike_faded || near_end {
+            if pos.hold_to_resolution {
+                // In hold mode: only close if price-to-beat is breached (trailing stop still active)
+                if trailing_stop_hit {
+                    to_close.push((idx, "trailing_stop"));
+                }
+                // near_end handled by engine's force-close at market end
+            } else if trailing_stop_hit || trend_reversed || spike_faded || near_end {
                 let reason = if trailing_stop_hit { "trailing_stop" }
                             else if trend_reversed { "trend_reversed" }
                             else if spike_faded { "spike_faded" }
                             else { "near_end" };
                 to_close.push((idx, reason));
-            }
-        }
+            }        }
 
         if to_close.is_empty() {
             return false;
@@ -345,6 +421,7 @@ impl PaperWallet {
                 highest_price: p.entry_price,
                 profit_target: p.profit_target,
                 scale_level: p.scale_level,
+                hold_to_resolution: false,
             });
             info!(symbol=%sym, direction=%dir, price=price, level=level, "Position opened after delay");
         }

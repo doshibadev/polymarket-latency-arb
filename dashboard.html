@@ -890,7 +890,7 @@
                         <span class="pos-pnl ${p.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(p.pnl)}</span>
                     </div>
                     <div style="font-size:10px; color:var(--text-dim);">${p.shares.toFixed(2)} SH @ ${p.entry_price.toFixed(4)} · NOW ${p.current_price.toFixed(4)}</div>
-                    <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">LVL ${p.level || 1} · <span class="pos-age" data-idx="${idx}">${formatMs(p.held_ms || 0)}</span></div>
+                    <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">LVL ${p.level || 1} · <span class="pos-age" data-idx="${idx}">${formatMs(p.held_ms || 0)}</span>${p.hold_to_resolution ? ' · <span style="color:var(--color-gold);font-weight:700;">⚓ HOLD</span>' : ''}</div>
                     <button class="pos-close-btn" onclick="closePosition(${idx})">CLOSE</button>
                 </div>
             `).join('');

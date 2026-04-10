@@ -19,7 +19,9 @@ struct SymbolState {
     pub last_spike_usd: f64,
     pub market_end_ts: Option<u64>,
     pub question: String,
-    pub last_rejection: Option<(String, Instant)>, // (reason, time) for dedup
+    pub price_to_beat: Option<f64>,
+    pub btc_history: Vec<f64>, // rolling ~30 ticks for trend/crossing analysis
+    pub last_rejection: Option<(String, Instant)>,
 }
 
 pub struct ArbEngine {
@@ -109,7 +111,8 @@ impl ArbEngine {
                 "side": pos.direction,
                 "pnl": pnl,
                 "level": pos.scale_level,
-                "held_ms": pos.entry_time.elapsed().as_millis() as u64
+                "held_ms": pos.entry_time.elapsed().as_millis() as u64,
+                "hold_to_resolution": pos.hold_to_resolution
             }));
         }
 
@@ -331,18 +334,42 @@ impl ArbEngine {
     }
 
     async fn handle_price_update(&mut self, update: PriceUpdate) -> bool {
-        let state = self.symbol_states.entry(update.symbol.clone()).or_default();
-        if update.source == "binance" {
-            state.last_binance = Some((update.price, update.timestamp));
-        } else {
-            state.last_chainlink = Some((update.price, update.timestamp));
-            state.ema_ticks += 1;
+        {
+            let state = self.symbol_states.entry(update.symbol.clone()).or_default();
+            if update.source == "binance" {
+                state.last_binance = Some((update.price, update.timestamp));
+                state.btc_history.push(update.price);
+                if state.btc_history.len() > 30 { state.btc_history.remove(0); }
+            } else {
+                state.last_chainlink = Some((update.price, update.timestamp));
+                state.ema_ticks += 1;
+            }
         }
 
+        let state = self.symbol_states.get(&update.symbol).unwrap();
         if let (Some((b, _)), Some((c, _))) = (state.last_binance, state.last_chainlink) {
             self.wallet.update_btc_prices(&update.symbol, b, c);
             if self.running { self.check_for_spike(&update.symbol).await; }
         }
+
+        if update.source == "binance" {
+            let symbol = update.symbol.clone();
+            let (ptb, end_ts, btc_hist) = {
+                let s = self.symbol_states.get(&symbol);
+                (
+                    s.and_then(|s| s.price_to_beat),
+                    s.and_then(|s| s.market_end_ts),
+                    s.map(|s| s.btc_history.clone()).unwrap_or_default(),
+                )
+            };
+            self.wallet.update_hold_status(
+                &symbol, &btc_hist, ptb, end_ts,
+                self.config.hold_margin_per_second,
+                self.config.hold_max_seconds,
+                self.config.hold_max_crossings,
+            );
+        }
+
         self.wallet.flush_pending();
         self.wallet.try_close_position().await
     }
@@ -360,6 +387,17 @@ impl ArbEngine {
         let state = self.symbol_states.entry(market.symbol.clone()).or_default();
         state.market_end_ts = Some(market.window_end_ts);
         state.question = market.question.clone();
+        // Parse price to beat from question e.g. "Will BTC be above $83,450.00 at 14:35?"
+        state.price_to_beat = market.question
+            .split('$')
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .map(|s| s.replace(',', ""))
+            .and_then(|s| s.parse::<f64>().ok());
+        if let Some(ptb) = state.price_to_beat {
+            info!(symbol=%market.symbol, price_to_beat=ptb, "Market price to beat parsed");
+        }
+        state.btc_history.clear();
         self.wallet.set_market_info(&market.symbol, market.question);
         self.wallet.reset_prices(&market.symbol);
     }
