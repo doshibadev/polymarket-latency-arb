@@ -225,8 +225,8 @@ impl ArbEngine {
         // Push initial portfolio value (just cash)
         self.update_history(self.current_balance());
 
-        let mut broadcast_timer = tokio::time::interval(Duration::from_millis(500));
-        let mut spike_poll = tokio::time::interval(Duration::from_millis(100));
+        let mut broadcast_timer = tokio::time::interval(Duration::from_millis(200)); // faster UI updates
+        let mut spike_poll = tokio::time::interval(Duration::from_millis(50)); // faster spike detection
 
         loop {
             tokio::select! {
@@ -442,7 +442,7 @@ impl ArbEngine {
                     .map(|(p, _)| update.price - p)
             };
             if let Some(momentum) = fast_spike {
-                self.wallet.push_spike_momentum(&symbol, momentum);
+                self.wallet.push_spike_momentum(&symbol, momentum, update.price);
             }
 
             let (b, c) = {
@@ -585,9 +585,9 @@ impl ArbEngine {
         let direction = if adjusted_spike > 0.0 { "UP" } else { "DOWN" };
         let direction_sign = if adjusted_spike > 0.0 { 1.0f64 } else { -1.0f64 };
 
-        // Require spike to be sustained for 200ms in the same direction before entering
+        // Require spike to be sustained for 100ms in the same direction before entering (faster)
         let spike_sustained = match state.spike_confirmed_since {
-            Some((sign, t)) if sign == direction_sign => t.elapsed().as_millis() >= 300,
+            Some((sign, t)) if sign == direction_sign => t.elapsed().as_millis() >= 100,
             _ => {
                 state.spike_confirmed_since = Some((direction_sign, Instant::now()));
                 false

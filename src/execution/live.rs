@@ -279,16 +279,17 @@ impl LiveWallet {
         signer: &K256Signer,
         token_id: U256,
         price: Decimal,
-        size: Decimal,
+        usdc_amount: Decimal,
         side: Side,
     ) -> Result<String, String> {
+        use polymarket_client_sdk::clob::types::Amount;
         for attempt in 0..3u32 {
-            let order = clob.limit_order()
+            let order = clob.market_order()
                 .token_id(token_id)
+                .amount(Amount::usdc(usdc_amount).map_err(|e| e.to_string())?)
                 .price(price)
-                .size(size)
                 .side(side.clone())
-                .order_type(OrderType::GTC)
+                .order_type(OrderType::FOK)
                 .build()
                 .await
                 .map_err(|e| e.to_string())?;
@@ -340,12 +341,14 @@ impl LiveWallet {
         let buy_fee = shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
 
         if position_size < 1.0 { return Err("BELOW_MIN_ORDER_SIZE".to_string()); }
+        if shares < 5.0 { return Err("BELOW_MIN_SHARES".to_string()); }
         if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
 
         let tick = 0.01f64;
         let rounded_price = Self::round_to_tick(entry_price, tick);
+        let rounded_shares = ((shares * 100.0).floor() / 100.0).max(5.0); // enforce min 5 shares
         let price = Decimal::try_from(rounded_price).map_err(|e| e.to_string())?;
-        let size = Decimal::try_from((shares * 100.0).floor() / 100.0).map_err(|e| e.to_string())?;
+        let size = Decimal::try_from(rounded_shares).map_err(|e| e.to_string())?;
 
         let order_id = Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Buy).await?;
         info!(symbol=%symbol, direction=%direction, shares=shares, price=rounded_price, order_id=%order_id, "Live BUY placed");
@@ -379,6 +382,8 @@ impl LiveWallet {
             highest_price: entry_price,
             scale_level,
             hold_to_resolution: false,
+            peak_spike: spike.abs(),
+            spike_low_since: None,
         });
 
         Ok(scale_level)
@@ -407,8 +412,7 @@ impl LiveWallet {
             Ok(p) => p,
             Err(e) => { error!("Invalid sell price: {}", e); return; }
         };
-        let size = match Decimal::try_from((pos.shares * 100.0).floor() / 100.0) {
-            Ok(s) => s,
+        let size = match Decimal::try_from((pos.shares * 100.0).floor() / 100.0) {            Ok(s) => s,
             Err(e) => { error!("Invalid sell size: {}", e); return; }
         };
 

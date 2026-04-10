@@ -19,6 +19,9 @@ pub struct OpenPosition {
     pub highest_price: f64,
     pub scale_level: u32,
     pub hold_to_resolution: bool,
+    #[serde(skip)]
+    pub spike_low_since: Option<Instant>, // when spike first dropped below threshold
+    pub peak_spike: f64,           // highest spike seen since entry
 }
 
 #[derive(Serialize, Clone)]
@@ -36,7 +39,7 @@ pub struct TradeRecord {
     pub close_reason: Option<String>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct SymbolMarketState {
     pub up_bid: f64,
     pub up_ask: f64,
@@ -45,7 +48,32 @@ struct SymbolMarketState {
     pub question: String,
     pub last_binance: f64,
     pub last_chainlink: f64,
-    pub spike_history: Vec<f64>, // rolling window for smoothed spike
+    pub spike_history: [f64; 16], // fixed-size ring buffer for smoothed spike
+    pub spike_history_len: usize, // how many valid entries
+    pub spike_history_idx: usize, // next write position
+    pub btc_price_history: [(f64, Instant); 64], // (price, time) for long-baseline spike calc
+    pub btc_history_len: usize,
+    pub btc_history_idx: usize,
+}
+
+impl Default for SymbolMarketState {
+    fn default() -> Self {
+        Self {
+            up_bid: 0.0,
+            up_ask: 0.0,
+            down_bid: 0.0,
+            down_ask: 0.0,
+            question: String::new(),
+            last_binance: 0.0,
+            last_chainlink: 0.0,
+            spike_history: [0.0; 16],
+            spike_history_len: 0,
+            spike_history_idx: 0,
+            btc_price_history: [(0.0, Instant::now()); 64],
+            btc_history_len: 0,
+            btc_history_idx: 0,
+        }
+    }
 }
 
 /// A pending close waiting for execution delay to elapse
@@ -157,11 +185,44 @@ impl PaperWallet {
         // spike_history is updated by engine via update_spike_momentum
     }
 
-    /// Push the current 200ms momentum value into spike_history for exit smoothing
-    pub fn push_spike_momentum(&mut self, symbol: &str, momentum: f64) {
+    /// Push the current momentum value into ring buffer for exit smoothing
+    /// Also push BTC price for long-baseline spike calculation
+    pub fn push_spike_momentum(&mut self, symbol: &str, momentum: f64, btc_price: f64) {
         let state = self.symbol_states.entry(symbol.to_string()).or_default();
-        state.spike_history.push(momentum);
-        if state.spike_history.len() > 5 { state.spike_history.remove(0); }
+        
+        // Ring buffer for spike momentum
+        state.spike_history[state.spike_history_idx] = momentum;
+        state.spike_history_idx = (state.spike_history_idx + 1) % 16;
+        if state.spike_history_len < 16 { state.spike_history_len += 1; }
+        
+        // Ring buffer for BTC price history (for long-baseline spike)
+        state.btc_price_history[state.btc_history_idx] = (btc_price, Instant::now());
+        state.btc_history_idx = (state.btc_history_idx + 1) % 64;
+        if state.btc_history_len < 64 { state.btc_history_len += 1; }
+    }
+    
+    /// Get spike measured from 1.5s ago (matches Polymarket delay)
+    fn get_long_baseline_spike(&self, symbol: &str, current_price: f64) -> f64 {
+        let state = match self.symbol_states.get(symbol) {
+            Some(s) => s,
+            None => return 0.0,
+        };
+        let cutoff = std::time::Duration::from_millis(1500);
+        let now = Instant::now();
+        
+        // Find price from ~1.5s ago
+        for i in 0..state.btc_history_len {
+            let idx = if state.btc_history_idx >= i + 1 {
+                state.btc_history_idx - i - 1
+            } else {
+                64 - (i + 1 - state.btc_history_idx)
+            };
+            let (price, time) = state.btc_price_history[idx];
+            if now.duration_since(time) >= cutoff {
+                return current_price - price;
+            }
+        }
+        0.0
     }
 
     /// Called by engine on each Binance tick to evaluate hold-to-resolution for open positions
@@ -264,133 +325,114 @@ impl PaperWallet {
 
     pub async fn try_close_position(&mut self) -> bool {
         let mut to_close = Vec::new();
+        let mut peak_updates: Vec<(usize, f64)> = Vec::new();
+        let mut spike_low_updates: Vec<(usize, bool)> = Vec::new();
 
+        // First pass: collect all data needed for decisions
         for (idx, pos) in self.open_positions.iter().enumerate() {
             let current_price = self.get_share_price(&pos.symbol, &pos.direction);
             if current_price <= 0.0 { continue; }
 
-            let state = self.symbol_states.get(&pos.symbol).cloned().unwrap_or_default();
-            // Use smoothed Binance momentum for exit decisions
-            let adjusted_spike = if state.spike_history.is_empty() {
-                0.0
-            } else {
-                state.spike_history.iter().sum::<f64>() / state.spike_history.len() as f64
+            let state = match self.symbol_states.get(&pos.symbol) {
+                Some(s) => s,
+                None => continue,
             };
+            let long_spike = self.get_long_baseline_spike(&pos.symbol, state.last_binance);
+            
+            // Track peak spike
+            let new_peak = if long_spike.abs() > pos.peak_spike { long_spike.abs() } else { pos.peak_spike };
+            peak_updates.push((idx, new_peak));
 
-            // Trailing stop: 5% drop from highest (UP) or 5% rise from lowest (DOWN)
+            // Trailing stop
             let trailing_stop_hit = if pos.direction == "UP" {
                 current_price < pos.highest_price * (1.0 - self.config.trailing_stop_pct / 100.0)
             } else {
-                // For DOWN, highest_price tracks the lowest price seen (best value)
                 current_price > pos.highest_price * (1.0 + self.config.trailing_stop_pct / 100.0)
             };
 
-            // Spike reversed: for UP close when spike goes negative, for DOWN close when spike goes positive
-            // Use entry_spike sign to determine what "reversed" means
+            // Trend reversed
             let trend_reversed = if pos.direction == "UP" {
-                adjusted_spike < -(pos.entry_spike.abs() * 0.1) // spike went 10% negative
+                long_spike < -(pos.entry_spike.abs() * 0.2)
             } else {
-                adjusted_spike > (pos.entry_spike.abs() * 0.1) // spike went 10% positive
+                long_spike > (pos.entry_spike.abs() * 0.2)
             };
 
-            // Spike faded to <spike_faded_pct of entry spike
-            let spike_faded = adjusted_spike.abs() < pos.entry_spike.abs() * self.config.spike_faded_pct;
+            // Spike faded: below 30% of PEAK for 500ms
+            let spike_low = long_spike.abs() < new_peak * 0.3;
+            spike_low_updates.push((idx, spike_low));
+            let spike_faded = spike_low && pos.spike_low_since.map_or(false, |t| t.elapsed().as_millis() >= 500);
 
-            let held_ms = pos.entry_time.elapsed().as_millis();
-            let near_end = held_ms > 295000;
+            let near_end = pos.entry_time.elapsed().as_millis() > 295000;
 
-            if pos.hold_to_resolution {
-                // In hold mode: only close if price-to-beat is breached (trailing stop still active)
-                if trailing_stop_hit {
-                    to_close.push((idx, "trailing_stop"));
+            let reason = if trailing_stop_hit { Some("trailing_stop") }
+                        else if trend_reversed { Some("trend_reversed") }
+                        else if spike_faded { Some("spike_faded") }
+                        else if near_end { Some("near_end") }
+                        else { None };
+
+            if let Some(r) = reason {
+                if pos.hold_to_resolution && r != "trailing_stop" {
+                    continue;
                 }
-                // near_end handled by engine's force-close at market end
-            } else if trailing_stop_hit || trend_reversed || spike_faded || near_end {
-                let reason = if trailing_stop_hit { "trailing_stop" }
-                            else if trend_reversed { "trend_reversed" }
-                            else if spike_faded { "spike_faded" }
-                            else { "near_end" };
-                to_close.push((idx, reason));
-            }        }
+                to_close.push((idx, r));
+            }
+        }
+
+        // Update peak_spike and spike_low_since for all positions
+        for (idx, new_peak) in peak_updates {
+            if let Some(pos) = self.open_positions.get_mut(idx) {
+                pos.peak_spike = new_peak;
+            }
+        }
+        for (idx, spike_low) in spike_low_updates {
+            if let Some(pos) = self.open_positions.get_mut(idx) {
+                if spike_low {
+                    if pos.spike_low_since.is_none() {
+                        pos.spike_low_since = Some(Instant::now());
+                    }
+                } else {
+                    pos.spike_low_since = None;
+                }
+            }
+        }
 
         if to_close.is_empty() {
             return false;
         }
 
-        // Queue closes with exit price locked now — settled after exit delay
+        // Process closes
         to_close.sort_by_key(|k| std::cmp::Reverse(k.0));
+        let mut closed = false;
         for (idx, reason) in to_close {
             let pos = self.open_positions.remove(idx);
             let close_price = self.get_share_price(&pos.symbol, &pos.direction);
-            self.pending_closes.push(PendingClose {
-                idx_at_submit: idx,
-                symbol: pos.symbol.clone(),
-                direction: pos.direction.clone(),
-                close_price,
-                reason,
-                submitted_at: Instant::now(),
-            });
-            // Re-add position temporarily so it shows on dashboard until settled
-            // Actually simpler: just keep it removed, settle after delay
-            // Store the position data we need for settlement
             let sell_fee = self.calculate_fee(pos.shares, close_price);
             let net_revenue = (pos.shares * close_price) - sell_fee;
             let pnl = net_revenue - (pos.position_size + pos.buy_fee);
             let state = self.symbol_states.get(&pos.symbol).cloned().unwrap_or_default();
 
-            // For paper: settle immediately if no exit delay, else queue
-            let delay = if self.config.paper_trading {
-                self.config.execution_delay_ms
-            } else { 0 };
-
-            if delay == 0 {
-                self.balance += net_revenue;
-                self.trade_count += 1;
-                if pnl > 0.0 { self.wins += 1; } else { self.losses += 1; }
-                self.total_fees_paid += pos.buy_fee + sell_fee;
-                self.total_volume += pos.position_size + (pos.shares * close_price);
-                self.trade_history.push(TradeRecord {
-                    symbol: pos.symbol.clone(),
-                    r#type: "exit".to_string(),
-                    question: state.question,
-                    direction: pos.direction.clone(),
-                    entry_price: Some(pos.entry_price),
-                    exit_price: Some(close_price),
-                    shares: pos.shares,
-                    cost: pos.position_size,
-                    pnl: Some(pnl),
-                    timestamp: chrono::Local::now().to_rfc3339(),
-                    close_reason: Some(reason.to_string()),
-                });
-                info!(symbol=%pos.symbol, pnl=format!("${:.4}", pnl), reason=%reason, "Position closed");
-            } else {
-                // Store full settlement data in pending_closes — flush after delay
-                // We already removed the position; store settlement in a temp struct
-                // For simplicity: settle immediately but record the delayed exit price
-                // (true exit delay simulation would need to store the full position)
-                self.balance += net_revenue;
-                self.trade_count += 1;
-                if pnl > 0.0 { self.wins += 1; } else { self.losses += 1; }
-                self.total_fees_paid += pos.buy_fee + sell_fee;
-                self.total_volume += pos.position_size + (pos.shares * close_price);
-                self.trade_history.push(TradeRecord {
-                    symbol: pos.symbol.clone(),
-                    r#type: "exit".to_string(),
-                    question: state.question,
-                    direction: pos.direction.clone(),
-                    entry_price: Some(pos.entry_price),
-                    exit_price: Some(close_price),
-                    shares: pos.shares,
-                    cost: pos.position_size,
-                    pnl: Some(pnl),
-                    timestamp: chrono::Local::now().to_rfc3339(),
-                    close_reason: Some(reason.to_string()),
-                });
-                info!(symbol=%pos.symbol, pnl=format!("${:.4}", pnl), reason=%reason, "Position closed (exit delay simulated)");
-            }
+            self.balance += net_revenue;
+            self.trade_count += 1;
+            if pnl > 0.0 { self.wins += 1; } else { self.losses += 1; }
+            self.total_fees_paid += pos.buy_fee + sell_fee;
+            self.total_volume += pos.position_size + (pos.shares * close_price);
+            self.trade_history.push(TradeRecord {
+                symbol: pos.symbol.clone(),
+                r#type: "exit".to_string(),
+                question: state.question,
+                direction: pos.direction.clone(),
+                entry_price: Some(pos.entry_price),
+                exit_price: Some(close_price),
+                shares: pos.shares,
+                cost: pos.position_size,
+                pnl: Some(pnl),
+                timestamp: chrono::Local::now().to_rfc3339(),
+                close_reason: Some(reason.to_string()),
+            });
+            info!(symbol=%pos.symbol, pnl=format!("${:.4}", pnl), reason=%reason, "Position closed");
+            closed = true;
         }
-
-        true
+        closed
     }
 
     pub fn open_position(&mut self, symbol: &str, direction: &str, spike: f64, threshold_usd: f64) -> std::result::Result<u32, String> {
@@ -417,6 +459,7 @@ impl PaperWallet {
         let buy_fee = self.calculate_fee(shares, entry_price);
         if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
         if position_size < 1.0 { return Err("BELOW_MIN_ORDER_SIZE".to_string()); }
+        if shares < 5.0 { return Err("BELOW_MIN_SHARES".to_string()); }
 
         // Reserve balance immediately so concurrent entries don't over-allocate
         self.balance -= position_size + buy_fee;
@@ -487,6 +530,8 @@ impl PaperWallet {
                 highest_price: p.entry_price,
                 scale_level: p.scale_level,
                 hold_to_resolution: false,
+                peak_spike: p.spike.abs(),
+                spike_low_since: None,
             });
             info!(symbol=%sym, direction=%dir, price=price, level=level, "Position opened after delay");
         }
