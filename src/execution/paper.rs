@@ -48,6 +48,7 @@ struct SymbolMarketState {
     pub question: String,
     pub last_binance: f64,
     pub last_chainlink: f64,
+    pub spike_history: Vec<f64>, // rolling window for smoothed spike
 }
 
 /// A pending entry waiting for execution delay to elapse
@@ -146,6 +147,9 @@ impl PaperWallet {
         let state = self.symbol_states.entry(symbol.to_string()).or_default();
         state.last_binance = binance;
         state.last_chainlink = chainlink;
+        let spike = binance - chainlink;
+        state.spike_history.push(spike);
+        if state.spike_history.len() > 5 { state.spike_history.remove(0); }
     }
 
     pub fn calculate_fee(&self, shares: f64, price: f64) -> f64 {
@@ -172,7 +176,12 @@ impl PaperWallet {
             if current_price <= 0.0 { continue; }
 
             let state = self.symbol_states.get(&pos.symbol).cloned().unwrap_or_default();
-            let adjusted_spike = state.last_binance - state.last_chainlink;
+            // Use smoothed spike (avg of last 5 ticks) to avoid single-tick noise triggering exits
+            let adjusted_spike = if state.spike_history.is_empty() {
+                state.last_binance - state.last_chainlink
+            } else {
+                state.spike_history.iter().sum::<f64>() / state.spike_history.len() as f64
+            };
 
             // Trailing stop: 5% drop from highest (UP) or 5% rise from lowest (DOWN)
             let trailing_stop_hit = if pos.direction == "UP" {

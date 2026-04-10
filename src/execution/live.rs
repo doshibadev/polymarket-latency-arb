@@ -9,7 +9,6 @@ use polymarket_client_sdk::clob::types::{OrderType, Side};
 use polymarket_client_sdk::types::{Decimal, U256};
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
 use tracing::{error, info};
-
 use crate::config::AppConfig;
 use crate::execution::paper::{OpenPosition, TradeRecord};
 
