@@ -23,6 +23,10 @@ pub struct OpenPosition {
     #[serde(skip)]
     pub spike_low_since: Option<Instant>, // when spike first dropped below threshold
     pub peak_spike: f64,           // highest spike seen since entry
+    // Spread-based edge tracking
+    pub entry_spread: f64,         // Binance - Chainlink spread at entry
+    pub entry_binance: f64,        // Binance price at entry
+    pub entry_chainlink: f64,      // Chainlink price at entry
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -122,6 +126,10 @@ pub struct PendingEntry {
     pub shares: f64,
     pub buy_fee: f64,
     pub submitted_at: Instant,
+    // Spread-based edge tracking
+    pub entry_spread: f64,
+    pub entry_binance: f64,
+    pub entry_chainlink: f64,
 }
 
 pub struct PaperWallet {
@@ -329,6 +337,30 @@ impl PaperWallet {
         0.0
     }
 
+    /// Get spike measured from 200ms ago (for fast exits)
+    fn get_fast_baseline_spike(&self, symbol: &str, current_price: f64) -> f64 {
+        let state = match self.symbol_states.get(symbol) {
+            Some(s) => s,
+            None => return 0.0,
+        };
+        let cutoff = std::time::Duration::from_millis(200);
+        let now = Instant::now();
+        
+        // Find price from ~200ms ago
+        for i in 0..state.btc_history_len {
+            let idx = if state.btc_history_idx >= i + 1 {
+                state.btc_history_idx - i - 1
+            } else {
+                64 - (i + 1 - state.btc_history_idx)
+            };
+            let (price, time) = state.btc_price_history[idx];
+            if now.duration_since(time) >= cutoff {
+                return current_price - price;
+            }
+        }
+        0.0
+    }
+
     /// Check if price is consolidating (not moving much in last 500ms)
     /// Returns true if price range in last 500ms is less than threshold
     fn is_consolidating(&self, symbol: &str, threshold: f64) -> bool {
@@ -473,37 +505,63 @@ impl PaperWallet {
                 Some(s) => s,
                 None => continue,
             };
-            let long_spike = self.get_long_baseline_spike(&pos.symbol, state.last_binance);
+            
+            // Calculate current spread (Binance - Chainlink)
+            let current_binance = state.last_binance;
+            let current_chainlink = state.last_chainlink;
+            let current_spread = current_binance - current_chainlink;
+            
+            // SPREAD-BASED EXIT: Exit when spread closes by 70%+ (Chainlink caught up)
+            let spread_closed = current_spread.abs() < pos.entry_spread.abs() * 0.3;
+            
+            // Spread velocity: How fast is Chainlink catching up?
+            // If spread is closing rapidly, exit immediately
+            let spread_velocity = {
+                let spread_change = pos.entry_spread.abs() - current_spread.abs();
+                let time_elapsed = pos.entry_time.elapsed().as_secs_f64();
+                if time_elapsed > 0.1 {
+                    spread_change / time_elapsed // $/second
+                } else {
+                    0.0
+                }
+            };
+            let rapid_catchup = spread_velocity > 10.0; // Chainlink catching up > $10/sec
+            
+            // Use FAST baseline (200ms) for quick exits instead of 1s
+            let fast_spike = self.get_fast_baseline_spike(&pos.symbol, state.last_binance);
+            let _long_spike = self.get_long_baseline_spike(&pos.symbol, state.last_binance);
             
             // Track peak spike
-            let new_peak = if long_spike.abs() > pos.peak_spike { long_spike.abs() } else { pos.peak_spike };
+            let new_peak = if fast_spike.abs() > pos.peak_spike { fast_spike.abs() } else { pos.peak_spike };
             peak_updates.push((idx, new_peak));
 
-            // Trailing stop
+            // Trailing stop (unchanged)
             let trailing_stop_hit = if pos.direction == "UP" {
                 current_price < pos.highest_price * (1.0 - self.config.trailing_stop_pct / 100.0)
             } else {
                 current_price > pos.highest_price * (1.0 + self.config.trailing_stop_pct / 100.0)
             };
 
-            // Trend reversed
+            // FAST trend reversal detection using 200ms baseline (not 1s)
             let trend_reversed = if pos.direction == "UP" {
-                long_spike < -(pos.entry_spike.abs() * 0.2)
+                fast_spike < -(pos.entry_spike.abs() * 0.3) // Exit faster on reversal
             } else {
-                long_spike > (pos.entry_spike.abs() * 0.2)
+                fast_spike > (pos.entry_spike.abs() * 0.3)
             };
 
-            // Spike faded: below 30% of PEAK for 500ms AND not consolidating
-            // Consolidation = price hasn't moved more than $20 in last 500ms
+            // Spike faded: Use fast spike for detection, require less time (200ms not 500ms)
             let consolidating = self.is_consolidating(&pos.symbol, 20.0);
-            let spike_low = long_spike.abs() < new_peak * 0.3;
+            let spike_low = fast_spike.abs() < new_peak * 0.3;
             spike_low_updates.push((idx, spike_low));
-            // Don't trigger spike_faded if consolidating (sideways is not a fade)
-            let spike_faded = spike_low && !consolidating && pos.spike_low_since.map_or(false, |t| t.elapsed().as_millis() >= 500);
+            // Faster fade detection: 200ms instead of 500ms
+            let spike_faded = spike_low && !consolidating && pos.spike_low_since.map_or(false, |t| t.elapsed().as_millis() >= 200);
 
             let near_end = pos.entry_time.elapsed().as_millis() > 295000;
 
-            let reason = if trailing_stop_hit { Some("trailing_stop") }
+            // PRIORITY ORDER: Spread-based exit first, then other conditions
+            let reason = if spread_closed { Some("spread_closed") }
+                        else if rapid_catchup { Some("rapid_catchup") }
+                        else if trailing_stop_hit { Some("trailing_stop") }
                         else if trend_reversed { Some("trend_reversed") }
                         else if spike_faded { Some("spike_faded") }
                         else if near_end { Some("near_end") }
@@ -582,13 +640,28 @@ impl PaperWallet {
                 timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some(reason.to_string()),
             });
-            info!(symbol=%pos.symbol, pnl=format!("${:.4}", pnl), reason=%reason, fill_price=fill_price, "Position closed at bid price");
+            
+            // Calculate spread closure percentage for logging
+            let spread_closed_pct = if pos.entry_spread.abs() > 0.0 {
+                (1.0 - current_spread.abs() / pos.entry_spread.abs()) * 100.0
+            } else { 0.0 };
+            
+            info!(
+                symbol=%pos.symbol, 
+                pnl=format!("${:.4}", pnl), 
+                reason=%reason, 
+                fill_price=fill_price, 
+                entry_spread=pos.entry_spread,
+                current_spread=current_spread,
+                spread_closed_pct=format!("{:.1}%", spread_closed_pct),
+                "Position closed"
+            );
             closed = true;
         }
         closed
     }
 
-    pub fn open_position(&mut self, symbol: &str, direction: &str, spike: f64, threshold_usd: f64) -> std::result::Result<u32, String> {
+    pub fn open_position(&mut self, symbol: &str, direction: &str, spike: f64, threshold_usd: f64, binance: f64, chainlink: f64) -> std::result::Result<u32, String> {
         let existing: Vec<_> = self.open_positions.iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
             .collect();
@@ -605,6 +678,23 @@ impl PaperWallet {
         if entry_price < self.config.min_entry_price { return Err("PRICE_TOO_LOW".to_string()); }
         if (entry_price - 0.5).abs() < self.config.min_price_distance {
             return Err("PRICE_TOO_CLOSE_TO_HALF".to_string());
+        }
+
+        // Calculate spread (Binance - Chainlink)
+        let spread = binance - chainlink;
+        
+        // SPREAD-BASED ENTRY FILTER: Only enter when spread > MIN_EDGE_SPREAD
+        // AND spread direction matches trade direction
+        if spread.abs() < self.config.min_edge_spread {
+            return Err(format!("SPREAD_TOO_SMALL: {:.2}", spread.abs()));
+        }
+        
+        // Verify spread direction matches trade direction
+        // If Binance > Chainlink (+spread), we should buy UP (Chainlink will rise)
+        // If Binance < Chainlink (-spread), we should buy DOWN (Chainlink will fall)
+        let spread_direction = if spread > 0.0 { "UP" } else { "DOWN" };
+        if spread_direction != direction {
+            return Err(format!("SPREAD_WRONG_DIRECTION: spread={:.2}, want={}", spread, direction));
         }
 
         let position_size = self.balance * self.portfolio_pct * (1.0 / scale_level as f64);
@@ -630,6 +720,9 @@ impl PaperWallet {
             shares,
             buy_fee,
             submitted_at: Instant::now(),
+            entry_spread: spread,
+            entry_binance: binance,
+            entry_chainlink: chainlink,
         });
 
         Ok(scale_level)
@@ -699,6 +792,7 @@ impl PaperWallet {
             let dir = p.direction.clone();
             let level = p.scale_level;
             let slippage = fill_price - p.entry_price;
+            let spread_info = format!("spread={:.2} (B:{:.2} - C:{:.2})", p.entry_spread, p.entry_binance, p.entry_chainlink);
             self.open_positions.push(OpenPosition {
                 symbol: p.symbol,
                 direction: p.direction,
@@ -714,8 +808,11 @@ impl PaperWallet {
                 hold_to_resolution: false,
                 peak_spike: p.spike.abs(),
                 spike_low_since: None,
+                entry_spread: p.entry_spread,
+                entry_binance: p.entry_binance,
+                entry_chainlink: p.entry_chainlink,
             });
-            info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened at ask price");
+            info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, spread=%spread_info, "Position opened with edge");
         }
     }
 }

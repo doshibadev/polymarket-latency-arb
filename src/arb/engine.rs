@@ -26,6 +26,9 @@ struct SymbolState {
     // Pre-computed baselines for faster spike detection
     pub baseline_200ms: Option<f64>,
     pub baseline_1s: Option<f64>,
+    // Track previous spike for acceleration detection
+    pub prev_fast_spike: f64,
+    pub prev_spike_time: Option<Instant>,
 }
 
 pub struct ArbEngine {
@@ -128,6 +131,14 @@ impl ArbEngine {
             unrealized_pnl += pnl;
             _net_market_value += current_value;
 
+            // Get current spread for display
+            let state = self.symbol_states.get(&pos.symbol);
+            let current_spread = state.map(|s| {
+                let b = s.last_binance.map(|(p,_)| p).unwrap_or(0.0);
+                let c = s.last_chainlink.map(|(p,_)| p).unwrap_or(0.0);
+                b - c
+            }).unwrap_or(0.0);
+
             positions.push(json!({
                 "symbol": pos.symbol,
                 "cost": pos.position_size + pos.buy_fee,
@@ -138,7 +149,12 @@ impl ArbEngine {
                 "pnl": pnl,
                 "level": pos.scale_level,
                 "held_ms": pos.entry_time.elapsed().as_millis() as u64,
-                "hold_to_resolution": pos.hold_to_resolution
+                "hold_to_resolution": pos.hold_to_resolution,
+                "entry_spread": pos.entry_spread,
+                "current_spread": current_spread,
+                "spread_closed_pct": if pos.entry_spread.abs() > 0.0 {
+                    (1.0 - current_spread.abs() / pos.entry_spread.abs()) * 100.0
+                } else { 0.0 }
             }));
         }
 
@@ -166,6 +182,7 @@ impl ArbEngine {
 
             let binance = state.last_binance.map(|(p, _)| p).unwrap_or(0.0);
             let chainlink = state.last_chainlink.map(|(p, _)| p).unwrap_or(0.0);
+            let current_spread = binance - chainlink;
 
             let spike = {
                 let cutoff = std::time::Duration::from_millis(500);
@@ -181,6 +198,7 @@ impl ArbEngine {
                 "down_price": (dn_b + dn_a) / 2.0,
                 "binance": binance,
                 "chainlink": chainlink,
+                "spread": current_spread,
                 "spike": spike,
                 "ema_offset": 0.0,
                 "price_to_beat": state.price_to_beat,
@@ -220,6 +238,8 @@ impl ArbEngine {
                 "spike_scaling_factor": self.config.spike_scaling_factor,
                 "ema_alpha": self.config.ema_alpha,
                 "execution_delay_ms": self.config.execution_delay_ms,
+                "min_edge_spread": self.config.min_edge_spread,
+                "spread_close_pct": self.config.spread_close_pct,
             }
         });
 
@@ -599,41 +619,63 @@ impl ArbEngine {
             None => return, // Not enough history yet
         };
 
-        // Slow spike for confirmation (pre-computed baseline)
+        // Slow spike for additional context (not required for confirmation)
         let slow_spike = match state.baseline_1s {
             Some(baseline) => binance - baseline,
             None => fast_spike, // Fall back to fast if not enough history
         };
 
-        // Use fast spike for direction/magnitude, slow spike for confirmation
-        let adjusted_spike = fast_spike;
-        let abs_spike = adjusted_spike.abs();
+        let abs_spike = fast_spike.abs();
         let threshold_usd = self.config.threshold_bps as f64 / 100.0;
-        let confirmed = slow_spike.signum() == fast_spike.signum() && slow_spike.abs() >= threshold_usd * 0.5;
 
         if abs_spike < threshold_usd { 
             state.last_spike_usd = 0.0;
             state.spike_confirmed_since = None;
+            state.prev_fast_spike = 0.0;
             return; 
         }
 
-        let direction = if adjusted_spike > 0.0 { "UP" } else { "DOWN" };
-        let direction_sign = if adjusted_spike > 0.0 { 1.0f64 } else { -1.0f64 };
+        let direction = if fast_spike > 0.0 { "UP" } else { "DOWN" };
+        let direction_sign = if fast_spike > 0.0 { 1.0f64 } else { -1.0f64 };
 
-        // Reduced sustain requirement: configurable via SPIKE_SUSTAIN_MS (default 50ms)
-        // Fast enough to catch spikes early, slow enough to avoid flash reversals
-        let spike_sustained = match state.spike_confirmed_since {
-            Some((sign, t)) if sign == direction_sign => t.elapsed().as_millis() >= self.config.spike_sustain_ms as u128,
-            _ => {
-                state.spike_confirmed_since = Some((direction_sign, Instant::now()));
-                false
+        // IMPROVED CONFIRMATION LOGIC (no time delay required)
+        // 1. Spike acceleration: Is momentum increasing?
+        let spike_accelerating = abs_spike > state.prev_fast_spike.abs() * 1.1;
+        
+        // 2. High confidence: Spike is significantly above threshold
+        let high_confidence = abs_spike > threshold_usd * 1.5;
+        
+        // 3. Directional consistency: Fast and slow spikes agree
+        let directionally_consistent = slow_spike.signum() == fast_spike.signum();
+        
+        // 4. Check orderbook reaction: Is Polymarket lagging?
+        let (bid, ask) = self.wallet.get_bid_ask(symbol, direction);
+        let spread = if bid > 0.0 && ask > 0.0 { ask - bid } else { 0.0 };
+        let orderbook_lagging = spread < 0.03; // Spread still tight = market hasn't reacted yet
+        
+        // Confirm if ANY of these conditions are met (no time delay needed):
+        let confirmed = spike_accelerating || high_confidence || (directionally_consistent && orderbook_lagging);
+        
+        // Update tracking for next iteration
+        state.prev_fast_spike = fast_spike;
+        state.prev_spike_time = Some(Instant::now());
+
+        // Optional: Very short sustain (10ms) to filter out single-tick noise
+        let spike_sustained = if self.config.spike_sustain_ms > 0 {
+            match state.spike_confirmed_since {
+                Some((sign, t)) if sign == direction_sign => t.elapsed().as_millis() >= self.config.spike_sustain_ms as u128,
+                _ => {
+                    state.spike_confirmed_since = Some((direction_sign, Instant::now()));
+                    false
+                }
             }
+        } else {
+            true // No sustain requirement if set to 0
         };
 
         if !spike_sustained || !confirmed {
             return;
         }
-        let (bid, ask) = self.wallet.get_bid_ask(symbol, direction);
         
         if bid <= 0.0 || ask <= 0.0 {
             let state = self.symbol_states.get_mut(symbol).unwrap();
@@ -641,7 +683,19 @@ impl ArbEngine {
                 .map_or(true, |(r, t)| r != "NO_POL_LIQUIDITY" || t.elapsed().as_secs() >= 5);
             if should_log {
                 state.last_rejection = Some(("NO_POL_LIQUIDITY".to_string(), Instant::now()));
-                self.add_signal(symbol, direction, adjusted_spike, "REJECTED", Some("NO_POL_LIQUIDITY".to_string()));
+                self.add_signal(symbol, direction, fast_spike, "REJECTED", Some("NO_POL_LIQUIDITY".to_string()));
+            }
+            return;
+        }
+
+        // ADAPTIVE THRESHOLD: Filter by orderbook state
+        if spread > 0.05 {
+            let state = self.symbol_states.get_mut(symbol).unwrap();
+            let should_log = state.last_rejection.as_ref()
+                .map_or(true, |(r, t)| r != "SPREAD_TOO_WIDE" || t.elapsed().as_secs() >= 3);
+            if should_log {
+                state.last_rejection = Some(("SPREAD_TOO_WIDE".to_string(), Instant::now()));
+                self.add_signal(symbol, direction, fast_spike, "REJECTED", Some(format!("SPREAD_TOO_WIDE: {:.3}", spread)));
             }
             return;
         }
@@ -654,7 +708,7 @@ impl ArbEngine {
                     .map_or(true, |(r, t)| r != "MARKET_ENDING" || t.elapsed().as_secs() >= 5);
                 if should_log {
                     state.last_rejection = Some(("MARKET_ENDING".to_string(), Instant::now()));
-                    self.add_signal(symbol, direction, adjusted_spike, "REJECTED", Some("MARKET_ENDING".to_string()));
+                    self.add_signal(symbol, direction, fast_spike, "REJECTED", Some("MARKET_ENDING".to_string()));
                 }
                 return;
             }
@@ -664,14 +718,22 @@ impl ArbEngine {
         if abs_spike > state.last_spike_usd * 1.1 {
             // Get entry price BEFORE open_position (pending entry hasn't been promoted yet)
             let entry_price = self.wallet.get_share_price(symbol, direction);
-            match self.wallet.open_position(symbol, direction, adjusted_spike, threshold_usd) {
+            
+            // Get current Binance and Chainlink prices for spread calculation
+            let (binance_price, chainlink_price) = {
+                let s = self.symbol_states.get(symbol).unwrap();
+                (s.last_binance.map(|(p,_)| p).unwrap_or(0.0),
+                 s.last_chainlink.map(|(p,_)| p).unwrap_or(0.0))
+            };
+            
+            match self.wallet.open_position(symbol, direction, fast_spike, threshold_usd, binance_price, chainlink_price) {
                 Ok(level) => {
                     state.last_spike_usd = abs_spike;
 
                     if self.live_wallet.is_some() {
                         let sym = symbol.to_string();
                         let dir = direction.to_string();
-                        let spk = adjusted_spike;
+                        let spk = fast_spike;
                         let end_ts = state.market_end_ts;
                         if let Some(lw) = &mut self.live_wallet {
                             match lw.open_position(&sym, &dir, spk, entry_price, end_ts).await {
@@ -684,7 +746,7 @@ impl ArbEngine {
                             }
                         }
                     } else {
-                        self.add_signal(symbol, direction, adjusted_spike, "EXECUTED", Some(format!("LEVEL_{}", level)));
+                        self.add_signal(symbol, direction, fast_spike, "EXECUTED", Some(format!("LEVEL_{}", level)));
                     }
                 }
                 Err(reason) => {
@@ -693,7 +755,7 @@ impl ArbEngine {
                         .map_or(true, |(r, t)| r != &reason || t.elapsed().as_secs() >= 3);
                     if should_log {
                         state.last_rejection = Some((reason.clone(), Instant::now()));
-                        self.add_signal(symbol, direction, adjusted_spike, "REJECTED", Some(reason));
+                        self.add_signal(symbol, direction, fast_spike, "REJECTED", Some(reason));
                     }
                 }
             }

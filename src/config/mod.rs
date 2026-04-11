@@ -27,6 +27,9 @@ pub struct AppConfig {
     pub max_exposure_per_market: f64,
     pub max_drawdown_pct: f64,
     pub slippage_bps: u64,           // simulated slippage in basis points for paper trading
+    // Spread-based edge detection
+    pub min_edge_spread: f64,        // minimum Binance-Chainlink spread to enter (default $20)
+    pub spread_close_pct: f64,       // exit when spread closes by this % (default 0.3 = 70% closed)
 }
 
 impl AppConfig {
@@ -58,6 +61,8 @@ impl AppConfig {
             max_exposure_per_market: env::var("MAX_EXPOSURE_PER_MARKET").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0),
             max_drawdown_pct: env::var("MAX_DRAWDOWN_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.30),
             slippage_bps: env::var("SLIPPAGE_BPS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
+            min_edge_spread: env::var("MIN_EDGE_SPREAD").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0),
+            spread_close_pct: env::var("SPREAD_CLOSE_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.3),
         })
     }
 
