@@ -273,6 +273,28 @@ impl LiveWallet {
         self.token_map.retain(|_, (s, _)| s != symbol);
     }
 
+    /// Update BTC trailing stop tracking for all open positions of a symbol
+    pub fn update_btc_trailing(&mut self, symbol: &str, current_btc: f64) {
+        for pos in &mut self.open_positions {
+            if pos.symbol != symbol { continue; }
+            
+            // Initialize entry_btc if not set (first update after position opened)
+            if pos.entry_btc == 0.0 {
+                pos.entry_btc = current_btc;
+                pos.peak_btc = current_btc;
+                pos.trough_btc = current_btc;
+            }
+            
+            // Update peak/trough
+            if current_btc > pos.peak_btc {
+                pos.peak_btc = current_btc;
+            }
+            if current_btc < pos.trough_btc {
+                pos.trough_btc = current_btc;
+            }
+        }
+    }
+
     fn get_token_id(&self, symbol: &str, direction: &str) -> Option<U256> {
         self.token_map.iter()
             .find(|(_, (s, d))| s == symbol && d == direction)
@@ -502,6 +524,11 @@ impl LiveWallet {
             hold_to_resolution: false,
             peak_spike: spike.abs(),
             spike_low_since: None,
+            // BTC trailing stop - will be set by engine when it has BTC price
+            entry_btc: 0.0,
+            peak_btc: 0.0,
+            trough_btc: 0.0,
+            trailing_triggered_since: None,
         });
 
         Ok(scale_level)

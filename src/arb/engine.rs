@@ -476,6 +476,12 @@ impl ArbEngine {
 
             // Push BTC price to wallet for long-baseline spike calculation (every tick)
             self.wallet.push_btc_price(&symbol, update.price);
+            
+            // Update BTC trailing stop tracking for open positions
+            self.wallet.update_btc_trailing(&symbol, update.price);
+            if let Some(lw) = &mut self.live_wallet {
+                lw.update_btc_trailing(&symbol, update.price);
+            }
 
             // Compute fast spike for entry detection (using pre-computed baseline)
             let fast_spike = {

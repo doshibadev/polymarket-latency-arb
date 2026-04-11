@@ -23,6 +23,12 @@ pub struct OpenPosition {
     #[serde(skip)]
     pub spike_low_since: Option<Instant>, // when spike first dropped below threshold
     pub peak_spike: f64,           // highest spike seen since entry
+    // BTC-based trailing stop fields
+    pub entry_btc: f64,            // BTC price at entry
+    pub peak_btc: f64,             // highest BTC since entry (for UP positions)
+    pub trough_btc: f64,           // lowest BTC since entry (for DOWN positions)
+    #[serde(skip)]
+    pub trailing_triggered_since: Option<Instant>, // when trailing stop first triggered
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -297,6 +303,29 @@ impl PaperWallet {
         if state.btc_history_len < 64 { state.btc_history_len += 1; }
     }
     
+    /// Update BTC trailing stop tracking for all open positions of a symbol
+    /// Called on every BTC price update from the engine
+    pub fn update_btc_trailing(&mut self, symbol: &str, current_btc: f64) {
+        for pos in &mut self.open_positions {
+            if pos.symbol != symbol { continue; }
+            
+            // Initialize entry_btc if not set (first update after position opened)
+            if pos.entry_btc == 0.0 {
+                pos.entry_btc = current_btc;
+                pos.peak_btc = current_btc;
+                pos.trough_btc = current_btc;
+            }
+            
+            // Update peak/trough
+            if current_btc > pos.peak_btc {
+                pos.peak_btc = current_btc;
+            }
+            if current_btc < pos.trough_btc {
+                pos.trough_btc = current_btc;
+            }
+        }
+    }
+    
     /// Push the current momentum value into ring buffer for exit smoothing
     pub fn push_spike_momentum(&mut self, symbol: &str, momentum: f64) {
         let state = self.symbol_states.entry(symbol.to_string()).or_default();
@@ -479,11 +508,36 @@ impl PaperWallet {
             let new_peak = if long_spike.abs() > pos.peak_spike { long_spike.abs() } else { pos.peak_spike };
             peak_updates.push((idx, new_peak));
 
-            // Trailing stop
-            let trailing_stop_hit = if pos.direction == "UP" {
-                current_price < pos.highest_price * (1.0 - self.config.trailing_stop_pct / 100.0)
+            // BTC-based trailing stop (only when profitable)
+            // For UP: profitable if current BTC > entry BTC
+            // For DOWN: profitable if current BTC < entry BTC
+            let is_profitable = if pos.entry_btc > 0.0 {
+                if pos.direction == "UP" {
+                    state.last_binance.map(|(b, _)| b > pos.entry_btc).unwrap_or(false)
+                } else {
+                    state.last_binance.map(|(b, _)| b < pos.entry_btc).unwrap_or(false)
+                }
             } else {
-                current_price > pos.highest_price * (1.0 + self.config.trailing_stop_pct / 100.0)
+                false
+            };
+
+            let trailing_stop_hit = if is_profitable {
+                let current_btc = state.last_binance.map(|(b, _)| b).unwrap_or(0.0);
+                if current_btc > 0.0 {
+                    if pos.direction == "UP" {
+                        // For UP: exit if BTC drops X% from peak
+                        let threshold = pos.peak_btc * (1.0 - self.config.trailing_stop_pct / 100.0);
+                        current_btc < threshold
+                    } else {
+                        // For DOWN: exit if BTC rises X% from trough
+                        let threshold = pos.trough_btc * (1.0 + self.config.trailing_stop_pct / 100.0);
+                        current_btc > threshold
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
             };
 
             // Trend reversed
@@ -503,7 +557,21 @@ impl PaperWallet {
 
             let near_end = pos.entry_time.elapsed().as_millis() > 295000;
 
-            let reason = if trailing_stop_hit { Some("trailing_stop") }
+            // Check trailing stop with 200ms persistence requirement
+            let trailing_stop_confirmed = if trailing_stop_hit {
+                // Already triggered before and persisted for 200ms?
+                pos.trailing_triggered_since.map_or_else(|| {
+                    // First trigger - don't exit yet, but mark the time
+                    // We'll check persistence on next tick
+                    false
+                }, |t| t.elapsed().as_millis() >= 200)
+            } else {
+                // Condition no longer met, reset
+                // Will be handled in the update loop below
+                false
+            };
+
+            let reason = if trailing_stop_confirmed { Some("trailing_stop") }
                         else if trend_reversed { Some("trend_reversed") }
                         else if spike_faded { Some("spike_faded") }
                         else if near_end { Some("near_end") }
@@ -532,6 +600,50 @@ impl PaperWallet {
                 } else {
                     pos.spike_low_since = None;
                 }
+            }
+        }
+        
+        // Update trailing_triggered_since for all positions
+        // Need to re-check the condition to know if we should set or clear it
+        for (idx, pos) in self.open_positions.iter_mut().enumerate() {
+            let state = match self.symbol_states.get(&pos.symbol) {
+                Some(s) => s,
+                None => continue,
+            };
+            
+            let is_profitable = if pos.entry_btc > 0.0 {
+                if pos.direction == "UP" {
+                    state.last_binance.map(|(b, _)| b > pos.entry_btc).unwrap_or(false)
+                } else {
+                    state.last_binance.map(|(b, _)| b < pos.entry_btc).unwrap_or(false)
+                }
+            } else {
+                false
+            };
+
+            let trailing_stop_hit = if is_profitable {
+                let current_btc = state.last_binance.map(|(b, _)| b).unwrap_or(0.0);
+                if current_btc > 0.0 {
+                    if pos.direction == "UP" {
+                        let threshold = pos.peak_btc * (1.0 - self.config.trailing_stop_pct / 100.0);
+                        current_btc < threshold
+                    } else {
+                        let threshold = pos.trough_btc * (1.0 + self.config.trailing_stop_pct / 100.0);
+                        current_btc > threshold
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            
+            if trailing_stop_hit {
+                if pos.trailing_triggered_since.is_none() {
+                    pos.trailing_triggered_since = Some(Instant::now());
+                }
+            } else {
+                pos.trailing_triggered_since = None;
             }
         }
 
@@ -714,6 +826,11 @@ impl PaperWallet {
                 hold_to_resolution: false,
                 peak_spike: p.spike.abs(),
                 spike_low_since: None,
+                // BTC trailing stop - will be set by engine when it has BTC price
+                entry_btc: 0.0,
+                peak_btc: 0.0,
+                trough_btc: 0.0,
+                trailing_triggered_since: None,
             });
             info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened at ask price");
         }
