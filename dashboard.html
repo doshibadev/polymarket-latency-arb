@@ -837,205 +837,238 @@
 
         const updateUI = (sim) => {
             if (!sim) return;
-            const totalVal = sim.total_portfolio_value || 0;
-            startingBalance = sim.starting_balance || 27.0;
-            const totalPnL = sim.total_pnl || 0;
-            const unrealized = sim.unrealized_pnl || 0;
-            const posArr = sim.positions || [];
-
-            // Update running state
-            if (typeof sim.running === 'boolean') {
-                botRunning = sim.running;
-                const btn = document.getElementById('toggle-btn');
-                if (botRunning) {
-                    btn.innerText = '■ STOP';
-                    btn.style.borderColor = 'var(--color-down)';
-                    btn.style.color = 'var(--color-down)';
-                } else {
-                    btn.innerText = '▶ START';
-                    btn.style.borderColor = 'var(--color-up)';
-                    btn.style.color = 'var(--color-up)';
-                }
-            }
-            if (typeof sim.is_live === 'boolean') {
-                updateMode(sim.is_live);
-                const addrEl = document.getElementById('wallet-address');
-                if (sim.is_live && sim.wallet_address) {
-                    const addr = sim.wallet_address;
-                    addrEl.innerText = addr.slice(0, 6) + '...' + addr.slice(-4);
-                    addrEl.style.display = 'block';
-                } else {
-                    addrEl.style.display = 'none';
-                }
-            }
-
-            if (sim.config) {
-                const c = sim.config;
-                const setIfNotFocused = (id, val) => {
-                    const el = document.getElementById(id);
-                    if (el && document.activeElement !== el) el.value = val;
-                };
-                setIfNotFocused('set-threshold', (c.threshold_bps / 100).toFixed(0));
-                setIfNotFocused('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
-                setIfNotFocused('set-profit', (c.profit_target_pct * 100).toFixed(1));
-                setIfNotFocused('set-trailing', c.trailing_stop_pct);
-                setIfNotFocused('set-spiked-faded', c.spike_faded_pct);
-                setIfNotFocused('set-spread', c.max_spread_bps);
-                setIfNotFocused('set-maxprice', c.max_entry_price);
-                setIfNotFocused('set-scaling', c.spike_scaling_factor);
-                setIfNotFocused('set-delay', c.execution_delay_ms);
-            }
-
-            document.getElementById('v-portfolio').innerText = formatMoney(totalVal);
-            document.getElementById('v-balance').innerText = formatMoney(sim.balance || 0);
-            document.getElementById('v-portfolio-start').innerText = formatMoney(sim.starting_portfolio_value || 0);
-            document.getElementById('v-balance-start').innerText = formatMoney(sim.starting_wallet_balance || 0);
-            document.getElementById('v-total-pnl').innerText = formatMoneySigned(totalPnL);
-            document.getElementById('v-total-pnl').className = 'm-value ' + (totalPnL >= 0 ? 'val-up' : 'val-down');
-            document.getElementById('v-unrealized').innerText = formatMoneySigned(unrealized);
-            document.getElementById('v-unrealized').className = 'm-value ' + (unrealized >= 0 ? 'val-up' : 'val-down');
-            const realized = sim.realized_pnl || 0;
-            document.getElementById('v-realized').innerText = formatMoneySigned(realized);
-            document.getElementById('v-realized').className = 'm-value ' + (realized >= 0 ? 'val-up' : 'val-down');
             
-            // Uptime
-            if (sim.uptime_seconds !== undefined) {
-                const hours = Math.floor(sim.uptime_seconds / 3600);
-                const mins = Math.floor((sim.uptime_seconds % 3600) / 60);
-                const secs = sim.uptime_seconds % 60;
-                document.getElementById('v-uptime').innerText = `${hours}:${mins.toString().padStart(2,'0')}:${secs.toString().padStart(2,'0')}`;
-            }
+            console.log('updateUI called with data:', sim);
             
-            const wins = sim.wins || 0, losses = sim.losses || 0;
-            const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100).toFixed(1) : '0.0';
-            document.getElementById('v-winrate').innerText = wr + '%';
-            document.getElementById('v-trade-count').innerText = (wins + losses) + ' trades';
-            document.getElementById('v-volume').innerText = formatMoney(sim.total_volume || 0);
-            document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
+            try {
+                const totalVal = sim.total_portfolio_value || 0;
+                startingBalance = sim.starting_balance || 27.0;
+                const totalPnL = sim.total_pnl || 0;
+                const unrealized = sim.unrealized_pnl || 0;
+                const realized = sim.realized_pnl || 0;
+                const posArr = sim.positions || [];
 
-            let marketData = {};
-            if (sim.markets) {
-                if (Object.keys(sim.markets).length > 0) {
-                    // Get first market (usually BTC)
-                    const firstKey = Object.keys(sim.markets)[0];
-                    marketData = sim.markets[firstKey] || {};
-                }
-            }
-            const m = marketData;
-
-            // Use symbol name as fallback if question is empty
-            const questionText = m.question && m.question.trim() !== '' 
-                ? m.question 
-                : (Object.keys(sim.markets || {}).length > 0 ? `${Object.keys(sim.markets)[0]} 5-MINUTE MARKET` : 'FETCHING MARKET DATA...');
-            
-            document.getElementById('m-question').innerText = questionText;
-            document.getElementById('m-binance').innerText = '$' + (m.binance || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
-            document.getElementById('m-chainlink').innerText = '$' + (m.chainlink || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
-            if (m.price_to_beat) {
-                const margin = (m.chainlink || 0) - m.price_to_beat;
-                const sign = margin >= 0 ? '+' : '';
-                document.getElementById('m-ptb').innerText = '$' + m.price_to_beat.toLocaleString(undefined, {minimumFractionDigits: 2}) + ' (' + sign + '$' + margin.toFixed(2) + ')';
-                document.getElementById('m-ptb').style.color = margin >= 0 ? 'var(--color-up)' : 'var(--color-down)';
-            }
-            document.getElementById('m-up').innerText = (m.up_price || 0).toFixed(4);
-            document.getElementById('m-down').innerText = (m.down_price || 0).toFixed(4);
-            document.getElementById('m-spike').innerText = (m.spike || 0).toFixed(2);
-             
-            const spikeMag = Math.min(Math.abs(m.spike || 0) / 100, 1) * 50;
-            const bar = document.getElementById('m-spike-fill');
-            bar.style.width = spikeMag + '%';
-            bar.style.left = m.spike >= 0 ? '50%' : (50 - spikeMag) + '%';
-            bar.style.background = m.spike >= 0 ? 'var(--color-up)' : 'var(--color-down)';
-
-            // Threshold markers
-            if (sim.config) {
-                const threshUsd = sim.config.threshold_bps / 100;
-                const threshPct = Math.min(threshUsd / 100, 1) * 50;
-                document.getElementById('spike-threshold-pos').style.left = (50 + threshPct) + '%';
-                document.getElementById('spike-threshold-neg').style.left = (50 - threshPct) + '%';
-            }
-
-            // Spike mini-chart
-            if (spikeChart) {
-                const now = new Date().toLocaleTimeString([], {hour12:false});
-                spikeHistory.labels.push(now);
-                spikeHistory.data.push(m.spike || 0);
-                if (spikeHistory.labels.length > MAX_SPIKE_POINTS) {
-                    spikeHistory.labels.shift();
-                    spikeHistory.data.shift();
-                }
-                spikeChart.data.labels = spikeHistory.labels;
-                spikeChart.data.datasets[0].data = spikeHistory.data;
-                spikeChart.update();
-            }
-
-            if (m.end_ts) {
-                const remaining = Math.max(0, m.end_ts - Math.floor(Date.now() / 1000));
-                const mins = Math.floor(remaining / 60), secs = remaining % 60;
-                document.getElementById('m-timer').innerText = `${mins}:${secs.toString().padStart(2, '0')}`;
-            }
-
-            document.getElementById('count-open').innerText = posArr.length;
-            positionEntryTimes = posArr.map(p => Date.now() - (p.held_ms || 0));
-            document.getElementById('list-open').innerHTML = posArr.map((p, idx) => `
-                <div class="pos-item">
-                    <div class="pos-top">
-                        <span style="font-family:var(--font-mono); font-size:11px; font-weight:700;">BTC 5M ${p.side}</span>
-                        <span class="pos-pnl ${p.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(p.pnl)}</span>
-                    </div>
-                    <div style="font-size:10px; color:var(--text-dim);">${p.shares.toFixed(2)} SH @ ${p.entry_price.toFixed(4)} · NOW ${p.current_price.toFixed(4)}</div>
-                    <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">LVL ${p.level || 1} · <span class="pos-age" data-idx="${idx}">${formatMs(p.held_ms || 0)}</span>${p.hold_to_resolution ? ' · <span style="color:var(--color-gold);font-weight:700;">⚓ HOLD</span>' : ''}</div>
-                    <button class="pos-close-btn" onclick="closePosition(${idx})">CLOSE</button>
-                </div>
-            `).join('');
-
-            // Trade stats
-            const exits = (sim.trades || []).filter(t => t.type === 'exit');
-            const winTrades = exits.filter(t => t.pnl > 0);
-            const lossTrades = exits.filter(t => t.pnl <= 0);
-            const avgWin = winTrades.length ? winTrades.reduce((s,t) => s + t.pnl, 0) / winTrades.length : null;
-            const avgLoss = lossTrades.length ? lossTrades.reduce((s,t) => s + t.pnl, 0) / lossTrades.length : null;
-            const grossWin = winTrades.reduce((s,t) => s + t.pnl, 0);
-            const grossLoss = Math.abs(lossTrades.reduce((s,t) => s + t.pnl, 0));
-            const pf = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? '∞' : '—';
-            
-            // Calculate average hold time from exits
-            const avgHoldMs = exits.length > 0 
-                ? exits.reduce((sum, t) => {
-                    // Calculate hold time from entry to exit timestamps
-                    const entryTrade = (sim.trades || []).find(tr => 
-                        tr.type === 'entry' && 
-                        tr.symbol === t.symbol && 
-                        tr.direction === t.direction &&
-                        new Date(tr.timestamp) < new Date(t.timestamp)
-                    );
-                    if (entryTrade) {
-                        const holdMs = new Date(t.timestamp) - new Date(entryTrade.timestamp);
-                        return sum + holdMs;
+                // Update running state
+                if (typeof sim.running === 'boolean') {
+                    botRunning = sim.running;
+                    const btn = document.getElementById('toggle-btn');
+                    if (botRunning) {
+                        btn.innerText = '■ STOP';
+                        btn.style.borderColor = 'var(--color-down)';
+                        btn.style.color = 'var(--color-down)';
+                    } else {
+                        btn.innerText = '▶ START';
+                        btn.style.borderColor = 'var(--color-up)';
+                        btn.style.color = 'var(--color-up)';
                     }
-                    return sum;
-                }, 0) / exits.length
-                : null;
-            
-            document.getElementById('stat-avg-win').innerText = avgWin !== null ? formatMoneySigned(avgWin) : '—';
-            document.getElementById('stat-avg-loss').innerText = avgLoss !== null ? formatMoneySigned(avgLoss) : '—';
-            document.getElementById('stat-pf').innerText = pf;
-            document.getElementById('stat-pf').className = 'stat-value ' + (parseFloat(pf) >= 1 ? 'val-up' : 'val-down');
-            document.getElementById('stat-hold').innerText = avgHoldMs !== null ? formatMs(avgHoldMs) : '—';
+                }
+                if (typeof sim.is_live === 'boolean') {
+                    updateMode(sim.is_live);
+                    const addrEl = document.getElementById('wallet-address');
+                    if (sim.is_live && sim.wallet_address) {
+                        const addr = sim.wallet_address;
+                        addrEl.innerText = addr.slice(0, 6) + '...' + addr.slice(-4);
+                        addrEl.style.display = 'block';
+                    } else {
+                        addrEl.style.display = 'none';
+                    }
+                }
+            } catch (err) {
+                console.error('Error updating bot state:', err);
+            }
 
-            // PnL breakdown bar
-            const realizedAbs = Math.abs(realized);
-            const unrealizedAbs = Math.abs(unrealized);
-            const total = realizedAbs + unrealizedAbs || 1;
-            document.getElementById('pnl-bar-r').style.width = (realizedAbs / total * 100) + '%';
-            document.getElementById('pnl-bar-u').style.width = (unrealizedAbs / total * 100) + '%';
-            document.getElementById('pnl-realized-label').innerText = formatMoneySigned(realized);
-            document.getElementById('pnl-unrealized-label').innerText = formatMoneySigned(unrealized);
-            const feeDrag = (sim.total_volume || 0) > 0 ? ((sim.total_fees || 0) / (sim.total_volume || 1) * 100).toFixed(3) : '0.000';
-            document.getElementById('stat-fee-drag').innerText = feeDrag + '%';
+            try {
 
-            const trades = (sim.trades || []).slice().reverse().slice(0, 30);
-            document.getElementById('list-trades').innerHTML = trades.map(t => {
+                if (sim.config) {
+                    const c = sim.config;
+                    const setIfNotFocused = (id, val) => {
+                        const el = document.getElementById(id);
+                        if (el && document.activeElement !== el) el.value = val;
+                    };
+                    setIfNotFocused('set-threshold', (c.threshold_bps / 100).toFixed(0));
+                    setIfNotFocused('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
+                    setIfNotFocused('set-profit', (c.profit_target_pct * 100).toFixed(1));
+                    setIfNotFocused('set-trailing', c.trailing_stop_pct);
+                    setIfNotFocused('set-spiked-faded', c.spike_faded_pct);
+                    setIfNotFocused('set-spread', c.max_spread_bps);
+                    setIfNotFocused('set-maxprice', c.max_entry_price);
+                    setIfNotFocused('set-scaling', c.spike_scaling_factor);
+                    setIfNotFocused('set-delay', c.execution_delay_ms);
+                }
+            } catch (err) {
+                console.error('Error updating config:', err);
+            }
+
+            try {
+
+                document.getElementById('v-portfolio').innerText = formatMoney(totalVal);
+                document.getElementById('v-balance').innerText = formatMoney(sim.balance || 0);
+                document.getElementById('v-portfolio-start').innerText = formatMoney(sim.starting_portfolio_value || 0);
+                document.getElementById('v-balance-start').innerText = formatMoney(sim.starting_wallet_balance || 0);
+                document.getElementById('v-total-pnl').innerText = formatMoneySigned(totalPnL);
+                document.getElementById('v-total-pnl').className = 'm-value ' + (totalPnL >= 0 ? 'val-up' : 'val-down');
+                document.getElementById('v-unrealized').innerText = formatMoneySigned(unrealized);
+                document.getElementById('v-unrealized').className = 'm-value ' + (unrealized >= 0 ? 'val-up' : 'val-down');
+                document.getElementById('v-realized').innerText = formatMoneySigned(realized);
+                document.getElementById('v-realized').className = 'm-value ' + (realized >= 0 ? 'val-up' : 'val-down');
+                
+                // Uptime
+                if (sim.uptime_seconds !== undefined) {
+                    const hours = Math.floor(sim.uptime_seconds / 3600);
+                    const mins = Math.floor((sim.uptime_seconds % 3600) / 60);
+                    const secs = sim.uptime_seconds % 60;
+                    document.getElementById('v-uptime').innerText = `${hours}:${mins.toString().padStart(2,'0')}:${secs.toString().padStart(2,'0')}`;
+                }
+                
+                const wins = sim.wins || 0, losses = sim.losses || 0;
+                const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100).toFixed(1) : '0.0';
+                document.getElementById('v-winrate').innerText = wr + '%';
+                document.getElementById('v-trade-count').innerText = (wins + losses) + ' trades';
+                document.getElementById('v-volume').innerText = formatMoney(sim.total_volume || 0);
+                document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
+            } catch (err) {
+                console.error('Error updating metrics:', err);
+            }
+
+            try {
+
+                let marketData = {};
+                if (sim.markets) {
+                    if (Object.keys(sim.markets).length > 0) {
+                        // Get first market (usually BTC)
+                        const firstKey = Object.keys(sim.markets)[0];
+                        marketData = sim.markets[firstKey] || {};
+                    }
+                }
+                const m = marketData;
+
+                // Use symbol name as fallback if question is empty
+                const questionText = m.question && m.question.trim() !== '' 
+                    ? m.question 
+                    : (Object.keys(sim.markets || {}).length > 0 ? `${Object.keys(sim.markets)[0]} 5-MINUTE MARKET` : 'FETCHING MARKET DATA...');
+                
+                document.getElementById('m-question').innerText = questionText;
+                document.getElementById('m-binance').innerText = '$' + (m.binance || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                document.getElementById('m-chainlink').innerText = '$' + (m.chainlink || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                if (m.price_to_beat) {
+                    const margin = (m.chainlink || 0) - m.price_to_beat;
+                    const sign = margin >= 0 ? '+' : '';
+                    document.getElementById('m-ptb').innerText = '$' + m.price_to_beat.toLocaleString(undefined, {minimumFractionDigits: 2}) + ' (' + sign + '$' + margin.toFixed(2) + ')';
+                    document.getElementById('m-ptb').style.color = margin >= 0 ? 'var(--color-up)' : 'var(--color-down)';
+                }
+                document.getElementById('m-up').innerText = (m.up_price || 0).toFixed(4);
+                document.getElementById('m-down').innerText = (m.down_price || 0).toFixed(4);
+                document.getElementById('m-spike').innerText = (m.spike || 0).toFixed(2);
+                 
+                const spikeMag = Math.min(Math.abs(m.spike || 0) / 100, 1) * 50;
+                const bar = document.getElementById('m-spike-fill');
+                bar.style.width = spikeMag + '%';
+                bar.style.left = m.spike >= 0 ? '50%' : (50 - spikeMag) + '%';
+                bar.style.background = m.spike >= 0 ? 'var(--color-up)' : 'var(--color-down)';
+
+                // Threshold markers
+                if (sim.config) {
+                    const threshUsd = sim.config.threshold_bps / 100;
+                    const threshPct = Math.min(threshUsd / 100, 1) * 50;
+                    document.getElementById('spike-threshold-pos').style.left = (50 + threshPct) + '%';
+                    document.getElementById('spike-threshold-neg').style.left = (50 - threshPct) + '%';
+                }
+
+                // Spike mini-chart
+                if (spikeChart) {
+                    const now = new Date().toLocaleTimeString([], {hour12:false});
+                    spikeHistory.labels.push(now);
+                    spikeHistory.data.push(m.spike || 0);
+                    if (spikeHistory.labels.length > MAX_SPIKE_POINTS) {
+                        spikeHistory.labels.shift();
+                        spikeHistory.data.shift();
+                    }
+                    spikeChart.data.labels = spikeHistory.labels;
+                    spikeChart.data.datasets[0].data = spikeHistory.data;
+                    spikeChart.update();
+                }
+
+                if (m.end_ts) {
+                    const remaining = Math.max(0, m.end_ts - Math.floor(Date.now() / 1000));
+                    const mins = Math.floor(remaining / 60), secs = remaining % 60;
+                    document.getElementById('m-timer').innerText = `${mins}:${secs.toString().padStart(2, '0')}`;
+                }
+            } catch (err) {
+                console.error('Error updating market data:', err);
+            }
+
+            try {
+
+                document.getElementById('count-open').innerText = posArr.length;
+                positionEntryTimes = posArr.map(p => Date.now() - (p.held_ms || 0));
+                document.getElementById('list-open').innerHTML = posArr.map((p, idx) => `
+                    <div class="pos-item">
+                        <div class="pos-top">
+                            <span style="font-family:var(--font-mono); font-size:11px; font-weight:700;">BTC 5M ${p.side}</span>
+                            <span class="pos-pnl ${p.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(p.pnl)}</span>
+                        </div>
+                        <div style="font-size:10px; color:var(--text-dim);">${p.shares.toFixed(2)} SH @ ${p.entry_price.toFixed(4)} · NOW ${p.current_price.toFixed(4)}</div>
+                        <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">LVL ${p.level || 1} · <span class="pos-age" data-idx="${idx}">${formatMs(p.held_ms || 0)}</span>${p.hold_to_resolution ? ' · <span style="color:var(--color-gold);font-weight:700;">⚓ HOLD</span>' : ''}</div>
+                        <button class="pos-close-btn" onclick="closePosition(${idx})">CLOSE</button>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('Error updating positions:', err);
+            }
+
+            try {
+
+                // Trade stats
+                const exits = (sim.trades || []).filter(t => t.type === 'exit');
+                const winTrades = exits.filter(t => t.pnl > 0);
+                const lossTrades = exits.filter(t => t.pnl <= 0);
+                const avgWin = winTrades.length ? winTrades.reduce((s,t) => s + t.pnl, 0) / winTrades.length : null;
+                const avgLoss = lossTrades.length ? lossTrades.reduce((s,t) => s + t.pnl, 0) / lossTrades.length : null;
+                const grossWin = winTrades.reduce((s,t) => s + t.pnl, 0);
+                const grossLoss = Math.abs(lossTrades.reduce((s,t) => s + t.pnl, 0));
+                const pf = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? '∞' : '—';
+                
+                // Calculate average hold time from exits
+                const avgHoldMs = exits.length > 0 
+                    ? exits.reduce((sum, t) => {
+                        // Calculate hold time from entry to exit timestamps
+                        const entryTrade = (sim.trades || []).find(tr => 
+                            tr.type === 'entry' && 
+                            tr.symbol === t.symbol && 
+                            tr.direction === t.direction &&
+                            new Date(tr.timestamp) < new Date(t.timestamp)
+                        );
+                        if (entryTrade) {
+                            const holdMs = new Date(t.timestamp) - new Date(entryTrade.timestamp);
+                            return sum + holdMs;
+                        }
+                        return sum;
+                    }, 0) / exits.length
+                    : null;
+                
+                document.getElementById('stat-avg-win').innerText = avgWin !== null ? formatMoneySigned(avgWin) : '—';
+                document.getElementById('stat-avg-loss').innerText = avgLoss !== null ? formatMoneySigned(avgLoss) : '—';
+                document.getElementById('stat-pf').innerText = pf;
+                document.getElementById('stat-pf').className = 'stat-value ' + (parseFloat(pf) >= 1 ? 'val-up' : 'val-down');
+                document.getElementById('stat-hold').innerText = avgHoldMs !== null ? formatMs(avgHoldMs) : '—';
+
+                // PnL breakdown bar
+                const realizedAbs = Math.abs(realized);
+                const unrealizedAbs = Math.abs(unrealized);
+                const total = realizedAbs + unrealizedAbs || 1;
+                document.getElementById('pnl-bar-r').style.width = (realizedAbs / total * 100) + '%';
+                document.getElementById('pnl-bar-u').style.width = (unrealizedAbs / total * 100) + '%';
+                document.getElementById('pnl-realized-label').innerText = formatMoneySigned(realized);
+                document.getElementById('pnl-unrealized-label').innerText = formatMoneySigned(unrealized);
+                const feeDrag = (sim.total_volume || 0) > 0 ? ((sim.total_fees || 0) / (sim.total_volume || 1) * 100).toFixed(3) : '0.000';
+                document.getElementById('stat-fee-drag').innerText = feeDrag + '%';
+            } catch (err) {
+                console.error('Error updating trade stats:', err);
+            }
+
+            try {
+                const trades = (sim.trades || []).slice().reverse().slice(0, 30);
+                document.getElementById('list-trades').innerHTML = trades.map(t => {
                 const isExit = t.type === 'exit';
                 const pnlClass = isExit ? (t.pnl >= 0 ? 'val-up' : 'val-down') : '';
                 let priceInfo = '';
@@ -1060,10 +1093,14 @@
                             <div style="font-size:9px; font-weight:400; color:var(--text-muted);">${new Date(t.timestamp).toLocaleTimeString([], {hour12:false})}</div>
                         </div>
                     </div>
-                `;
-            }).join('');
+                    `;
+                }).join('');
+            } catch (err) {
+                console.error('Error updating trades:', err);
+            }
 
-            const signals = (sim.signals || []).slice().reverse();
+            try {
+                const signals = (sim.signals || []).slice().reverse();
             document.getElementById('signal-log').innerHTML = signals.map(s => `
                 <div class="term-line">
                     <span style="color:var(--text-muted)">${s.t}</span>
@@ -1075,9 +1112,13 @@
                     <span style="font-size:10px; color:var(--text-dim)">${s.r || ''}</span>
                 </div>
             `).join('');
+            } catch (err) {
+                console.error('Error updating signals:', err);
+            }
 
-            const settled = (sim.trades || []).filter(t => t.type === 'exit').slice().reverse();
-            document.getElementById('list-settled').innerHTML = settled.map(t => {
+            try {
+                const settled = (sim.trades || []).filter(t => t.type === 'exit').slice().reverse();
+                document.getElementById('list-settled').innerHTML = settled.map(t => {
                 const pnlPct = t.entry_price && t.exit_price
                     ? ((t.exit_price - t.entry_price) / t.entry_price * 100 * (t.direction === 'DOWN' ? -1 : 1)).toFixed(2)
                     : '0.00';
@@ -1094,12 +1135,19 @@
                         <div style="font-size:9px; font-weight:400;">${pnlPct}%</div>
                     </div>
                 </div>`;
-            }).join('');
+                }).join('');
+            } catch (err) {
+                console.error('Error updating settled trades:', err);
+            }
 
-            if (sim.history && sim.history.length > 0) {
-                myChart.data.labels = sim.history.map(h => h.t);
-                myChart.data.datasets[0].data = sim.history.map(h => h.v);
-                myChart.update();
+            try {
+                if (sim.history && sim.history.length > 0) {
+                    myChart.data.labels = sim.history.map(h => h.t);
+                    myChart.data.datasets[0].data = sim.history.map(h => h.v);
+                    myChart.update();
+                }
+            } catch (err) {
+                console.error('Error updating chart:', err);
             }
         };
 
