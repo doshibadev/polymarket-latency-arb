@@ -921,12 +921,14 @@
             document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
 
             let marketData = {};
-            if (sim.markets) {
-                marketData = sim.markets.BTC || sim.markets[Object.keys(sim.markets)[0]] || {};
+            if (sim.markets && Object.keys(sim.markets).length > 0) {
+                // Get first market (usually BTC)
+                const firstKey = Object.keys(sim.markets)[0];
+                marketData = sim.markets[firstKey] || {};
             }
             const m = marketData;
 
-            document.getElementById('m-question').innerText = (m.question || 'AWAITING DATA...').toUpperCase();
+            document.getElementById('m-question').innerText = m.question || 'FETCHING MARKET DATA...';
             document.getElementById('m-binance').innerText = '$' + (m.binance || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
             document.getElementById('m-chainlink').innerText = '$' + (m.chainlink || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
             if (m.price_to_beat) {
