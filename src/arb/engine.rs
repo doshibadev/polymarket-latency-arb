@@ -721,13 +721,13 @@ impl ArbEngine {
             
             // Get current Binance and Chainlink prices for spread calculation
             let (binance_price, chainlink_price) = {
-                let s = self.symbol_states.get(symbol).unwrap();
-                (s.last_binance.map(|(p,_)| p).unwrap_or(0.0),
-                 s.last_chainlink.map(|(p,_)| p).unwrap_or(0.0))
+                (state.last_binance.map(|(p,_)| p).unwrap_or(0.0),
+                 state.last_chainlink.map(|(p,_)| p).unwrap_or(0.0))
             };
             
             match self.wallet.open_position(symbol, direction, fast_spike, threshold_usd, binance_price, chainlink_price) {
                 Ok(level) => {
+                    let state = self.symbol_states.get_mut(symbol).unwrap();
                     state.last_spike_usd = abs_spike;
 
                     if self.live_wallet.is_some() {

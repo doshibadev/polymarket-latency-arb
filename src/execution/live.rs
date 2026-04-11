@@ -502,6 +502,9 @@ impl LiveWallet {
             hold_to_resolution: false,
             peak_spike: spike.abs(),
             spike_low_since: None,
+            entry_spread: 0.0,      // TODO: Pass actual spread from engine
+            entry_binance: 0.0,     // TODO: Pass actual Binance price
+            entry_chainlink: 0.0,   // TODO: Pass actual Chainlink price
         });
 
         Ok(scale_level)

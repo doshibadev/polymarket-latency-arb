@@ -619,6 +619,12 @@ impl PaperWallet {
             let net_revenue = (pos.shares * fill_price) - sell_fee;
             let pnl = net_revenue - (pos.position_size + pos.buy_fee);
             let state = self.symbol_states.get(&pos.symbol).cloned().unwrap_or_default();
+            
+            // Calculate current spread for logging
+            let current_spread = state.last_binance - state.last_chainlink;
+            let spread_closed_pct = if pos.entry_spread.abs() > 0.0 {
+                (1.0 - current_spread.abs() / pos.entry_spread.abs()) * 100.0
+            } else { 0.0 };
 
             self.balance += net_revenue;
             self.trade_count += 1;
@@ -640,11 +646,6 @@ impl PaperWallet {
                 timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some(reason.to_string()),
             });
-            
-            // Calculate spread closure percentage for logging
-            let spread_closed_pct = if pos.entry_spread.abs() > 0.0 {
-                (1.0 - current_spread.abs() / pos.entry_spread.abs()) * 100.0
-            } else { 0.0 };
             
             info!(
                 symbol=%pos.symbol, 
