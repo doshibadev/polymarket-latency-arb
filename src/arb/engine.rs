@@ -183,8 +183,6 @@ impl ArbEngine {
 
         let mut markets = HashMap::new();
         
-        info!("Broadcasting state - symbol_states count: {}", self.symbol_states.len());
-        
         for (symbol, state) in &self.symbol_states {
             let (up_b, up_a) = self.wallet.get_bid_ask(symbol, "UP");
             let (dn_b, dn_a) = self.wallet.get_bid_ask(symbol, "DOWN");
