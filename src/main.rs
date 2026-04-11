@@ -8,8 +8,7 @@ pub mod server;
 
 use arb::ArbEngine;
 use config::AppConfig;
-use execution::LiveWallet;
-use polymarket::{ClobClient, fetch_current_market, MarketData};
+use polymarket::{ClobClient, fetch_current_market};
 use tokio::sync::{mpsc, broadcast};
 use tracing_subscriber::EnvFilter;
 

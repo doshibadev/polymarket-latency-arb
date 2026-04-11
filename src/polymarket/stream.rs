@@ -27,6 +27,7 @@ struct PolymarketMessage {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct GammaMarket {
     condition_id: String,
     #[serde(rename = "clob_token_ids")]

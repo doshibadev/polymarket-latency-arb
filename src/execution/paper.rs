@@ -1,4 +1,4 @@
-use tracing::{debug, info};
+use tracing::info;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -578,7 +578,7 @@ impl PaperWallet {
         self.balance -= position_size + buy_fee;
 
         let spike_bonus = (spike.abs() - threshold_usd) * self.config.spike_scaling_factor;
-        let profit_target = entry_price * (1.0 + self.config.profit_target_pct + spike_bonus);
+        let _profit_target = entry_price * (1.0 + self.config.profit_target_pct + spike_bonus);
 
         self.pending_entries.push(PendingEntry {
             symbol: symbol.to_string(),

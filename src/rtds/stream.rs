@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 
 #[derive(Debug, Clone, Deserialize)]
 struct RtdsMessage {

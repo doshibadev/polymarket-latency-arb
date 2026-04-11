@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 use crate::polymarket::{MarketData, fetch_current_market};
 
 static LOGGED: AtomicBool = AtomicBool::new(false);

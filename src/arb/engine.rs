@@ -109,7 +109,7 @@ impl ArbEngine {
             };
 
         let mut unrealized_pnl = 0.0;
-        let mut net_market_value = 0.0;
+        let mut _net_market_value = 0.0;
         let mut positions = Vec::new();
 
         for pos in open_positions_ref {
@@ -119,7 +119,7 @@ impl ArbEngine {
             let pnl = current_value - pos.position_size - pos.buy_fee;
             
             unrealized_pnl += pnl;
-            net_market_value += current_value;
+            _net_market_value += current_value;
 
             positions.push(json!({
                 "symbol": pos.symbol,
@@ -135,7 +135,7 @@ impl ArbEngine {
             }));
         }
 
-        let total_val = balance + net_market_value;
+        let total_val = balance + _net_market_value;
         let total_pnl = total_val - starting_balance;
         let realized_pnl: f64 = trade_history_ref.iter()
             .filter(|t| t.r#type == "exit")
@@ -297,10 +297,10 @@ impl ArbEngine {
                                         }
                                     }
                                     // Update chart history
-                                    let mut net_market_value = 0.0;
+                                    let mut _net_market_value = 0.0;
                                     for p in &self.wallet.open_positions {
                                         let (b, a) = self.wallet.get_bid_ask(&p.symbol, &p.direction);
-                                        net_market_value += p.shares * ((b + a) / 2.0);
+                                        _net_market_value += p.shares * ((b + a) / 2.0);
                                     }
                                     let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
                                     self.broadcast_state();
@@ -373,10 +373,10 @@ impl ArbEngine {
                             });
                             info!(symbol=%pos.symbol, pnl=pnl, "Position force-closed at market end");
                         }
-                        let mut net_market_value = 0.0;
+                        let mut _net_market_value = 0.0;
                         for p in &self.wallet.open_positions {
                             let (b, a) = self.wallet.get_bid_ask(&p.symbol, &p.direction);
-                            net_market_value += p.shares * ((b + a) / 2.0);
+                            _net_market_value += p.shares * ((b + a) / 2.0);
                         }
                         let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
                     }
@@ -384,10 +384,10 @@ impl ArbEngine {
                 }
                 Some(update) = self.price_rx.recv() => {
                     if self.handle_price_update(update).await {
-                        let mut net_market_value = 0.0;
+                        let mut _net_market_value = 0.0;
                         for pos in &self.wallet.open_positions {
                             let (b, a) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
-                            net_market_value += pos.shares * ((b + a) / 2.0);
+                            _net_market_value += pos.shares * ((b + a) / 2.0);
                         }
                         let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
                         // Reset spike gate so next spike triggers a fresh entry
@@ -396,10 +396,10 @@ impl ArbEngine {
                 }
                 Some(clob_update) = self.clob_rx.recv() => {
                     if self.handle_clob_update(clob_update).await {
-                        let mut net_market_value = 0.0;
+                        let mut _net_market_value = 0.0;
                         for pos in &self.wallet.open_positions {
                             let (b, a) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
-                            net_market_value += pos.shares * ((b + a) / 2.0);
+                            _net_market_value += pos.shares * ((b + a) / 2.0);
                         }
                         let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
                         // Reset spike gate so next spike triggers a fresh entry
@@ -536,7 +536,7 @@ impl ArbEngine {
     }
 
     pub async fn handle_market_update(&mut self, market: MarketData) {
-        let symbol_clone = market.symbol.clone();
+        let _symbol_clone = market.symbol.clone();
 
         {
             let state = self.symbol_states.entry(market.symbol.clone()).or_default();
@@ -556,7 +556,7 @@ impl ArbEngine {
     }
 
     async fn check_for_spike(&mut self, symbol: &str) {
-        let (binance, chainlink) = {
+        let (binance, _chainlink) = {
             let state = self.symbol_states.get(symbol).unwrap();
             match (state.last_binance, state.last_chainlink) {
                 (Some(b), Some(c)) => (b.0, c.0),
