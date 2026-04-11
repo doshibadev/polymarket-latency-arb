@@ -165,7 +165,8 @@ impl PaperWallet {
         if let Ok(data) = std::fs::read_to_string(Self::STATE_FILE) {
             if let Ok(state) = serde_json::from_str::<PaperWalletState>(&data) {
                 self.balance = state.balance;
-                self.starting_balance = state.starting_balance;
+                // Always use current .env STARTING_BALANCE, not saved value
+                self.starting_balance = self.config.starting_balance;
                 self.trade_count = state.trade_count;
                 self.wins = state.wins;
                 self.losses = state.losses;
