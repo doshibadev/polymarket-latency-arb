@@ -603,11 +603,18 @@
                 <div class="list-container" id="list-trades"></div>
             </div>
             
-            <div class="panel" style="height: 300px;">
+            <div class="panel" style="height: 240px;">
                 <div class="panel-header">
                     <div class="panel-title">Recent Settled</div>
                 </div>
                 <div class="list-container" id="list-settled"></div>
+            </div>
+            
+            <div class="panel" style="height: 200px;">
+                <div class="panel-header">
+                    <div class="panel-title">Recent Markets</div>
+                </div>
+                <div class="list-container" id="list-markets"></div>
             </div>
         </div>
     </div>
@@ -977,10 +984,30 @@
             const grossWin = winTrades.reduce((s,t) => s + t.pnl, 0);
             const grossLoss = Math.abs(lossTrades.reduce((s,t) => s + t.pnl, 0));
             const pf = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? '∞' : '—';
+            
+            // Calculate average hold time from exits
+            const avgHoldMs = exits.length > 0 
+                ? exits.reduce((sum, t) => {
+                    // Calculate hold time from entry to exit timestamps
+                    const entryTrade = (sim.trades || []).find(tr => 
+                        tr.type === 'entry' && 
+                        tr.symbol === t.symbol && 
+                        tr.direction === t.direction &&
+                        new Date(tr.timestamp) < new Date(t.timestamp)
+                    );
+                    if (entryTrade) {
+                        const holdMs = new Date(t.timestamp) - new Date(entryTrade.timestamp);
+                        return sum + holdMs;
+                    }
+                    return sum;
+                }, 0) / exits.length
+                : null;
+            
             document.getElementById('stat-avg-win').innerText = avgWin !== null ? formatMoneySigned(avgWin) : '—';
             document.getElementById('stat-avg-loss').innerText = avgLoss !== null ? formatMoneySigned(avgLoss) : '—';
             document.getElementById('stat-pf').innerText = pf;
             document.getElementById('stat-pf').className = 'stat-value ' + (parseFloat(pf) >= 1 ? 'val-up' : 'val-down');
+            document.getElementById('stat-hold').innerText = avgHoldMs !== null ? formatMs(avgHoldMs) : '—';
 
             // PnL breakdown bar
             const realizedAbs = Math.abs(realized);
@@ -1053,6 +1080,29 @@
                     </div>
                 </div>`;
             }).join('');
+
+            // Recent resolved markets
+            const resolvedMarkets = (sim.resolved_markets || []).slice().reverse();
+            document.getElementById('list-markets').innerHTML = resolvedMarkets.length > 0 
+                ? resolvedMarkets.map(rm => {
+                    const margin = (rm.final_price - rm.price_to_beat).toFixed(2);
+                    const marginSign = margin >= 0 ? '+' : '';
+                    return `
+                    <div class="trade-item">
+                        <div class="t-left">
+                            <div class="t-type ${rm.outcome==='UP'?'t-win':'t-loss'}">${rm.outcome}</div>
+                            <div class="t-info" style="color:var(--text-dim); font-size:10px;">
+                                Final: $${rm.final_price.toLocaleString(undefined, {minimumFractionDigits:2})}
+                            </div>
+                            <div style="font-size:9px; color:var(--text-muted);">${rm.resolved_at}</div>
+                        </div>
+                        <div class="t-price" style="color:var(--text-dim);">
+                            ${marginSign}$${margin}
+                            <div style="font-size:9px; font-weight:400;">vs PTB</div>
+                        </div>
+                    </div>`;
+                }).join('')
+                : '<div style="padding:20px; text-align:center; color:var(--text-muted); font-size:11px;">No resolved markets yet</div>';
 
             if (sim.history && sim.history.length > 0) {
                 myChart.data.labels = sim.history.map(h => h.t);

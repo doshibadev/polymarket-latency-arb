@@ -42,6 +42,7 @@ pub struct ArbEngine {
     pub live_wallet: Option<LiveWallet>,
     symbol_states: HashMap<String, SymbolState>,
     signals: Vec<Value>,
+    resolved_markets: Vec<Value>, // Track last 5 resolved markets
     running: bool,
 }
 
@@ -67,6 +68,7 @@ impl ArbEngine {
             live_wallet: None,
             symbol_states: HashMap::new(),
             signals: Vec::new(),
+            resolved_markets: Vec::new(),
             running: false, // starts paused — user must press START
         }
     }
@@ -131,14 +133,6 @@ impl ArbEngine {
             unrealized_pnl += pnl;
             _net_market_value += current_value;
 
-            // Get current spread for display
-            let state = self.symbol_states.get(&pos.symbol);
-            let current_spread = state.map(|s| {
-                let b = s.last_binance.map(|(p,_)| p).unwrap_or(0.0);
-                let c = s.last_chainlink.map(|(p,_)| p).unwrap_or(0.0);
-                b - c
-            }).unwrap_or(0.0);
-
             positions.push(json!({
                 "symbol": pos.symbol,
                 "cost": pos.position_size + pos.buy_fee,
@@ -149,12 +143,7 @@ impl ArbEngine {
                 "pnl": pnl,
                 "level": pos.scale_level,
                 "held_ms": pos.entry_time.elapsed().as_millis() as u64,
-                "hold_to_resolution": pos.hold_to_resolution,
-                "entry_spread": pos.entry_spread,
-                "current_spread": current_spread,
-                "spread_closed_pct": if pos.entry_spread.abs() > 0.0 {
-                    (1.0 - current_spread.abs() / pos.entry_spread.abs()) * 100.0
-                } else { 0.0 }
+                "hold_to_resolution": pos.hold_to_resolution
             }));
         }
 
@@ -182,7 +171,6 @@ impl ArbEngine {
 
             let binance = state.last_binance.map(|(p, _)| p).unwrap_or(0.0);
             let chainlink = state.last_chainlink.map(|(p, _)| p).unwrap_or(0.0);
-            let current_spread = binance - chainlink;
 
             let spike = {
                 let cutoff = std::time::Duration::from_millis(500);
@@ -198,7 +186,6 @@ impl ArbEngine {
                 "down_price": (dn_b + dn_a) / 2.0,
                 "binance": binance,
                 "chainlink": chainlink,
-                "spread": current_spread,
                 "spike": spike,
                 "ema_offset": 0.0,
                 "price_to_beat": state.price_to_beat,
@@ -224,6 +211,7 @@ impl ArbEngine {
             "history": self.wallet.history,
             "signals": self.signals,
             "markets": markets,
+            "resolved_markets": self.resolved_markets,
             "wallet_address": wallet_address,
             "running": self.running,
             "is_live": self.live_wallet.is_some(),
@@ -238,8 +226,6 @@ impl ArbEngine {
                 "spike_scaling_factor": self.config.spike_scaling_factor,
                 "ema_alpha": self.config.ema_alpha,
                 "execution_delay_ms": self.config.execution_delay_ms,
-                "min_edge_spread": self.config.min_edge_spread,
-                "spread_close_pct": self.config.spread_close_pct,
             }
         });
 
@@ -355,14 +341,39 @@ impl ArbEngine {
                     // Auto-redeem resolved markets in live mode
                     if self.live_wallet.is_some() {
                         let now = Self::now_secs();
-                        let resolved: Vec<String> = self.symbol_states.values()
-                            .filter(|s| s.market_end_ts.map_or(false, |end| now > end + 30)) // 30s after end
-                            .filter_map(|s| s.condition_id.clone())
+                        let resolved: Vec<(String, String, String, u64)> = self.symbol_states.iter()
+                            .filter(|(_, s)| s.market_end_ts.map_or(false, |end| now > end + 30)) // 30s after end
+                            .map(|(sym, s)| (
+                                s.condition_id.clone().unwrap_or_default(),
+                                sym.clone(),
+                                s.question.clone(),
+                                s.market_end_ts.unwrap_or(0)
+                            ))
                             .collect();
-                        for condition_id in resolved {
+                        
+                        for (condition_id, symbol, question, end_ts) in resolved {
                             if let Some(lw) = &self.live_wallet {
                                 info!(condition_id=%condition_id, "Auto-redeeming resolved market");
                                 lw.redeem_resolved_positions(&condition_id).await;
+                            }
+                            
+                            // Track resolved market for dashboard display
+                            let state = self.symbol_states.get(&symbol);
+                            let final_price = state.and_then(|s| s.last_chainlink.map(|(p,_)| p)).unwrap_or(0.0);
+                            let price_to_beat = state.and_then(|s| s.price_to_beat).unwrap_or(0.0);
+                            let outcome = if final_price > price_to_beat { "UP" } else { "DOWN" };
+                            
+                            self.resolved_markets.push(json!({
+                                "question": question,
+                                "outcome": outcome,
+                                "final_price": final_price,
+                                "price_to_beat": price_to_beat,
+                                "resolved_at": chrono::Local::now().format("%H:%M:%S").to_string(),
+                            }));
+                            
+                            // Keep only last 5
+                            if self.resolved_markets.len() > 5 {
+                                self.resolved_markets.remove(0);
                             }
                         }
                     }

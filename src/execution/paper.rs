@@ -506,27 +506,6 @@ impl PaperWallet {
                 None => continue,
             };
             
-            // Calculate current spread (Binance - Chainlink)
-            let current_binance = state.last_binance;
-            let current_chainlink = state.last_chainlink;
-            let current_spread = current_binance - current_chainlink;
-            
-            // SPREAD-BASED EXIT: Exit when spread closes by 70%+ (Chainlink caught up)
-            let spread_closed = current_spread.abs() < pos.entry_spread.abs() * 0.3;
-            
-            // Spread velocity: How fast is Chainlink catching up?
-            // If spread is closing rapidly, exit immediately
-            let spread_velocity = {
-                let spread_change = pos.entry_spread.abs() - current_spread.abs();
-                let time_elapsed = pos.entry_time.elapsed().as_secs_f64();
-                if time_elapsed > 0.1 {
-                    spread_change / time_elapsed // $/second
-                } else {
-                    0.0
-                }
-            };
-            let rapid_catchup = spread_velocity > 10.0; // Chainlink catching up > $10/sec
-            
             // Use FAST baseline (200ms) for quick exits instead of 1s
             let fast_spike = self.get_fast_baseline_spike(&pos.symbol, state.last_binance);
             let _long_spike = self.get_long_baseline_spike(&pos.symbol, state.last_binance);
@@ -558,10 +537,7 @@ impl PaperWallet {
 
             let near_end = pos.entry_time.elapsed().as_millis() > 295000;
 
-            // PRIORITY ORDER: Spread-based exit first, then other conditions
-            let reason = if spread_closed { Some("spread_closed") }
-                        else if rapid_catchup { Some("rapid_catchup") }
-                        else if trailing_stop_hit { Some("trailing_stop") }
+            let reason = if trailing_stop_hit { Some("trailing_stop") }
                         else if trend_reversed { Some("trend_reversed") }
                         else if spike_faded { Some("spike_faded") }
                         else if near_end { Some("near_end") }
@@ -619,12 +595,6 @@ impl PaperWallet {
             let net_revenue = (pos.shares * fill_price) - sell_fee;
             let pnl = net_revenue - (pos.position_size + pos.buy_fee);
             let state = self.symbol_states.get(&pos.symbol).cloned().unwrap_or_default();
-            
-            // Calculate current spread for logging
-            let current_spread = state.last_binance - state.last_chainlink;
-            let spread_closed_pct = if pos.entry_spread.abs() > 0.0 {
-                (1.0 - current_spread.abs() / pos.entry_spread.abs()) * 100.0
-            } else { 0.0 };
 
             self.balance += net_revenue;
             self.trade_count += 1;
@@ -651,10 +621,8 @@ impl PaperWallet {
                 symbol=%pos.symbol, 
                 pnl=format!("${:.4}", pnl), 
                 reason=%reason, 
-                fill_price=fill_price, 
-                entry_spread=pos.entry_spread,
-                current_spread=current_spread,
-                spread_closed_pct=format!("{:.1}%", spread_closed_pct),
+                fill_price=fill_price,
+                held_ms=pos.entry_time.elapsed().as_millis(),
                 "Position closed"
             );
             closed = true;
@@ -681,21 +649,20 @@ impl PaperWallet {
             return Err("PRICE_TOO_CLOSE_TO_HALF".to_string());
         }
 
-        // Calculate spread (Binance - Chainlink)
+        // Calculate spread (Binance - Chainlink) for tracking only
         let spread = binance - chainlink;
         
-        // SPREAD-BASED ENTRY FILTER: Only enter when spread > MIN_EDGE_SPREAD
-        // AND spread direction matches trade direction
-        if spread.abs() < self.config.min_edge_spread {
-            return Err(format!("SPREAD_TOO_SMALL: {:.2}", spread.abs()));
-        }
-        
-        // Verify spread direction matches trade direction
-        // If Binance > Chainlink (+spread), we should buy UP (Chainlink will rise)
-        // If Binance < Chainlink (-spread), we should buy DOWN (Chainlink will fall)
-        let spread_direction = if spread > 0.0 { "UP" } else { "DOWN" };
-        if spread_direction != direction {
-            return Err(format!("SPREAD_WRONG_DIRECTION: spread={:.2}, want={}", spread, direction));
+        // SPREAD FILTER: Only apply if MIN_EDGE_SPREAD > 0
+        if self.config.min_edge_spread > 0.0 {
+            if spread.abs() < self.config.min_edge_spread {
+                return Err(format!("SPREAD_TOO_SMALL: {:.2}", spread.abs()));
+            }
+            
+            // Verify spread direction matches trade direction
+            let spread_direction = if spread > 0.0 { "UP" } else { "DOWN" };
+            if spread_direction != direction {
+                return Err(format!("SPREAD_WRONG_DIRECTION: spread={:.2}, want={}", spread, direction));
+            }
         }
 
         let position_size = self.balance * self.portfolio_pct * (1.0 / scale_level as f64);
@@ -793,7 +760,6 @@ impl PaperWallet {
             let dir = p.direction.clone();
             let level = p.scale_level;
             let slippage = fill_price - p.entry_price;
-            let spread_info = format!("spread={:.2} (B:{:.2} - C:{:.2})", p.entry_spread, p.entry_binance, p.entry_chainlink);
             self.open_positions.push(OpenPosition {
                 symbol: p.symbol,
                 direction: p.direction,
@@ -813,7 +779,7 @@ impl PaperWallet {
                 entry_binance: p.entry_binance,
                 entry_chainlink: p.entry_chainlink,
             });
-            info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, spread=%spread_info, "Position opened with edge");
+            info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, spike=p.spike, "Position opened");
         }
     }
 }
