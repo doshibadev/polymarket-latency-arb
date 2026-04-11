@@ -914,10 +914,19 @@
             document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
 
             let marketData = {};
-            if (sim.markets && Object.keys(sim.markets).length > 0) {
-                // Get first market (usually BTC)
-                const firstKey = Object.keys(sim.markets)[0];
-                marketData = sim.markets[firstKey] || {};
+            if (sim.markets) {
+                console.log('Markets object:', sim.markets);
+                console.log('Markets keys:', Object.keys(sim.markets));
+                if (Object.keys(sim.markets).length > 0) {
+                    // Get first market (usually BTC)
+                    const firstKey = Object.keys(sim.markets)[0];
+                    marketData = sim.markets[firstKey] || {};
+                    console.log('Using market:', firstKey, marketData);
+                } else {
+                    console.warn('Markets object is empty!');
+                }
+            } else {
+                console.warn('No markets in WebSocket data!');
             }
             const m = marketData;
 
