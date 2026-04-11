@@ -462,10 +462,12 @@
             <div class="metric-mini">
                 <div class="m-label">Portfolio Value</div>
                 <div class="m-value" id="v-portfolio">$0.00</div>
+                <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">Start: <span id="v-portfolio-start">$0.00</span></div>
             </div>
             <div class="metric-mini">
                 <div class="m-label">Wallet Balance</div>
                 <div class="m-value" id="v-balance">$0.00</div>
+                <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">Start: <span id="v-balance-start">$0.00</span></div>
             </div>
             <div class="metric-mini">
                 <div class="m-label">Total PnL</div>
@@ -485,8 +487,8 @@
                 <div style="font-size:10px; color:var(--text-muted); margin-top:2px;" id="v-trade-count">0 trades</div>
             </div>
             <div class="metric-mini">
-                <div class="m-label">Total Volume</div>
-                <div class="m-value" id="v-volume">$0.00</div>
+                <div class="m-label">Uptime</div>
+                <div class="m-value" id="v-uptime">0:00:00</div>
             </div>
             <div class="metric-mini">
                 <div class="m-label">Total Fees</div>
@@ -893,6 +895,8 @@
 
             document.getElementById('v-portfolio').innerText = formatMoney(totalVal);
             document.getElementById('v-balance').innerText = formatMoney(sim.balance || 0);
+            document.getElementById('v-portfolio-start').innerText = formatMoney(sim.starting_portfolio_value || 0);
+            document.getElementById('v-balance-start').innerText = formatMoney(sim.starting_wallet_balance || 0);
             document.getElementById('v-total-pnl').innerText = formatMoneySigned(totalPnL);
             document.getElementById('v-total-pnl').className = 'm-value ' + (totalPnL >= 0 ? 'val-up' : 'val-down');
             document.getElementById('v-unrealized').innerText = formatMoneySigned(unrealized);
@@ -900,6 +904,14 @@
             const realized = sim.realized_pnl || 0;
             document.getElementById('v-realized').innerText = formatMoneySigned(realized);
             document.getElementById('v-realized').className = 'm-value ' + (realized >= 0 ? 'val-up' : 'val-down');
+            
+            // Uptime
+            if (sim.uptime_seconds !== undefined) {
+                const hours = Math.floor(sim.uptime_seconds / 3600);
+                const mins = Math.floor((sim.uptime_seconds % 3600) / 60);
+                const secs = sim.uptime_seconds % 60;
+                document.getElementById('v-uptime').innerText = `${hours}:${mins.toString().padStart(2,'0')}:${secs.toString().padStart(2,'0')}`;
+            }
             
             const wins = sim.wins || 0, losses = sim.losses || 0;
             const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100).toFixed(1) : '0.0';

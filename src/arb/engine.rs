@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::error::Result;
 use crate::execution::PaperWallet;
 use crate::execution::LiveWallet;
-use crate::polymarket::{MarketData, SharePriceUpdate};
+use crate::polymarket::{MarketData, SharePriceUpdate, fetch_resolved_markets};
 use crate::rtds::PriceUpdate;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -44,6 +44,9 @@ pub struct ArbEngine {
     signals: Vec<Value>,
     resolved_markets: Vec<Value>, // Track last 5 resolved markets
     running: bool,
+    start_time: Instant, // Track bot uptime
+    starting_portfolio_value: f64, // Portfolio value when bot started
+    starting_wallet_balance: f64, // Wallet balance when bot started
 }
 
 impl ArbEngine {
@@ -56,6 +59,7 @@ impl ArbEngine {
         cmd_rx: mpsc::Receiver<serde_json::Value>,
     ) -> Self {
         let wallet = PaperWallet::new(config.clone());
+        let starting_balance = wallet.balance;
 
         Self {
             config,
@@ -70,6 +74,9 @@ impl ArbEngine {
             signals: Vec::new(),
             resolved_markets: Vec::new(),
             running: false, // starts paused — user must press START
+            start_time: Instant::now(),
+            starting_portfolio_value: starting_balance,
+            starting_wallet_balance: starting_balance,
         }
     }
 
@@ -215,6 +222,9 @@ impl ArbEngine {
             "wallet_address": wallet_address,
             "running": self.running,
             "is_live": self.live_wallet.is_some(),
+            "uptime_seconds": self.start_time.elapsed().as_secs(),
+            "starting_portfolio_value": self.starting_portfolio_value,
+            "starting_wallet_balance": self.starting_wallet_balance,
             "config": {
                 "threshold_bps": self.config.threshold_bps,
                 "portfolio_pct": self.config.portfolio_pct,
@@ -239,6 +249,23 @@ impl ArbEngine {
 
         // Load saved paper wallet state
         self.wallet.load_state();
+
+        // Update starting values after loading state
+        self.starting_wallet_balance = self.wallet.balance;
+        self.starting_portfolio_value = self.wallet.balance; // Will be updated with positions
+
+        // Fetch resolved markets on startup
+        info!("Fetching recent resolved markets...");
+        let resolved = fetch_resolved_markets("BTC", 5).await;
+        for rm in resolved {
+            self.resolved_markets.push(json!({
+                "question": rm.question,
+                "outcome": rm.outcome,
+                "final_price": rm.final_price,
+                "resolved_at": rm.resolved_at,
+            }));
+        }
+        info!("Loaded {} resolved markets", self.resolved_markets.len());
 
         // Push initial portfolio value (just cash)
         self.update_history(self.current_balance());
