@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::error::Result;
 use crate::execution::PaperWallet;
 use crate::execution::LiveWallet;
-use crate::polymarket::{MarketData, SharePriceUpdate, fetch_resolved_markets};
+use crate::polymarket::{MarketData, SharePriceUpdate};
 use crate::rtds::PriceUpdate;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -42,7 +42,6 @@ pub struct ArbEngine {
     pub live_wallet: Option<LiveWallet>,
     symbol_states: HashMap<String, SymbolState>,
     signals: Vec<Value>,
-    resolved_markets: Vec<Value>, // Track last 5 resolved markets
     running: bool,
     running_time_secs: u64, // Total time bot has been running (not paused)
     last_start_time: Option<Instant>, // When bot was last started
@@ -73,7 +72,6 @@ impl ArbEngine {
             live_wallet: None,
             symbol_states: HashMap::new(),
             signals: Vec::new(),
-            resolved_markets: Vec::new(),
             running: false, // starts paused — user must press START
             running_time_secs: 0,
             last_start_time: None,
@@ -106,11 +104,13 @@ impl ArbEngine {
 
     fn add_signal(&mut self, symbol: &str, direction: &str, spike: f64, status: &str, reason: Option<String>) {
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
+        let price = self.wallet.get_share_price(symbol, direction);
         self.signals.push(json!({
             "t": now,
             "s": symbol,
             "d": direction,
             "v": spike,
+            "p": price,
             "st": status,
             "r": reason
         }));
@@ -228,7 +228,6 @@ impl ArbEngine {
             "history": self.wallet.history,
             "signals": self.signals,
             "markets": markets,
-            "resolved_markets": self.resolved_markets,
             "wallet_address": wallet_address,
             "running": self.running,
             "is_live": self.live_wallet.is_some(),
@@ -263,25 +262,6 @@ impl ArbEngine {
         // Update starting values after loading state
         self.starting_wallet_balance = self.wallet.balance;
         self.starting_portfolio_value = self.wallet.balance; // Will be updated with positions
-
-        // Fetch resolved markets on startup
-        info!("Fetching recent resolved markets...");
-        match fetch_resolved_markets("BTC", 5).await {
-            markets if !markets.is_empty() => {
-                for rm in markets {
-                    self.resolved_markets.push(json!({
-                        "question": rm.question,
-                        "outcome": rm.outcome,
-                        "final_price": rm.final_price,
-                        "resolved_at": rm.resolved_at,
-                    }));
-                }
-                info!("Loaded {} resolved markets", self.resolved_markets.len());
-            }
-            _ => {
-                info!("No resolved markets found or API unavailable");
-            }
-        }
 
         // Push initial portfolio value (just cash)
         self.update_history(self.current_balance());
@@ -389,39 +369,14 @@ impl ArbEngine {
                     // Auto-redeem resolved markets in live mode
                     if self.live_wallet.is_some() {
                         let now = Self::now_secs();
-                        let resolved: Vec<(String, String, String, u64)> = self.symbol_states.iter()
-                            .filter(|(_, s)| s.market_end_ts.map_or(false, |end| now > end + 30)) // 30s after end
-                            .map(|(sym, s)| (
-                                s.condition_id.clone().unwrap_or_default(),
-                                sym.clone(),
-                                s.question.clone(),
-                                s.market_end_ts.unwrap_or(0)
-                            ))
+                        let resolved: Vec<String> = self.symbol_states.values()
+                            .filter(|s| s.market_end_ts.map_or(false, |end| now > end + 30)) // 30s after end
+                            .filter_map(|s| s.condition_id.clone())
                             .collect();
-                        
-                        for (condition_id, symbol, question, _end_ts) in resolved {
+                        for condition_id in resolved {
                             if let Some(lw) = &self.live_wallet {
                                 info!(condition_id=%condition_id, "Auto-redeeming resolved market");
                                 lw.redeem_resolved_positions(&condition_id).await;
-                            }
-                            
-                            // Track resolved market for dashboard display
-                            let state = self.symbol_states.get(&symbol);
-                            let final_price = state.and_then(|s| s.last_chainlink.map(|(p,_)| p)).unwrap_or(0.0);
-                            let price_to_beat = state.and_then(|s| s.price_to_beat).unwrap_or(0.0);
-                            let outcome = if final_price > price_to_beat { "UP" } else { "DOWN" };
-                            
-                            self.resolved_markets.push(json!({
-                                "question": question,
-                                "outcome": outcome,
-                                "final_price": final_price,
-                                "price_to_beat": price_to_beat,
-                                "resolved_at": chrono::Local::now().format("%H:%M:%S").to_string(),
-                            }));
-                            
-                            // Keep only last 5
-                            if self.resolved_markets.len() > 5 {
-                                self.resolved_markets.remove(0);
                             }
                         }
                     }

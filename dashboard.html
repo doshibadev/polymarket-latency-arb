@@ -590,7 +590,7 @@
                 </div>
                 <div class="terminal-panel">
                     <div class="term-line term-header">
-                        <span>Time</span><span>Sym</span><span>Side</span><span>Spike</span><span>Status</span><span>Reason</span>
+                        <span>Time</span><span>Sym</span><span>Side</span><span>Spike</span><span>Price</span><span>Status</span><span>Reason</span>
                     </div>
                     <div id="signal-log" style="overflow-y:auto; flex:1;"></div>
                 </div>
@@ -605,18 +605,11 @@
                 <div class="list-container" id="list-trades"></div>
             </div>
             
-            <div class="panel" style="height: 240px;">
+            <div class="panel" style="height: 440px;">
                 <div class="panel-header">
                     <div class="panel-title">Recent Settled</div>
                 </div>
                 <div class="list-container" id="list-settled"></div>
-            </div>
-            
-            <div class="panel" style="height: 200px;">
-                <div class="panel-header">
-                    <div class="panel-title">Recent Markets</div>
-                </div>
-                <div class="list-container" id="list-markets"></div>
             </div>
         </div>
     </div>
@@ -1070,6 +1063,7 @@
                     <span>${s.s}</span>
                     <span class="${s.d==='UP'?'val-up':'val-down'}">${s.d}</span>
                     <span class="sig-val">${s.v.toFixed(2)}</span>
+                    <span style="color:var(--text-dim)">${s.p ? s.p.toFixed(4) : '—'}</span>
                     <span class="${s.st==='EXECUTED'?'st-exec':'st-rej'}">${s.st}</span>
                     <span style="font-size:10px; color:var(--text-dim)">${s.r || ''}</span>
                 </div>
@@ -1094,29 +1088,6 @@
                     </div>
                 </div>`;
             }).join('');
-
-            // Recent resolved markets
-            const resolvedMarkets = (sim.resolved_markets || []).slice().reverse();
-            document.getElementById('list-markets').innerHTML = resolvedMarkets.length > 0 
-                ? resolvedMarkets.map(rm => {
-                    const margin = (rm.final_price - rm.price_to_beat).toFixed(2);
-                    const marginSign = margin >= 0 ? '+' : '';
-                    return `
-                    <div class="trade-item">
-                        <div class="t-left">
-                            <div class="t-type ${rm.outcome==='UP'?'t-win':'t-loss'}">${rm.outcome}</div>
-                            <div class="t-info" style="color:var(--text-dim); font-size:10px;">
-                                Final: $${rm.final_price.toLocaleString(undefined, {minimumFractionDigits:2})}
-                            </div>
-                            <div style="font-size:9px; color:var(--text-muted);">${rm.resolved_at}</div>
-                        </div>
-                        <div class="t-price" style="color:var(--text-dim);">
-                            ${marginSign}$${margin}
-                            <div style="font-size:9px; font-weight:400;">vs PTB</div>
-                        </div>
-                    </div>`;
-                }).join('')
-                : '<div style="padding:20px; text-align:center; color:var(--text-muted); font-size:11px;">No resolved markets yet</div>';
 
             if (sim.history && sim.history.length > 0) {
                 myChart.data.labels = sim.history.map(h => h.t);
