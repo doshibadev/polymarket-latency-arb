@@ -99,6 +99,14 @@ impl ArbEngine {
         self.wallet.push_history(total_val);
     }
 
+    /// Helper to get current unix timestamp in seconds
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
     fn broadcast_state(&self) {
         let (balance, open_positions_ref, trade_history_ref, wins, losses, fees, volume, starting_balance) =
             if let Some(lw) = &self.live_wallet {
@@ -261,6 +269,7 @@ impl ArbEngine {
                         Some("reset") => {
                             // Only reset paper wallet, never live
                             self.wallet.reset();
+                            self.signals.clear(); // Clear signal terminal
                             info!("Paper wallet reset");
                         }
                         Some("close_position") => {
@@ -325,7 +334,7 @@ impl ArbEngine {
 
                     // Auto-redeem resolved markets in live mode
                     if self.live_wallet.is_some() {
-                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                        let now = Self::now_secs();
                         let resolved: Vec<String> = self.symbol_states.values()
                             .filter(|s| s.market_end_ts.map_or(false, |end| now > end + 30)) // 30s after end
                             .filter_map(|s| s.condition_id.clone())
@@ -338,7 +347,7 @@ impl ArbEngine {
                         }
                     }
                     // Force-close all positions if any market is within 5 seconds of ending
-                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                    let now = Self::now_secs();
                     let market_ending = self.symbol_states.values()
                         .any(|s| s.market_end_ts.map_or(false, |end| now >= end.saturating_sub(5)));
                     if market_ending && !self.wallet.open_positions.is_empty() {
@@ -638,7 +647,7 @@ impl ArbEngine {
         }
         
         if let Some(end_ts) = state.market_end_ts {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let now = Self::now_secs();
             if now >= end_ts.saturating_sub(5) {
                 let state = self.symbol_states.get_mut(symbol).unwrap();
                 let should_log = state.last_rejection.as_ref()
