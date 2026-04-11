@@ -511,30 +511,26 @@ impl PaperWallet {
             // BTC-based trailing stop (only when profitable)
             // For UP: profitable if current BTC > entry BTC
             // For DOWN: profitable if current BTC < entry BTC
-            let is_profitable = if pos.entry_btc > 0.0 {
+            let current_btc = state.last_binance;
+            let is_profitable = if pos.entry_btc > 0.0 && current_btc > 0.0 {
                 if pos.direction == "UP" {
-                    state.last_binance.map(|(b, _)| b > pos.entry_btc).unwrap_or(false)
+                    current_btc > pos.entry_btc
                 } else {
-                    state.last_binance.map(|(b, _)| b < pos.entry_btc).unwrap_or(false)
+                    current_btc < pos.entry_btc
                 }
             } else {
                 false
             };
 
             let trailing_stop_hit = if is_profitable {
-                let current_btc = state.last_binance.map(|(b, _)| b).unwrap_or(0.0);
-                if current_btc > 0.0 {
-                    if pos.direction == "UP" {
-                        // For UP: exit if BTC drops X% from peak
-                        let threshold = pos.peak_btc * (1.0 - self.config.trailing_stop_pct / 100.0);
-                        current_btc < threshold
-                    } else {
-                        // For DOWN: exit if BTC rises X% from trough
-                        let threshold = pos.trough_btc * (1.0 + self.config.trailing_stop_pct / 100.0);
-                        current_btc > threshold
-                    }
+                if pos.direction == "UP" {
+                    // For UP: exit if BTC drops X% from peak
+                    let threshold = pos.peak_btc * (1.0 - self.config.trailing_stop_pct / 100.0);
+                    current_btc < threshold
                 } else {
-                    false
+                    // For DOWN: exit if BTC rises X% from trough
+                    let threshold = pos.trough_btc * (1.0 + self.config.trailing_stop_pct / 100.0);
+                    current_btc > threshold
                 }
             } else {
                 false
@@ -605,34 +601,30 @@ impl PaperWallet {
         
         // Update trailing_triggered_since for all positions
         // Need to re-check the condition to know if we should set or clear it
-        for (idx, pos) in self.open_positions.iter_mut().enumerate() {
+        for pos in self.open_positions.iter_mut() {
             let state = match self.symbol_states.get(&pos.symbol) {
                 Some(s) => s,
                 None => continue,
             };
             
-            let is_profitable = if pos.entry_btc > 0.0 {
+            let current_btc = state.last_binance;
+            let is_profitable = if pos.entry_btc > 0.0 && current_btc > 0.0 {
                 if pos.direction == "UP" {
-                    state.last_binance.map(|(b, _)| b > pos.entry_btc).unwrap_or(false)
+                    current_btc > pos.entry_btc
                 } else {
-                    state.last_binance.map(|(b, _)| b < pos.entry_btc).unwrap_or(false)
+                    current_btc < pos.entry_btc
                 }
             } else {
                 false
             };
 
             let trailing_stop_hit = if is_profitable {
-                let current_btc = state.last_binance.map(|(b, _)| b).unwrap_or(0.0);
-                if current_btc > 0.0 {
-                    if pos.direction == "UP" {
-                        let threshold = pos.peak_btc * (1.0 - self.config.trailing_stop_pct / 100.0);
-                        current_btc < threshold
-                    } else {
-                        let threshold = pos.trough_btc * (1.0 + self.config.trailing_stop_pct / 100.0);
-                        current_btc > threshold
-                    }
+                if pos.direction == "UP" {
+                    let threshold = pos.peak_btc * (1.0 - self.config.trailing_stop_pct / 100.0);
+                    current_btc < threshold
                 } else {
-                    false
+                    let threshold = pos.trough_btc * (1.0 + self.config.trailing_stop_pct / 100.0);
+                    current_btc > threshold
                 }
             } else {
                 false
@@ -652,7 +644,7 @@ impl PaperWallet {
         }
 
         // Process closes
-        to_close.sort_by_key(|k| std::cmp::Reverse(k.0));
+        to_close.sort_by_key(|k: &(usize, &str)| std::cmp::Reverse(k.0));
         let mut closed = false;
         for (idx, reason) in to_close {
             let pos = self.open_positions.remove(idx);
