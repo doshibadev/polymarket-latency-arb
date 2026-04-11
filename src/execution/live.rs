@@ -431,6 +431,17 @@ impl LiveWallet {
         let max_position_size = self.balance * 0.8; // Max 80% of current balance per trade
         let position_size = position_size.min(max_position_size);
         
+        // CRITICAL SAFETY CHECKS - These prevented the $20 loss incident
+        if entry_price < 0.11 { 
+            return Err(format!("CRITICAL_SAFETY: Entry price {:.3} < 0.11 (11 cents minimum)", entry_price)); 
+        }
+        if position_size > self.balance * 0.15 { 
+            return Err(format!("CRITICAL_SAFETY: Position ${:.2} > 15% of balance ${:.2}", position_size, self.balance)); 
+        }
+        if position_size > 5.0 { 
+            return Err(format!("CRITICAL_SAFETY: Position ${:.2} > $5 maximum per trade", position_size)); 
+        }
+
         let shares = position_size / entry_price;
         let buy_fee = shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
 
@@ -443,6 +454,12 @@ impl LiveWallet {
         let rounded_shares = ((shares * 100.0).floor() / 100.0).max(5.0); // enforce min 5 shares
         let price = Decimal::try_from(rounded_price).map_err(|e| e.to_string())?;
         let size = Decimal::try_from(rounded_shares).map_err(|e| e.to_string())?;
+
+        // Final safety validation before submitting order
+        if rounded_shares * entry_price > self.balance * 0.15 {
+            return Err(format!("FINAL_SAFETY: Order value ${:.2} exceeds 15% of balance ${:.2}", 
+                rounded_shares * entry_price, self.balance));
+        }
 
         let order_id = Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Buy).await?;
         info!(symbol=%symbol, direction=%direction, shares=shares, price=rounded_price, order_id=%order_id, "Live BUY placed");
