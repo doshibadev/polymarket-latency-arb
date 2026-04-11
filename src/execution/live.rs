@@ -321,6 +321,12 @@ impl LiveWallet {
         entry_price: f64,
         market_end_ts: Option<u64>,
     ) -> Result<u32, String> {
+        // EMERGENCY STOP: If losses exceed 30% of starting balance, refuse new positions
+        let total_loss = self.starting_balance - self.balance;
+        if total_loss > self.starting_balance * 0.3 {
+            return Err("EMERGENCY_STOP_LOSSES_TOO_HIGH".to_string());
+        }
+
         // Check market ending FIRST before any other validation
         if let Some(end_ts) = market_end_ts {
             let now = std::time::SystemTime::now()
@@ -349,6 +355,11 @@ impl LiveWallet {
         }
 
         let position_size = self.balance * self.config.portfolio_pct;
+        
+        // SAFETY: Cap position size to prevent catastrophic losses
+        let max_position_size = self.starting_balance * 0.5; // Never risk more than 50% of starting balance
+        let position_size = position_size.min(max_position_size);
+        
         let shares = position_size / entry_price;
         let buy_fee = shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
 
@@ -366,7 +377,8 @@ impl LiveWallet {
         info!(symbol=%symbol, direction=%direction, shares=shares, price=rounded_price, order_id=%order_id, "Live BUY placed");
 
         self.pending_order_ids.insert(format!("{}:{}", symbol, direction), order_id);
-        self.balance -= position_size + buy_fee;
+        // DON'T decrease balance here - only decrease when order is confirmed filled
+        // self.balance -= position_size + buy_fee;
 
         self.trade_history.push(TradeRecord {
             symbol: symbol.to_string(),
@@ -429,7 +441,10 @@ impl LiveWallet {
         };
 
         match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Sell).await {
-            Ok(id) => info!(symbol=%pos.symbol, reason=%reason, price=rounded, order_id=%id, "Live SELL placed"),
+            Ok(id) => {
+                info!(symbol=%pos.symbol, reason=%reason, price=rounded, order_id=%id, "Live SELL placed");
+                // TODO: Add order status tracking to confirm actual fill price/size
+            },
             Err(e) => error!("Sell order failed: {}", e),
         }
 
