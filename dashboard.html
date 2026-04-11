@@ -840,14 +840,15 @@
             
             console.log('updateUI called with data:', sim);
             
+            // Declare variables at function scope so they're accessible in all try-catch blocks
+            const totalVal = sim.total_portfolio_value || 0;
+            const totalPnL = sim.total_pnl || 0;
+            const unrealized = sim.unrealized_pnl || 0;
+            const realized = sim.realized_pnl || 0;
+            const posArr = sim.positions || [];
+            startingBalance = sim.starting_balance || 27.0;
+            
             try {
-                const totalVal = sim.total_portfolio_value || 0;
-                startingBalance = sim.starting_balance || 27.0;
-                const totalPnL = sim.total_pnl || 0;
-                const unrealized = sim.unrealized_pnl || 0;
-                const realized = sim.realized_pnl || 0;
-                const posArr = sim.positions || [];
-
                 // Update running state
                 if (typeof sim.running === 'boolean') {
                     botRunning = sim.running;
