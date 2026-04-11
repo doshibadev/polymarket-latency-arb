@@ -1,5 +1,5 @@
 use tracing::{debug, info};
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::time::Instant;
 use crate::config::AppConfig;
@@ -24,7 +24,7 @@ pub struct OpenPosition {
     pub peak_spike: f64,           // highest spike seen since entry
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TradeRecord {
     pub symbol: String,
     pub r#type: String,
@@ -37,6 +37,19 @@ pub struct TradeRecord {
     pub pnl: Option<f64>,
     pub timestamp: String,
     pub close_reason: Option<String>,
+}
+
+/// Serializable state for paper trading persistence
+#[derive(Serialize, Deserialize)]
+pub struct PaperWalletState {
+    pub balance: f64,
+    pub starting_balance: f64,
+    pub trade_count: u64,
+    pub wins: u64,
+    pub losses: u64,
+    pub total_fees_paid: f64,
+    pub total_volume: f64,
+    pub trade_history: Vec<TradeRecord>,
 }
 
 #[derive(Clone)]
@@ -119,6 +132,8 @@ pub struct PaperWallet {
 }
 
 impl PaperWallet {
+    const STATE_FILE: &'static str = "paper_wallet_state.json";
+    
     pub fn new(config: AppConfig) -> Self {
         Self {
             balance: config.starting_balance,
@@ -136,6 +151,69 @@ impl PaperWallet {
             symbol_states: HashMap::new(),
             config,
         }
+    }
+    
+    /// Load saved state from disk (only for paper trading)
+    pub fn load_state(&mut self) {
+        if !self.config.paper_trading {
+            return; // Never load state for live trading
+        }
+        
+        if let Ok(data) = std::fs::read_to_string(Self::STATE_FILE) {
+            if let Ok(state) = serde_json::from_str::<PaperWalletState>(&data) {
+                self.balance = state.balance;
+                self.starting_balance = state.starting_balance;
+                self.trade_count = state.trade_count;
+                self.wins = state.wins;
+                self.losses = state.losses;
+                self.total_fees_paid = state.total_fees_paid;
+                self.total_volume = state.total_volume;
+                self.trade_history = state.trade_history;
+                tracing::info!("Loaded paper wallet state from disk");
+            }
+        }
+    }
+    
+    /// Save state to disk (only for paper trading)
+    pub fn save_state(&self) {
+        if !self.config.paper_trading {
+            return; // Never save state for live trading
+        }
+        
+        let state = PaperWalletState {
+            balance: self.balance,
+            starting_balance: self.starting_balance,
+            trade_count: self.trade_count,
+            wins: self.wins,
+            losses: self.losses,
+            total_fees_paid: self.total_fees_paid,
+            total_volume: self.total_volume,
+            trade_history: self.trade_history.clone(),
+        };
+        
+        if let Ok(json) = serde_json::to_string_pretty(&state) {
+            let _ = std::fs::write(Self::STATE_FILE, json);
+        }
+    }
+    
+    /// Reset paper wallet to initial state
+    pub fn reset(&mut self) {
+        self.balance = self.config.starting_balance;
+        self.starting_balance = self.config.starting_balance;
+        self.trade_count = 0;
+        self.wins = 0;
+        self.losses = 0;
+        self.total_fees_paid = 0.0;
+        self.total_volume = 0.0;
+        self.open_positions.clear();
+        self.pending_entries.clear();
+        self.pending_closes.clear();
+        self.trade_history.clear();
+        self.symbol_states.clear();
+        
+        // Delete saved state file
+        let _ = std::fs::remove_file(Self::STATE_FILE);
+        tracing::info!("Paper wallet reset to initial state");
     }
 
     pub fn update_config(&mut self, config: AppConfig) {

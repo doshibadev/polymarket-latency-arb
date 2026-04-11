@@ -222,11 +222,15 @@ impl ArbEngine {
     pub async fn run(&mut self) -> Result<()> {
         info!("Arb Engine V2 running");
 
+        // Load saved paper wallet state
+        self.wallet.load_state();
+
         // Push initial portfolio value (just cash)
         self.update_history(self.current_balance());
 
         let mut broadcast_timer = tokio::time::interval(Duration::from_millis(200)); // faster UI updates
         let mut spike_poll = tokio::time::interval(Duration::from_millis(50)); // faster spike detection
+        let mut save_timer = tokio::time::interval(Duration::from_secs(30)); // save state every 30s
 
         loop {
             tokio::select! {
@@ -250,7 +254,13 @@ impl ArbEngine {
                         }
                         Some("stop") => {
                             self.running = false;
+                            self.wallet.save_state();
                             info!("Bot stopped");
+                        }
+                        Some("reset") => {
+                            // Only reset paper wallet, never live
+                            self.wallet.reset();
+                            info!("Paper wallet reset");
                         }
                         Some("close_position") => {
                             if let Some(idx) = cmd.get("index").and_then(|v| v.as_u64()) {
@@ -405,6 +415,9 @@ impl ArbEngine {
                         }
                     }
                     self.wallet.flush_pending();
+                }
+                _ = save_timer.tick() => {
+                    self.wallet.save_state();
                 }
                 else => break,
             }
