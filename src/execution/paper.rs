@@ -523,17 +523,17 @@ impl PaperWallet {
 
             // FAST trend reversal detection using 200ms baseline (not 1s)
             let trend_reversed = if pos.direction == "UP" {
-                fast_spike < -(pos.entry_spike.abs() * 0.3) // Exit faster on reversal
+                fast_spike < -(pos.entry_spike.abs() * 0.5) // Less aggressive: 50% instead of 30%
             } else {
-                fast_spike > (pos.entry_spike.abs() * 0.3)
+                fast_spike > (pos.entry_spike.abs() * 0.5)
             };
 
-            // Spike faded: Use fast spike for detection, require less time (200ms not 500ms)
+            // Spike faded: Use fast spike for detection, require more time (500ms not 200ms)
             let consolidating = self.is_consolidating(&pos.symbol, 20.0);
-            let spike_low = fast_spike.abs() < new_peak * 0.3;
+            let spike_low = fast_spike.abs() < new_peak * self.config.spike_faded_pct; // Use config value
             spike_low_updates.push((idx, spike_low));
-            // Faster fade detection: 200ms instead of 500ms
-            let spike_faded = spike_low && !consolidating && pos.spike_low_since.map_or(false, |t| t.elapsed().as_millis() >= 200);
+            // Require 500ms of sustained low spike before exiting
+            let spike_faded = spike_low && !consolidating && pos.spike_low_since.map_or(false, |t| t.elapsed().as_millis() >= 500);
 
             let near_end = pos.entry_time.elapsed().as_millis() > 295000;
 

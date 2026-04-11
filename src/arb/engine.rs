@@ -655,21 +655,23 @@ impl ArbEngine {
 
         // IMPROVED CONFIRMATION LOGIC (no time delay required)
         // 1. Spike acceleration: Is momentum increasing?
-        let spike_accelerating = abs_spike > state.prev_fast_spike.abs() * 1.1;
+        let spike_accelerating = abs_spike > state.prev_fast_spike.abs() * 1.2; // Increased from 1.1 to 1.2
         
         // 2. High confidence: Spike is significantly above threshold
-        let high_confidence = abs_spike > threshold_usd * 1.5;
+        let high_confidence = abs_spike > threshold_usd * 2.0; // Increased from 1.5 to 2.0
         
         // 3. Directional consistency: Fast and slow spikes agree
-        let directionally_consistent = slow_spike.signum() == fast_spike.signum();
+        let directionally_consistent = slow_spike.signum() == fast_spike.signum() && slow_spike.abs() > threshold_usd * 0.8;
         
         // 4. Check orderbook reaction: Is Polymarket lagging?
         let (bid, ask) = self.wallet.get_bid_ask(symbol, direction);
         let spread = if bid > 0.0 && ask > 0.0 { ask - bid } else { 0.0 };
-        let orderbook_lagging = spread < 0.03; // Spread still tight = market hasn't reacted yet
+        let orderbook_lagging = spread < 0.02; // Tightened from 0.03 to 0.02
         
-        // Confirm if ANY of these conditions are met (no time delay needed):
-        let confirmed = spike_accelerating || high_confidence || (directionally_consistent && orderbook_lagging);
+        // Confirm if MULTIPLE conditions are met (more selective):
+        let confirmed = (spike_accelerating && directionally_consistent) || 
+                       (high_confidence && orderbook_lagging) ||
+                       (spike_accelerating && high_confidence);
         
         // Update tracking for next iteration
         state.prev_fast_spike = fast_spike;
