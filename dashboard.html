@@ -415,6 +415,22 @@
                     <label class="setting-label">Execution Delay (ms)</label>
                     <input type="number" id="set-delay" class="setting-input" placeholder="e.g. 300">
                 </div>
+                <div class="setting-group">
+                    <label class="setting-label">Max Orders/Min</label>
+                    <input type="number" id="set-max-orders" class="setting-input" placeholder="e.g. 20">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Max Daily Loss ($)</label>
+                    <input type="number" id="set-daily-loss" class="setting-input" step="0.01" placeholder="e.g. 10">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Max Market Exposure ($)</label>
+                    <input type="number" id="set-market-exposure" class="setting-input" step="0.01" placeholder="e.g. 50">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Max Drawdown (%)</label>
+                    <input type="number" id="set-drawdown" class="setting-input" step="0.1" placeholder="e.g. 30">
+                </div>
                 <button class="save-btn" onclick="saveSettings()">Save & Apply Changes</button>
             </div>
         </div>
@@ -730,6 +746,10 @@
                     set('set-spread', c.max_spread_bps);
                     set('set-scaling', c.spike_scaling_factor);
                     set('set-delay', c.execution_delay_ms);
+                    set('set-max-orders', c.max_orders_per_minute);
+                    set('set-daily-loss', c.max_daily_loss);
+                    set('set-market-exposure', c.max_exposure_per_market);
+                    set('set-drawdown', c.max_drawdown_pct);
                 }
             } catch(e) {}
             document.getElementById('settings-modal').style.display = 'flex';
@@ -753,6 +773,10 @@
                 max_entry_price: parseFloat(document.getElementById('set-maxprice').value),
                 spike_scaling_factor: parseFloat(document.getElementById('set-scaling').value),
                 execution_delay_ms: parseInt(document.getElementById('set-delay').value),
+                max_orders_per_minute: parseInt(document.getElementById('set-max-orders').value),
+                max_daily_loss: parseFloat(document.getElementById('set-daily-loss').value),
+                max_exposure_per_market: parseFloat(document.getElementById('set-market-exposure').value),
+                max_drawdown_pct: parseFloat(document.getElementById('set-drawdown').value),
             };
 
             try {
