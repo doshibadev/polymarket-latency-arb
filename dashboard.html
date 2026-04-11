@@ -924,7 +924,6 @@
                 const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100).toFixed(1) : '0.0';
                 document.getElementById('v-winrate').innerText = wr + '%';
                 document.getElementById('v-trade-count').innerText = (wins + losses) + ' trades';
-                document.getElementById('v-volume').innerText = formatMoney(sim.total_volume || 0);
                 document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
             } catch (err) {
                 console.error('Error updating metrics:', err);
