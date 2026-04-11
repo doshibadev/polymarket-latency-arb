@@ -44,7 +44,8 @@ pub struct ArbEngine {
     signals: Vec<Value>,
     resolved_markets: Vec<Value>, // Track last 5 resolved markets
     running: bool,
-    start_time: Instant, // Track bot uptime
+    running_time_secs: u64, // Total time bot has been running (not paused)
+    last_start_time: Option<Instant>, // When bot was last started
     starting_portfolio_value: f64, // Portfolio value when bot started
     starting_wallet_balance: f64, // Wallet balance when bot started
 }
@@ -74,10 +75,19 @@ impl ArbEngine {
             signals: Vec::new(),
             resolved_markets: Vec::new(),
             running: false, // starts paused — user must press START
-            start_time: Instant::now(),
+            running_time_secs: 0,
+            last_start_time: None,
             starting_portfolio_value: starting_balance,
             starting_wallet_balance: starting_balance,
         }
+    }
+
+    fn get_uptime_seconds(&self) -> u64 {
+        let mut total = self.running_time_secs;
+        if let Some(start) = self.last_start_time {
+            total += start.elapsed().as_secs();
+        }
+        total
     }
 
     fn current_balance(&self) -> f64 {
@@ -222,7 +232,7 @@ impl ArbEngine {
             "wallet_address": wallet_address,
             "running": self.running,
             "is_live": self.live_wallet.is_some(),
-            "uptime_seconds": self.start_time.elapsed().as_secs(),
+            "uptime_seconds": self.get_uptime_seconds(),
             "starting_portfolio_value": self.starting_portfolio_value,
             "starting_wallet_balance": self.starting_wallet_balance,
             "config": {
@@ -256,16 +266,22 @@ impl ArbEngine {
 
         // Fetch resolved markets on startup
         info!("Fetching recent resolved markets...");
-        let resolved = fetch_resolved_markets("BTC", 5).await;
-        for rm in resolved {
-            self.resolved_markets.push(json!({
-                "question": rm.question,
-                "outcome": rm.outcome,
-                "final_price": rm.final_price,
-                "resolved_at": rm.resolved_at,
-            }));
+        match fetch_resolved_markets("BTC", 5).await {
+            markets if !markets.is_empty() => {
+                for rm in markets {
+                    self.resolved_markets.push(json!({
+                        "question": rm.question,
+                        "outcome": rm.outcome,
+                        "final_price": rm.final_price,
+                        "resolved_at": rm.resolved_at,
+                    }));
+                }
+                info!("Loaded {} resolved markets", self.resolved_markets.len());
+            }
+            _ => {
+                info!("No resolved markets found or API unavailable");
+            }
         }
-        info!("Loaded {} resolved markets", self.resolved_markets.len());
 
         // Push initial portfolio value (just cash)
         self.update_history(self.current_balance());
@@ -292,10 +308,15 @@ impl ArbEngine {
                                 }
                             }
                             self.running = true;
+                            self.last_start_time = Some(Instant::now());
                             info!("Bot started");
                         }
                         Some("stop") => {
                             self.running = false;
+                            // Accumulate running time
+                            if let Some(start) = self.last_start_time.take() {
+                                self.running_time_secs += start.elapsed().as_secs();
+                            }
                             self.wallet.save_state();
                             info!("Bot stopped");
                         }
