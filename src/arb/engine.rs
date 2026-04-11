@@ -351,7 +351,7 @@ impl ArbEngine {
                             ))
                             .collect();
                         
-                        for (condition_id, symbol, question, end_ts) in resolved {
+                        for (condition_id, symbol, question, _end_ts) in resolved {
                             if let Some(lw) = &self.live_wallet {
                                 info!(condition_id=%condition_id, "Auto-redeeming resolved market");
                                 lw.redeem_resolved_positions(&condition_id).await;
