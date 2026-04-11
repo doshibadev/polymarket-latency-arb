@@ -279,14 +279,14 @@ impl LiveWallet {
         signer: &K256Signer,
         token_id: U256,
         price: Decimal,
-        usdc_amount: Decimal,
+        shares: Decimal,
         side: Side,
     ) -> Result<String, String> {
         use polymarket_client_sdk::clob::types::Amount;
         for attempt in 0..3u32 {
             let order = clob.market_order()
                 .token_id(token_id)
-                .amount(Amount::usdc(usdc_amount).map_err(|e| e.to_string())?)
+                .amount(Amount::shares(shares).map_err(|e| e.to_string())?)
                 .price(price)
                 .side(side.clone())
                 .order_type(OrderType::FOK)
@@ -319,7 +319,19 @@ impl LiveWallet {
         direction: &str,
         spike: f64,
         entry_price: f64,
+        market_end_ts: Option<u64>,
     ) -> Result<u32, String> {
+        // Check market ending FIRST before any other validation
+        if let Some(end_ts) = market_end_ts {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            if now >= end_ts.saturating_sub(5) {
+                return Err("MARKET_ENDING".to_string());
+            }
+        }
+
         let existing = self.open_positions.iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
             .count();
