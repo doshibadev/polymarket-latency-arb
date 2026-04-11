@@ -197,6 +197,14 @@ impl ArbEngine {
                 match baseline { Some(b) => binance - b, None => 0.0 }
             };
 
+            info!(
+                symbol=%symbol,
+                question=%state.question,
+                binance=binance,
+                chainlink=chainlink,
+                "Broadcasting market data"
+            );
+
             markets.insert(symbol.clone(), json!({
                 "question": state.question,
                 "up_price": (up_b + up_a) / 2.0,
