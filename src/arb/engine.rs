@@ -23,6 +23,9 @@ struct SymbolState {
     pub btc_history: Vec<(f64, Instant)>,
     pub last_rejection: Option<(String, Instant)>,
     pub spike_confirmed_since: Option<(f64, Instant)>,
+    // Pre-computed baselines for faster spike detection
+    pub baseline_200ms: Option<f64>,
+    pub baseline_1s: Option<f64>,
 }
 
 pub struct ArbEngine {
@@ -436,8 +439,22 @@ impl ArbEngine {
             let state = self.symbol_states.entry(update.symbol.clone()).or_default();
             if update.source == "binance" {
                 state.last_binance = Some((update.price, update.timestamp));
-                state.btc_history.push((update.price, Instant::now()));
+                let now = Instant::now();
+                state.btc_history.push((update.price, now));
                 state.btc_history.retain(|(_, t)| t.elapsed().as_millis() < 2000);
+                
+                // Update pre-computed baselines for faster spike detection
+                // Find price from ~200ms ago for fast spike
+                let cutoff_200ms = std::time::Duration::from_millis(200);
+                state.baseline_200ms = state.btc_history.iter()
+                    .find(|(_, t)| now.duration_since(*t) >= cutoff_200ms)
+                    .map(|(p, _)| *p);
+                
+                // Find price from ~1s ago for slow spike confirmation
+                let cutoff_1s = std::time::Duration::from_millis(1000);
+                state.baseline_1s = state.btc_history.iter()
+                    .find(|(_, t)| now.duration_since(*t) >= cutoff_1s)
+                    .map(|(p, _)| *p);
             } else {
                 state.last_chainlink = Some((update.price, update.timestamp));
                 // Use first Chainlink tick of new window as price to beat (fallback)
@@ -455,13 +472,10 @@ impl ArbEngine {
             // Push BTC price to wallet for long-baseline spike calculation (every tick)
             self.wallet.push_btc_price(&symbol, update.price);
 
-            // Compute fast spike for entry detection
+            // Compute fast spike for entry detection (using pre-computed baseline)
             let fast_spike = {
                 let s = self.symbol_states.get(&symbol).unwrap();
-                let cutoff = std::time::Duration::from_millis(200);
-                s.btc_history.iter()
-                    .find(|(_, t)| t.elapsed() >= cutoff)
-                    .map(|(p, _)| update.price - p)
+                s.baseline_200ms.map(|b| update.price - b)
             };
             if let Some(momentum) = fast_spike {
                 self.wallet.push_spike_momentum(&symbol, momentum);
@@ -474,6 +488,7 @@ impl ArbEngine {
             };
             if b > 0.0 && c > 0.0 {
                 self.wallet.update_btc_prices(&symbol, b, c);
+                // IMMEDIATE spike check on every Binance price update (no polling delay)
                 if self.running { self.check_for_spike(&symbol).await; }
             }
 
@@ -573,23 +588,16 @@ impl ArbEngine {
         // Need to re-fetch state to modify it
         let state = self.symbol_states.get_mut(symbol).unwrap();
 
-        // Dual-window spike detection:
-        // Fast (200ms): detects spike early, starts sustain timer
-        // Slow (1000ms): confirms spike is real and not a flash reversal
-        let fast_spike = {
-            let cutoff = std::time::Duration::from_millis(200);
-            let baseline = state.btc_history.iter()
-                .find(|(_, t)| t.elapsed() >= cutoff)
-                .map(|(p, _)| *p);
-            match baseline { Some(b) => binance - b, None => return }
+        // Fast spike detection using pre-computed baseline (no iteration)
+        let fast_spike = match state.baseline_200ms {
+            Some(baseline) => binance - baseline,
+            None => return, // Not enough history yet
         };
 
-        let slow_spike = {
-            let cutoff = std::time::Duration::from_millis(1000);
-            state.btc_history.iter()
-                .find(|(_, t)| t.elapsed() >= cutoff)
-                .map(|(p, _)| binance - p)
-                .unwrap_or(fast_spike) // fall back to fast if not enough history
+        // Slow spike for confirmation (pre-computed baseline)
+        let slow_spike = match state.baseline_1s {
+            Some(baseline) => binance - baseline,
+            None => fast_spike, // Fall back to fast if not enough history
         };
 
         // Use fast spike for direction/magnitude, slow spike for confirmation
@@ -607,9 +615,10 @@ impl ArbEngine {
         let direction = if adjusted_spike > 0.0 { "UP" } else { "DOWN" };
         let direction_sign = if adjusted_spike > 0.0 { 1.0f64 } else { -1.0f64 };
 
-        // Require spike to be sustained for 100ms in the same direction before entering (faster)
+        // Reduced sustain requirement: configurable via SPIKE_SUSTAIN_MS (default 50ms)
+        // Fast enough to catch spikes early, slow enough to avoid flash reversals
         let spike_sustained = match state.spike_confirmed_since {
-            Some((sign, t)) if sign == direction_sign => t.elapsed().as_millis() >= 100,
+            Some((sign, t)) if sign == direction_sign => t.elapsed().as_millis() >= self.config.spike_sustain_ms as u128,
             _ => {
                 state.spike_confirmed_since = Some((direction_sign, Instant::now()));
                 false

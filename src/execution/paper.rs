@@ -522,9 +522,21 @@ impl PaperWallet {
         let mut closed = false;
         for (idx, reason) in to_close {
             let pos = self.open_positions.remove(idx);
-            let close_price = self.get_share_price(&pos.symbol, &pos.direction);
-            let sell_fee = self.calculate_fee(pos.shares, close_price);
-            let net_revenue = (pos.shares * close_price) - sell_fee;
+            
+            // USE ACTUAL SPREAD FROM ORDERBOOK (not simulated)
+            // For market SELL orders: we receive the BID price, not the mid
+            let (bid, ask) = self.get_bid_ask(&pos.symbol, &pos.direction);
+            
+            // If we have real orderbook data, use the bid price for sells
+            // Otherwise fall back to mid price
+            let fill_price = if bid > 0.0 {
+                bid // Market sell fills at bid
+            } else {
+                self.get_share_price(&pos.symbol, &pos.direction) // Fall back to mid
+            };
+            
+            let sell_fee = self.calculate_fee(pos.shares, fill_price);
+            let net_revenue = (pos.shares * fill_price) - sell_fee;
             let pnl = net_revenue - (pos.position_size + pos.buy_fee);
             let state = self.symbol_states.get(&pos.symbol).cloned().unwrap_or_default();
 
@@ -532,14 +544,14 @@ impl PaperWallet {
             self.trade_count += 1;
             if pnl > 0.0 { self.wins += 1; } else { self.losses += 1; }
             self.total_fees_paid += pos.buy_fee + sell_fee;
-            self.total_volume += pos.position_size + (pos.shares * close_price);
+            self.total_volume += pos.position_size + (pos.shares * fill_price);
             self.trade_history.push(TradeRecord {
                 symbol: pos.symbol.clone(),
                 r#type: "exit".to_string(),
                 question: state.question,
                 direction: pos.direction.clone(),
                 entry_price: Some(pos.entry_price),
-                exit_price: Some(close_price),
+                exit_price: Some(fill_price),
                 shares: pos.shares,
                 cost: pos.position_size,
                 pnl: Some(pnl),
@@ -548,7 +560,7 @@ impl PaperWallet {
                 timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some(reason.to_string()),
             });
-            info!(symbol=%pos.symbol, pnl=format!("${:.4}", pnl), reason=%reason, "Position closed");
+            info!(symbol=%pos.symbol, pnl=format!("${:.4}", pnl), reason=%reason, fill_price=fill_price, "Position closed at bid price");
             closed = true;
         }
         closed
@@ -620,14 +632,40 @@ impl PaperWallet {
 
         for p in promoted {
             let state = self.symbol_states.get(&p.symbol).cloned().unwrap_or_default();
+            
+            // USE ACTUAL SPREAD FROM ORDERBOOK (not simulated)
+            // For market BUY orders: we pay the ASK price, not the mid
+            // This is real slippage from the actual orderbook
+            let (bid, ask) = self.get_bid_ask(&p.symbol, &p.direction);
+            
+            // If we have real orderbook data, use the ask price for buys
+            // Otherwise fall back to mid price
+            let fill_price = if ask > 0.0 {
+                ask // Market buy fills at ask
+            } else {
+                p.entry_price // Fall back to mid price
+            };
+            
+            // Recalculate shares at actual fill price
+            let actual_shares = p.position_size / fill_price;
+            let actual_fee = self.calculate_fee(actual_shares, fill_price);
+            
+            // Adjust balance if fee changed
+            let fee_diff = actual_fee - p.buy_fee;
+            if fee_diff > 0.0 && self.balance >= fee_diff {
+                self.balance -= fee_diff;
+            } else if fee_diff < 0.0 {
+                self.balance -= fee_diff; // Add back savings
+            }
+            
             self.trade_history.push(TradeRecord {
                 symbol: p.symbol.clone(),
                 r#type: "entry".to_string(),
-                question: state.question,
+                question: state.question.clone(),
                 direction: p.direction.clone(),
-                entry_price: Some(p.entry_price),
+                entry_price: Some(fill_price),
                 exit_price: None,
-                shares: p.shares,
+                shares: actual_shares,
                 cost: p.position_size,
                 pnl: None,
                 cumulative_pnl: None,
@@ -637,25 +675,25 @@ impl PaperWallet {
             });
             let sym = p.symbol.clone();
             let dir = p.direction.clone();
-            let price = p.entry_price;
             let level = p.scale_level;
+            let slippage = fill_price - p.entry_price;
             self.open_positions.push(OpenPosition {
                 symbol: p.symbol,
                 direction: p.direction,
-                entry_price: p.entry_price,
-                avg_entry_price: p.entry_price,
-                shares: p.shares,
+                entry_price: fill_price,
+                avg_entry_price: fill_price,
+                shares: actual_shares,
                 position_size: p.position_size,
-                buy_fee: p.buy_fee,
+                buy_fee: actual_fee,
                 entry_spike: p.spike,
                 entry_time: Instant::now(),
-                highest_price: p.entry_price,
+                highest_price: fill_price,
                 scale_level: p.scale_level,
                 hold_to_resolution: false,
                 peak_spike: p.spike.abs(),
                 spike_low_since: None,
             });
-            info!(symbol=%sym, direction=%dir, price=price, level=level, "Position opened after delay");
+            info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened at ask price");
         }
     }
 }

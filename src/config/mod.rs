@@ -16,6 +16,7 @@ pub struct AppConfig {
     pub spike_scaling_factor: f64,
     pub ema_alpha: f64,
     pub execution_delay_ms: u64,
+    pub spike_sustain_ms: u64,       // ms to wait before entering on spike detection
     pub hold_margin_per_second: f64, // required $ margin per second remaining to hold to resolution
     pub hold_max_seconds: u64,       // only activate hold mode when <= this many seconds remain
     pub hold_max_crossings: usize,
@@ -25,6 +26,7 @@ pub struct AppConfig {
     pub max_daily_loss: f64,
     pub max_exposure_per_market: f64,
     pub max_drawdown_pct: f64,
+    pub slippage_bps: u64,           // simulated slippage in basis points for paper trading
 }
 
 impl AppConfig {
@@ -45,6 +47,7 @@ impl AppConfig {
             spike_scaling_factor: env::var("SPIKE_SCALING_FACTOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0001),
             ema_alpha: env::var("EMA_ALPHA").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1),
             execution_delay_ms: env::var("EXECUTION_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(300),
+            spike_sustain_ms: env::var("SPIKE_SUSTAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
             hold_margin_per_second: env::var("HOLD_MARGIN_PER_SECOND").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5),
             hold_max_seconds: env::var("HOLD_MAX_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(90),
             hold_max_crossings: env::var("HOLD_MAX_CROSSINGS").ok().and_then(|v| v.parse().ok()).unwrap_or(2),
@@ -54,6 +57,7 @@ impl AppConfig {
             max_daily_loss: env::var("MAX_DAILY_LOSS").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0),
             max_exposure_per_market: env::var("MAX_EXPOSURE_PER_MARKET").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0),
             max_drawdown_pct: env::var("MAX_DRAWDOWN_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.30),
+            slippage_bps: env::var("SLIPPAGE_BPS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
         })
     }
 
