@@ -5,6 +5,7 @@ use std::time::Instant;
 use alloy::primitives::U256 as AlloyU256;
 use alloy::providers::ProviderBuilder;
 use alloy::sol;
+use chrono::Datelike;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer as _};
 use polymarket_client_sdk::clob::{Client, Config};
@@ -114,11 +115,15 @@ pub struct LiveWallet {
     pub open_positions: Vec<OpenPosition>,
     pub trade_history: Vec<TradeRecord>,
     pub wallet_address: String,
+    pub cumulative_pnl: f64,
+    pub daily_pnl: f64,
+    pub last_reset_day: u32,
     config: AppConfig,
     clob: AuthClient,
     signer: K256Signer,
     token_map: HashMap<String, (String, String)>, // token_id -> (symbol, direction)
     pending_order_ids: HashMap<String, String>,   // "symbol:direction" -> order_id
+    order_timestamps: Vec<std::time::Instant>,    // For rate limiting
 }
 
 impl LiveWallet {
@@ -179,11 +184,15 @@ impl LiveWallet {
             open_positions: Vec::new(),
             trade_history: Vec::new(),
             wallet_address,
+            cumulative_pnl: 0.0,
+            daily_pnl: 0.0,
+            last_reset_day: chrono::Utc::now().date_naive().day(),
             config,
             clob,
             signer,
             token_map: HashMap::new(),
             pending_order_ids: HashMap::new(),
+            order_timestamps: Vec::new(),
         })
     }
 
@@ -297,14 +306,22 @@ impl LiveWallet {
             let signed = clob.sign(signer, order).await.map_err(|e| e.to_string())?;
 
             match clob.post_order(signed).await {
-                Ok(r) if r.success => return Ok(r.order_id.to_string()),
+                Ok(r) if r.success => {
+                    info!(order_id=%r.order_id, status=%r.status, "Order confirmed by CLOB");
+                    return Ok(r.order_id.to_string());
+                },
                 Ok(r) => {
-                    let msg = format!("{:?}", r.error_msg);
+                    let msg = r.error_msg.as_ref()
+                        .map(|e| format!("CLOB rejected: {}", e))
+                        .unwrap_or_else(|| format!("Order failed: success={}, status={:?}", r.success, r.status));
+                    warn!(attempt=attempt+1, error=%msg, "Order attempt failed");
                     if attempt == 2 { return Err(msg); }
                     tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64)).await;
                 }
                 Err(e) => {
-                    if attempt == 2 { return Err(e.to_string()); }
+                    let msg = format!("Network error: {}", e);
+                    warn!(attempt=attempt+1, error=%msg, "Order network error");
+                    if attempt == 2 { return Err(msg); }
                     tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64)).await;
                 }
             }
@@ -321,10 +338,45 @@ impl LiveWallet {
         entry_price: f64,
         market_end_ts: Option<u64>,
     ) -> Result<u32, String> {
+        // Reset daily PnL at midnight UTC
+        let today = chrono::Utc::now().date_naive().day();
+        if today != self.last_reset_day {
+            self.daily_pnl = 0.0;
+            self.last_reset_day = today;
+        }
+
         // EMERGENCY STOP: If balance drops below $2, refuse new positions
-        // This protects against losing everything when balance is already low
         if self.balance < 2.0 {
             return Err("EMERGENCY_STOP_BALANCE_TOO_LOW".to_string());
+        }
+
+        // DRAWDOWN CHECK: Stop if drawdown exceeds threshold
+        let drawdown = (self.starting_balance - self.balance) / self.starting_balance;
+        if drawdown > self.config.max_drawdown_pct {
+            return Err(format!("DRAWDOWN_EXCEEDED: {:.1}% > {:.1}%", drawdown * 100.0, self.config.max_drawdown_pct * 100.0));
+        }
+
+        // DAILY LOSS LIMIT: Stop if daily losses exceed threshold
+        if self.daily_pnl < -self.config.max_daily_loss {
+            return Err(format!("DAILY_LOSS_LIMIT: ${:.2} < -${:.2}", self.daily_pnl, self.config.max_daily_loss));
+        }
+
+        // RATE LIMITING: Check orders per minute
+        let now = std::time::Instant::now();
+        self.order_timestamps.retain(|t| now.duration_since(*t).as_secs() < 60);
+        if self.order_timestamps.len() >= self.config.max_orders_per_minute as usize {
+            return Err(format!("RATE_LIMIT: {} orders/min exceeded", self.config.max_orders_per_minute));
+        }
+
+        // PER-MARKET EXPOSURE: Check total exposure in this market
+        let market_exposure: f64 = self.open_positions.iter()
+            .filter(|p| p.symbol == symbol)
+            .map(|p| p.position_size)
+            .sum();
+        let position_size_planned = self.balance * self.config.portfolio_pct;
+        if market_exposure + position_size_planned > self.config.max_exposure_per_market {
+            return Err(format!("MARKET_EXPOSURE_LIMIT: ${:.2} + ${:.2} > ${:.2}", 
+                market_exposure, position_size_planned, self.config.max_exposure_per_market));
         }
 
         // Check market ending FIRST before any other validation
@@ -395,6 +447,9 @@ impl LiveWallet {
         let order_id = Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Buy).await?;
         info!(symbol=%symbol, direction=%direction, shares=shares, price=rounded_price, order_id=%order_id, "Live BUY placed");
 
+        // Track order timestamp for rate limiting
+        self.order_timestamps.push(std::time::Instant::now());
+
         self.pending_order_ids.insert(format!("{}:{}", symbol, direction), order_id);
         // DON'T decrease balance here - only decrease when order is confirmed filled
         // self.balance -= position_size + buy_fee;
@@ -409,6 +464,8 @@ impl LiveWallet {
             shares,
             cost: position_size,
             pnl: None,
+            cumulative_pnl: Some(self.cumulative_pnl),
+            balance_after: Some(self.balance),
             timestamp: chrono::Local::now().to_rfc3339(),
             close_reason: None,
         });
@@ -417,6 +474,7 @@ impl LiveWallet {
             symbol: symbol.to_string(),
             direction: direction.to_string(),
             entry_price,
+            avg_entry_price: entry_price,
             shares,
             position_size,
             buy_fee,
@@ -472,6 +530,8 @@ impl LiveWallet {
         let pnl = net_revenue - (pos.position_size + pos.buy_fee);
 
         self.balance += net_revenue;
+        self.cumulative_pnl += pnl;
+        self.daily_pnl += pnl;
         self.trade_count += 1;
         if pnl > 0.0 { self.wins += 1; } else { self.losses += 1; }
         self.total_fees_paid += pos.buy_fee;
@@ -487,6 +547,8 @@ impl LiveWallet {
             shares: pos.shares,
             cost: pos.position_size,
             pnl: Some(pnl),
+            cumulative_pnl: Some(self.cumulative_pnl),
+            balance_after: Some(self.balance),
             timestamp: chrono::Local::now().to_rfc3339(),
             close_reason: Some(reason.to_string()),
         });

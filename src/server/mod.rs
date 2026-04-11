@@ -48,6 +48,10 @@ async fn get_config() -> impl IntoResponse {
         ("SPIKE_SCALING_FACTOR", "spike_scaling_factor"),
         ("EMA_ALPHA", "ema_alpha"),
         ("CRYPTO_FEE_RATE", "crypto_fee_rate"),
+        ("MAX_ORDERS_PER_MINUTE", "max_orders_per_minute"),
+        ("MAX_DAILY_LOSS", "max_daily_loss"),
+        ("MAX_EXPOSURE_PER_MARKET", "max_exposure_per_market"),
+        ("MAX_DRAWDOWN_PCT", "max_drawdown_pct"),
     ];
     let mut map = serde_json::Map::new();
     for (env_key, json_key) in &pairs {
@@ -80,8 +84,11 @@ async fn update_settings(
             ("max_entry_price", "MAX_ENTRY_PRICE"),
             ("spike_scaling_factor", "SPIKE_SCALING_FACTOR"),
             ("ema_alpha", "EMA_ALPHA"),
-        ("execution_delay_ms", "EXECUTION_DELAY_MS"),
             ("execution_delay_ms", "EXECUTION_DELAY_MS"),
+            ("max_orders_per_minute", "MAX_ORDERS_PER_MINUTE"),
+            ("max_daily_loss", "MAX_DAILY_LOSS"),
+            ("max_exposure_per_market", "MAX_EXPOSURE_PER_MARKET"),
+            ("max_drawdown_pct", "MAX_DRAWDOWN_PCT"),
         ];
 
         for (json_key, env_key) in mappings {

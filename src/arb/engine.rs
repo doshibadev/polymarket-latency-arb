@@ -188,6 +188,8 @@ impl ArbEngine {
             "unrealized_pnl": unrealized_pnl,
             "realized_pnl": realized_pnl,
             "total_pnl": total_pnl,
+            "cumulative_pnl": self.live_wallet.as_ref().map(|lw| lw.cumulative_pnl).unwrap_or(0.0),
+            "daily_pnl": self.live_wallet.as_ref().map(|lw| lw.daily_pnl).unwrap_or(0.0),
             "wins": wins,
             "losses": losses,
             "total_fees": fees,
@@ -286,6 +288,8 @@ impl ArbEngine {
                                         shares: pos.shares,
                                         cost: pos.position_size,
                                         pnl: Some(pnl),
+                                        cumulative_pnl: None,
+                                        balance_after: None,
                                         timestamp: chrono::Local::now().to_rfc3339(),
                                         close_reason: Some("manual".to_string()),
                                     });
@@ -368,6 +372,8 @@ impl ArbEngine {
                                 shares: pos.shares,
                                 cost: pos.position_size,
                                 pnl: Some(pnl),
+                                cumulative_pnl: None,
+                                balance_after: None,
                                 timestamp: chrono::Local::now().to_rfc3339(),
                                 close_reason: Some("market_end".to_string()),
                             });

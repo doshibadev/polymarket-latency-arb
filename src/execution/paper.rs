@@ -10,6 +10,7 @@ pub struct OpenPosition {
     pub symbol: String,
     pub direction: String,
     pub entry_price: f64,
+    pub avg_entry_price: f64,  // Weighted average when scaling in
     pub shares: f64,
     pub position_size: f64,
     pub buy_fee: f64,
@@ -35,6 +36,8 @@ pub struct TradeRecord {
     pub shares: f64,
     pub cost: f64,
     pub pnl: Option<f64>,
+    pub cumulative_pnl: Option<f64>,
+    pub balance_after: Option<f64>,
     pub timestamp: String,
     pub close_reason: Option<String>,
 }
@@ -539,6 +542,8 @@ impl PaperWallet {
                 shares: pos.shares,
                 cost: pos.position_size,
                 pnl: Some(pnl),
+                cumulative_pnl: None,
+                balance_after: None,
                 timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some(reason.to_string()),
             });
@@ -624,6 +629,8 @@ impl PaperWallet {
                 shares: p.shares,
                 cost: p.position_size,
                 pnl: None,
+                cumulative_pnl: None,
+                balance_after: None,
                 timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: None,
             });
@@ -635,6 +642,7 @@ impl PaperWallet {
                 symbol: p.symbol,
                 direction: p.direction,
                 entry_price: p.entry_price,
+                avg_entry_price: p.entry_price,
                 shares: p.shares,
                 position_size: p.position_size,
                 buy_fee: p.buy_fee,

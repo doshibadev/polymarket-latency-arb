@@ -21,6 +21,10 @@ pub struct AppConfig {
     pub hold_max_crossings: usize,
     pub min_price_distance: f64,
     pub min_entry_price: f64,
+    pub max_orders_per_minute: u32,
+    pub max_daily_loss: f64,
+    pub max_exposure_per_market: f64,
+    pub max_drawdown_pct: f64,
 }
 
 impl AppConfig {
@@ -46,6 +50,10 @@ impl AppConfig {
             hold_max_crossings: env::var("HOLD_MAX_CROSSINGS").ok().and_then(|v| v.parse().ok()).unwrap_or(2),
             min_price_distance: env::var("MIN_PRICE_DISTANCE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.05),
             min_entry_price: env::var("MIN_ENTRY_PRICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.10),
+            max_orders_per_minute: env::var("MAX_ORDERS_PER_MINUTE").ok().and_then(|v| v.parse().ok()).unwrap_or(20),
+            max_daily_loss: env::var("MAX_DAILY_LOSS").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0),
+            max_exposure_per_market: env::var("MAX_EXPOSURE_PER_MARKET").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0),
+            max_drawdown_pct: env::var("MAX_DRAWDOWN_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.30),
         })
     }
 
