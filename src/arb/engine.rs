@@ -38,7 +38,6 @@ pub struct ArbEngine {
     pub wallet: PaperWallet,
     pub live_wallet: Option<LiveWallet>,
     symbol_states: HashMap<String, SymbolState>,
-    history: Vec<Value>,
     signals: Vec<Value>,
     running: bool,
 }
@@ -64,7 +63,6 @@ impl ArbEngine {
             wallet,
             live_wallet: None,
             symbol_states: HashMap::new(),
-            history: Vec::new(),
             signals: Vec::new(),
             running: false, // starts paused — user must press START
         }
@@ -98,9 +96,7 @@ impl ArbEngine {
     }
 
     fn update_history(&mut self, total_val: f64) {
-        let now = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.history.push(json!({ "t": now, "v": total_val }));
-        if self.history.len() > 1000 { self.history.remove(0); }
+        self.wallet.push_history(total_val);
     }
 
     fn broadcast_state(&self) {
@@ -199,7 +195,7 @@ impl ArbEngine {
             "total_volume": volume,
             "positions": positions,
             "trades": trade_history_ref,
-            "history": self.history,
+            "history": self.wallet.history,
             "signals": self.signals,
             "markets": markets,
             "wallet_address": wallet_address,

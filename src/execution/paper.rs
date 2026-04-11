@@ -53,6 +53,13 @@ pub struct PaperWalletState {
     pub total_fees_paid: f64,
     pub total_volume: f64,
     pub trade_history: Vec<TradeRecord>,
+    pub history: Vec<HistoryPoint>, // Chart performance data
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct HistoryPoint {
+    pub t: String,  // timestamp
+    pub v: f64,     // portfolio value
 }
 
 #[derive(Clone)]
@@ -130,6 +137,7 @@ pub struct PaperWallet {
     pub pending_entries: Vec<PendingEntry>,
     pub pending_closes: Vec<PendingClose>,
     pub trade_history: Vec<TradeRecord>,
+    pub history: Vec<HistoryPoint>, // Chart performance data
     symbol_states: HashMap<String, SymbolMarketState>,
     config: AppConfig,
 }
@@ -151,6 +159,7 @@ impl PaperWallet {
             pending_entries: Vec::new(),
             pending_closes: Vec::new(),
             trade_history: Vec::new(),
+            history: Vec::new(),
             symbol_states: HashMap::new(),
             config,
         }
@@ -173,7 +182,8 @@ impl PaperWallet {
                 self.total_fees_paid = state.total_fees_paid;
                 self.total_volume = state.total_volume;
                 self.trade_history = state.trade_history;
-                tracing::info!("Loaded paper wallet state from disk");
+                self.history = state.history;
+                tracing::info!("Loaded paper wallet state from disk ({} history points)", self.history.len());
             }
         }
     }
@@ -193,6 +203,7 @@ impl PaperWallet {
             total_fees_paid: self.total_fees_paid,
             total_volume: self.total_volume,
             trade_history: self.trade_history.clone(),
+            history: self.history.clone(),
         };
         
         if let Ok(json) = serde_json::to_string_pretty(&state) {
@@ -213,6 +224,7 @@ impl PaperWallet {
         self.pending_entries.clear();
         self.pending_closes.clear();
         self.trade_history.clear();
+        self.history.clear(); // Clear chart data
         self.symbol_states.clear();
         
         // Delete saved state file
@@ -223,6 +235,16 @@ impl PaperWallet {
     pub fn update_config(&mut self, config: AppConfig) {
         self.config = config.clone();
         self.portfolio_pct = config.portfolio_pct;
+    }
+
+    /// Add a point to the performance history chart
+    pub fn push_history(&mut self, value: f64) {
+        let now = chrono::Local::now().format("%H:%M:%S").to_string();
+        self.history.push(HistoryPoint { t: now, v: value });
+        // Keep last 1000 points (about 3 minutes at 200ms intervals)
+        if self.history.len() > 1000 {
+            self.history.remove(0);
+        }
     }
 
     pub fn set_market_info(&mut self, symbol: &str, question: String) {
@@ -525,7 +547,7 @@ impl PaperWallet {
             
             // USE ACTUAL SPREAD FROM ORDERBOOK (not simulated)
             // For market SELL orders: we receive the BID price, not the mid
-            let (bid, ask) = self.get_bid_ask(&pos.symbol, &pos.direction);
+            let (bid, _ask) = self.get_bid_ask(&pos.symbol, &pos.direction);
             
             // If we have real orderbook data, use the bid price for sells
             // Otherwise fall back to mid price
@@ -636,7 +658,7 @@ impl PaperWallet {
             // USE ACTUAL SPREAD FROM ORDERBOOK (not simulated)
             // For market BUY orders: we pay the ASK price, not the mid
             // This is real slippage from the actual orderbook
-            let (bid, ask) = self.get_bid_ask(&p.symbol, &p.direction);
+            let (_bid, ask) = self.get_bid_ask(&p.symbol, &p.direction);
             
             // If we have real orderbook data, use the ask price for buys
             // Otherwise fall back to mid price
