@@ -321,10 +321,10 @@ impl LiveWallet {
         entry_price: f64,
         market_end_ts: Option<u64>,
     ) -> Result<u32, String> {
-        // EMERGENCY STOP: If losses exceed 30% of starting balance, refuse new positions
-        let total_loss = self.starting_balance - self.balance;
-        if total_loss > self.starting_balance * 0.3 {
-            return Err("EMERGENCY_STOP_LOSSES_TOO_HIGH".to_string());
+        // EMERGENCY STOP: If balance drops below $2, refuse new positions
+        // This protects against losing everything when balance is already low
+        if self.balance < 2.0 {
+            return Err("EMERGENCY_STOP_BALANCE_TOO_LOW".to_string());
         }
 
         // Check market ending FIRST before any other validation
@@ -347,6 +347,24 @@ impl LiveWallet {
         let token_id = self.get_token_id(symbol, direction)
             .ok_or_else(|| "NO_TOKEN_ID".to_string())?;
 
+        // Verify orderbook exists before placing order
+        use polymarket_client_sdk::clob::types::request::OrderBookSummaryRequest;
+        let book_req = OrderBookSummaryRequest::builder()
+            .token_id(token_id)
+            .build();
+        match self.clob.order_book(&book_req).await {
+            Ok(book) => {
+                // Check if market is active (has bids/asks)
+                if book.bids.is_empty() && book.asks.is_empty() {
+                    return Err("MARKET_INACTIVE_NO_LIQUIDITY".to_string());
+                }
+            },
+            Err(e) => {
+                // Orderbook doesn't exist - market likely expired/resolved
+                return Err(format!("MARKET_CLOSED: {}", e));
+            }
+        }
+
         if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }
         if entry_price > self.config.max_entry_price { return Err("PRICE_TOO_HIGH".to_string()); }
         if entry_price < self.config.min_entry_price { return Err("PRICE_TOO_LOW".to_string()); }
@@ -357,7 +375,8 @@ impl LiveWallet {
         let position_size = self.balance * self.config.portfolio_pct;
         
         // SAFETY: Cap position size to prevent catastrophic losses
-        let max_position_size = self.starting_balance * 0.5; // Never risk more than 50% of starting balance
+        // Use current balance (not starting) to handle drawdowns gracefully
+        let max_position_size = self.balance * 0.8; // Max 80% of current balance per trade
         let position_size = position_size.min(max_position_size);
         
         let shares = position_size / entry_price;
