@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub profit_target_pct: f64,
     pub trailing_stop_pct: f64,
     pub spike_faded_pct: f64,
+    pub spike_faded_ms: u64,       // ms the reversal must persist before exiting
+    pub min_hold_ms: u64,          // minimum hold time before any exit (except extreme reversal)
     pub max_spread_bps: u64,
     pub spike_scaling_factor: f64,
     pub ema_alpha: f64,
@@ -42,7 +44,9 @@ impl AppConfig {
             max_entry_price: env::var("MAX_ENTRY_PRICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.70),
             profit_target_pct: env::var("PROFIT_TARGET_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             trailing_stop_pct: env::var("TRAILING_STOP_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0),
-            spike_faded_pct: env::var("SPIKE_FADED_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25),
+            spike_faded_pct: env::var("SPIKE_FADED_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.02),
+            spike_faded_ms: env::var("SPIKE_FADED_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200),
+            min_hold_ms: env::var("MIN_HOLD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500),
             max_spread_bps: env::var("MAX_SPREAD_BPS").ok().and_then(|v| v.parse().ok()).unwrap_or(100),
             spike_scaling_factor: env::var("SPIKE_SCALING_FACTOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0001),
             ema_alpha: env::var("EMA_ALPHA").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1),

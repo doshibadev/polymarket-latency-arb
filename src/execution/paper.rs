@@ -28,7 +28,7 @@ pub struct OpenPosition {
     pub peak_btc: f64,             // highest BTC since entry (for UP positions)
     pub trough_btc: f64,           // lowest BTC since entry (for DOWN positions)
     #[serde(skip)]
-    pub trailing_triggered_since: Option<Instant>, // when trailing stop first triggered
+    pub spike_faded_since: Option<Instant>, // when spike_faded reversal first detected
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -490,8 +490,6 @@ impl PaperWallet {
 
     pub async fn try_close_position(&mut self) -> bool {
         let mut to_close = Vec::new();
-        let mut peak_updates: Vec<(usize, f64)> = Vec::new();
-        let mut spike_low_updates: Vec<(usize, bool)> = Vec::new();
 
         // First pass: collect all data needed for decisions
         for (idx, pos) in self.open_positions.iter().enumerate() {
@@ -502,105 +500,78 @@ impl PaperWallet {
                 Some(s) => s,
                 None => continue,
             };
-            let long_spike = self.get_long_baseline_spike(&pos.symbol, state.last_binance);
             
-            // Track peak spike
-            let new_peak = if long_spike.abs() > pos.peak_spike { long_spike.abs() } else { pos.peak_spike };
-            peak_updates.push((idx, new_peak));
-
-            // BTC-based trailing stop (only when profitable)
-            // For UP: profitable if current BTC > entry BTC
-            // For DOWN: profitable if current BTC < entry BTC
             let current_btc = state.last_binance;
-            let is_profitable = if pos.entry_btc > 0.0 && current_btc > 0.0 {
-                if pos.direction == "UP" {
-                    current_btc > pos.entry_btc
-                } else {
-                    current_btc < pos.entry_btc
-                }
-            } else {
-                false
-            };
+            let held_ms = pos.entry_time.elapsed().as_millis() as u64;
+            
+            // Minimum hold time check - don't exit too early
+            // Give Polymarket time to update their chart
+            let min_hold_passed = held_ms >= self.config.min_hold_ms;
 
-            let trailing_stop_hit = if is_profitable {
-                if pos.direction == "UP" {
-                    // For UP: exit if BTC drops X% from peak
-                    let threshold = pos.peak_btc * (1.0 - self.config.trailing_stop_pct / 100.0);
-                    current_btc < threshold
-                } else {
-                    // For DOWN: exit if BTC rises X% from trough
-                    let threshold = pos.trough_btc * (1.0 + self.config.trailing_stop_pct / 100.0);
-                    current_btc > threshold
-                }
-            } else {
-                false
-            };
-
-            // Trend reversed
+            // Trend reversed - exit if spike goes completely opposite direction
+            // This is the only exit that can trigger before min_hold_time
             let trend_reversed = if pos.direction == "UP" {
-                long_spike < -(pos.entry_spike.abs() * 0.2)
+                // For UP: exit if BTC dropped below entry price (complete reversal)
+                pos.entry_btc > 0.0 && current_btc > 0.0 && current_btc < pos.entry_btc
             } else {
-                long_spike > (pos.entry_spike.abs() * 0.2)
+                // For DOWN: exit if BTC rose above entry price (complete reversal)
+                pos.entry_btc > 0.0 && current_btc > 0.0 && current_btc > pos.entry_btc
             };
 
-            // Spike faded: below 30% of PEAK for 500ms AND not consolidating
-            // Consolidation = price hasn't moved more than $20 in last 500ms
-            let consolidating = self.is_consolidating(&pos.symbol, 20.0);
-            let spike_low = long_spike.abs() < new_peak * 0.3;
-            spike_low_updates.push((idx, spike_low));
-            // Don't trigger spike_faded if consolidating (sideways is not a fade)
-            let spike_faded = spike_low && !consolidating && pos.spike_low_since.map_or(false, |t| t.elapsed().as_millis() >= 500);
-
-            let near_end = pos.entry_time.elapsed().as_millis() > 295000;
-
-            // Check trailing stop with 200ms persistence requirement
-            let trailing_stop_confirmed = if trailing_stop_hit {
-                // Already triggered before and persisted for 200ms?
-                pos.trailing_triggered_since.map_or_else(|| {
-                    // First trigger - don't exit yet, but mark the time
-                    // We'll check persistence on next tick
-                    false
-                }, |t| t.elapsed().as_millis() >= 200)
+            // Spike faded (new logic): exit if BTC reverses X% from peak
+            // For UP: peak_btc is highest since entry, exit if current drops X% from peak
+            // For DOWN: trough_btc is lowest since entry, exit if current rises X% from trough
+            let spike_faded_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 {
+                if pos.direction == "UP" {
+                    // For UP: check if BTC dropped from peak
+                    let peak = pos.peak_btc;
+                    if peak > 0.0 {
+                        let drop_pct = (peak - current_btc) / peak * 100.0;
+                        drop_pct >= self.config.spike_faded_pct
+                    } else {
+                        false
+                    }
+                } else {
+                    // For DOWN: check if BTC rose from trough
+                    let trough = pos.trough_btc;
+                    if trough > 0.0 {
+                        let rise_pct = (current_btc - trough) / trough * 100.0;
+                        rise_pct >= self.config.spike_faded_pct
+                    } else {
+                        false
+                    }
+                }
             } else {
-                // Condition no longer met, reset
-                // Will be handled in the update loop below
                 false
             };
 
-            let reason = if trailing_stop_confirmed { Some("trailing_stop") }
-                        else if trend_reversed { Some("trend_reversed") }
-                        else if spike_faded { Some("spike_faded") }
-                        else if near_end { Some("near_end") }
-                        else { None };
+            // Spike faded requires persistence
+            let spike_faded_confirmed = spike_faded_hit && pos.spike_faded_since.map_or(false, |t| {
+                t.elapsed().as_millis() >= self.config.spike_faded_ms as u128
+            });
+
+            let near_end = held_ms > 295000;
+
+            // Determine exit reason (priority order)
+            let reason = if trend_reversed { 
+                Some("trend_reversed") 
+            } else if min_hold_passed && spike_faded_confirmed { 
+                Some("spike_faded") 
+            } else if min_hold_passed && near_end { 
+                Some("near_end") 
+            } else { 
+                None 
+            };
 
             if let Some(r) = reason {
-                if pos.hold_to_resolution && r != "trailing_stop" {
+                if pos.hold_to_resolution && r != "trend_reversed" {
                     continue;
                 }
                 to_close.push((idx, r));
             }
         }
 
-        // Update peak_spike and spike_low_since for all positions
-        for (idx, new_peak) in peak_updates {
-            if let Some(pos) = self.open_positions.get_mut(idx) {
-                pos.peak_spike = new_peak;
-            }
-        }
-        for (idx, spike_low) in spike_low_updates {
-            if let Some(pos) = self.open_positions.get_mut(idx) {
-                if spike_low {
-                    if pos.spike_low_since.is_none() {
-                        pos.spike_low_since = Some(Instant::now());
-                    }
-                } else {
-                    pos.spike_low_since = None;
-                }
-            }
-        }
-        
-        // Update trailing_triggered_since for all positions
-        // Need to re-check the condition to know if we should set or clear it
+        // Update spike_faded_since for all positions
         for pos in self.open_positions.iter_mut() {
             let state = match self.symbol_states.get(&pos.symbol) {
                 Some(s) => s,
@@ -608,34 +579,35 @@ impl PaperWallet {
             };
             
             let current_btc = state.last_binance;
-            let is_profitable = if pos.entry_btc > 0.0 && current_btc > 0.0 {
+            
+            let spike_faded_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 {
                 if pos.direction == "UP" {
-                    current_btc > pos.entry_btc
+                    let peak = pos.peak_btc;
+                    if peak > 0.0 {
+                        let drop_pct = (peak - current_btc) / peak * 100.0;
+                        drop_pct >= self.config.spike_faded_pct
+                    } else {
+                        false
+                    }
                 } else {
-                    current_btc < pos.entry_btc
-                }
-            } else {
-                false
-            };
-
-            let trailing_stop_hit = if is_profitable {
-                if pos.direction == "UP" {
-                    let threshold = pos.peak_btc * (1.0 - self.config.trailing_stop_pct / 100.0);
-                    current_btc < threshold
-                } else {
-                    let threshold = pos.trough_btc * (1.0 + self.config.trailing_stop_pct / 100.0);
-                    current_btc > threshold
+                    let trough = pos.trough_btc;
+                    if trough > 0.0 {
+                        let rise_pct = (current_btc - trough) / trough * 100.0;
+                        rise_pct >= self.config.spike_faded_pct
+                    } else {
+                        false
+                    }
                 }
             } else {
                 false
             };
             
-            if trailing_stop_hit {
-                if pos.trailing_triggered_since.is_none() {
-                    pos.trailing_triggered_since = Some(Instant::now());
+            if spike_faded_hit {
+                if pos.spike_faded_since.is_none() {
+                    pos.spike_faded_since = Some(Instant::now());
                 }
             } else {
-                pos.trailing_triggered_since = None;
+                pos.spike_faded_since = None;
             }
         }
 
@@ -707,9 +679,6 @@ impl PaperWallet {
         if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }
         if entry_price > self.config.max_entry_price { return Err("PRICE_TOO_HIGH".to_string()); }
         if entry_price < self.config.min_entry_price { return Err("PRICE_TOO_LOW".to_string()); }
-        if (entry_price - 0.5).abs() < self.config.min_price_distance {
-            return Err("PRICE_TOO_CLOSE_TO_HALF".to_string());
-        }
 
         let position_size = self.balance * self.portfolio_pct * (1.0 / scale_level as f64);
         let shares = position_size / entry_price;
@@ -822,7 +791,7 @@ impl PaperWallet {
                 entry_btc: 0.0,
                 peak_btc: 0.0,
                 trough_btc: 0.0,
-                trailing_triggered_since: None,
+                spike_faded_since: None,
             });
             info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened at ask price");
         }

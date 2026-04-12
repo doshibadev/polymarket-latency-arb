@@ -442,9 +442,6 @@ impl LiveWallet {
         if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }
         if entry_price > self.config.max_entry_price { return Err("PRICE_TOO_HIGH".to_string()); }
         if entry_price < self.config.min_entry_price { return Err("PRICE_TOO_LOW".to_string()); }
-        if (entry_price - 0.5).abs() < self.config.min_price_distance {
-            return Err("PRICE_TOO_CLOSE_TO_HALF".to_string());
-        }
 
         let position_size = self.balance * self.config.portfolio_pct;
         
@@ -528,7 +525,7 @@ impl LiveWallet {
             entry_btc: 0.0,
             peak_btc: 0.0,
             trough_btc: 0.0,
-            trailing_triggered_since: None,
+            spike_faded_since: None,
         });
 
         Ok(scale_level)
