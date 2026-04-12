@@ -378,7 +378,7 @@ impl LiveWallet {
         shares: Decimal,
         usdc: Decimal,
         side: Side,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Decimal, Decimal), String> {  // Returns (order_id, filled_shares, filled_usdc)
         use polymarket_client_sdk::clob::types::Amount;
         for attempt in 0..3u32 {
             // For market orders:
@@ -395,6 +395,11 @@ impl LiveWallet {
                 Err(e) => return Err(format!("Invalid amount: {}", e)),
             };
             
+            // Skip if amount is zero
+            if amount.as_inner().is_zero() {
+                return Err("Amount is zero".to_string());
+            }
+            
             let order = clob.market_order()
                 .token_id(token_id)
                 .amount(amount)
@@ -410,7 +415,15 @@ impl LiveWallet {
             match clob.post_order(signed).await {
                 Ok(r) if r.success => {
                     info!(order_id=%r.order_id, status=%r.status, "Order confirmed by CLOB");
-                    return Ok(r.order_id.to_string());
+                    // Return order_id, filled shares (taker_amount), and filled USDC (maker_amount for buys)
+                    // For buys: taker_amount = shares, maker_amount = USDC
+                    // For sells: taker_amount = USDC, maker_amount = shares
+                    let (filled_shares, filled_usdc) = match side {
+                        Side::Buy => (r.taking_amount, r.making_amount),
+                        Side::Sell => (r.making_amount, r.taking_amount),
+                        _ => (r.taking_amount, r.making_amount),
+                    };
+                    return Ok((r.order_id.to_string(), filled_shares, filled_usdc));
                 },
                 Ok(r) => {
                     let msg = r.error_msg.as_ref()
@@ -625,11 +638,20 @@ impl LiveWallet {
         };
 
         // Place REAL market order on Polymarket CLOB - uses ask+buffer to ensure fill
-        let order_id = match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, usdc, Side::Buy).await {
-            Ok(id) => id,
+        let (order_id, filled_shares, filled_usdc) = match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, usdc, Side::Buy).await {
+            Ok(result) => result,
             Err(e) => cleanup_and_return!(e),
         };
-        info!(symbol=%symbol, direction=%direction, shares=rounded_shares, price=rounded_price, order_id=%order_id, "Live BUY placed (market order)");
+        
+        // Use actual filled amounts (FAK may fill partially)
+        let actual_shares: f64 = filled_shares.try_into().unwrap_or(rounded_shares);
+        let actual_usdc: f64 = filled_usdc.try_into().unwrap_or(usdc_amount);
+        
+        // Recalculate position size based on actual fill
+        let final_position_size = actual_usdc;
+        let final_buy_fee = actual_shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
+        
+        info!(symbol=%symbol, direction=%direction, requested_shares=rounded_shares, filled_shares=actual_shares, price=rounded_price, order_id=%order_id, "Live BUY placed (FAK market order)");
 
         // Order successfully placed - remove from pending orders
         self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
@@ -639,8 +661,8 @@ impl LiveWallet {
 
         self.pending_order_ids.insert(format!("{}:{}", symbol, direction), order_id);
         
-        // Reserve balance with actual amounts
-        self.balance -= actual_position_size + actual_buy_fee;
+        // Reserve balance with actual filled amounts
+        self.balance -= final_position_size + final_buy_fee;
 
         self.trade_history.push(TradeRecord {
             symbol: symbol.to_string(),
@@ -649,8 +671,8 @@ impl LiveWallet {
             direction: direction.to_string(),
             entry_price: Some(entry_price),
             exit_price: None,
-            shares: rounded_shares,  // Use rounded shares consistently
-            cost: actual_position_size,
+            shares: actual_shares,  // Use actual filled shares
+            cost: final_position_size,
             pnl: None,
             cumulative_pnl: Some(self.cumulative_pnl),
             balance_after: Some(self.balance),
@@ -663,9 +685,9 @@ impl LiveWallet {
             direction: direction.to_string(),
             entry_price,
             avg_entry_price: entry_price,
-            shares: rounded_shares,
-            position_size: actual_position_size,
-            buy_fee: actual_buy_fee,
+            shares: actual_shares,  // Use actual filled shares
+            position_size: final_position_size,
+            buy_fee: final_buy_fee,
             entry_spike: spike,
             entry_time: Instant::now(),
             highest_price: entry_price,
@@ -736,9 +758,10 @@ impl LiveWallet {
         let usdc_for_sell = Decimal::ZERO;
 
         match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, usdc_for_sell, Side::Sell).await {
-            Ok(id) => {
-                info!(symbol=%pos.symbol, reason=%reason, price=rounded, order_id=%id, "Live SELL placed (market order)");
-                // TODO: Add order status tracking to confirm actual fill price/size
+            Ok((id, filled_shares, filled_usdc)) => {
+                let fs: f64 = filled_shares.try_into().unwrap_or(0.0);
+                let fu: f64 = filled_usdc.try_into().unwrap_or(0.0);
+                info!(symbol=%pos.symbol, reason=%reason, price=rounded, order_id=%id, filled_shares=fs, filled_usdc=fu, "Live SELL placed (FAK market order)");
             },
             Err(e) => error!("Sell order failed: {}", e),
         }
