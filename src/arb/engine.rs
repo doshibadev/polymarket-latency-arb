@@ -78,9 +78,21 @@ impl ArbEngine {
         let positions = self.live_wallet.as_ref()
             .map(|lw| &lw.open_positions)
             .unwrap_or(&self.wallet.open_positions);
+        
+        let is_live = self.live_wallet.is_some();
+        
         positions.iter().map(|pos| {
-            let (b, a) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
-            pos.shares * ((b + a) / 2.0)
+            let (b, a) = if is_live {
+                if let Some(lw) = &self.live_wallet {
+                    lw.get_bid_ask(&pos.symbol, &pos.direction)
+                } else {
+                    (0.0, 0.0)
+                }
+            } else {
+                self.wallet.get_bid_ask(&pos.symbol, &pos.direction)
+            };
+            let price = if b > 0.0 && a > 0.0 { (b + a) / 2.0 } else { pos.entry_price };
+            pos.shares * price
         }).sum()
     }
 
@@ -110,11 +122,11 @@ impl ArbEngine {
     }
 
     fn broadcast_state(&self) {
-        let (balance, open_positions_ref, trade_history_ref, wins, losses, fees, volume, starting_balance) =
+        let (balance, open_positions_ref, trade_history_ref, wins, losses, fees, volume, starting_balance, is_live) =
             if let Some(lw) = &self.live_wallet {
-                (&lw.balance, &lw.open_positions, &lw.trade_history, lw.wins, lw.losses, lw.total_fees_paid, lw.total_volume, lw.starting_balance)
+                (&lw.balance, &lw.open_positions, &lw.trade_history, lw.wins, lw.losses, lw.total_fees_paid, lw.total_volume, lw.starting_balance, true)
             } else {
-                (&self.wallet.balance, &self.wallet.open_positions, &self.wallet.trade_history, self.wallet.wins, self.wallet.losses, self.wallet.total_fees_paid, self.wallet.total_volume, self.wallet.starting_balance)
+                (&self.wallet.balance, &self.wallet.open_positions, &self.wallet.trade_history, self.wallet.wins, self.wallet.losses, self.wallet.total_fees_paid, self.wallet.total_volume, self.wallet.starting_balance, false)
             };
 
         let mut unrealized_pnl = 0.0;
@@ -122,8 +134,18 @@ impl ArbEngine {
         let mut positions = Vec::new();
 
         for pos in open_positions_ref {
-            let (up_p, down_p) = self.wallet.get_bid_ask(&pos.symbol, &pos.direction);
-            let current_price = (up_p + down_p) / 2.0;
+            // Use live wallet's price cache for live positions, paper wallet's cache for paper
+            let (up_p, down_p) = if is_live {
+                if let Some(lw) = &self.live_wallet {
+                    lw.get_bid_ask(&pos.symbol, &pos.direction)
+                } else {
+                    (0.0, 0.0)
+                }
+            } else {
+                self.wallet.get_bid_ask(&pos.symbol, &pos.direction)
+            };
+            
+            let current_price = if up_p > 0.0 && down_p > 0.0 { (up_p + down_p) / 2.0 } else { pos.entry_price };
             let current_value = pos.shares * current_price;
             let pnl = current_value - pos.position_size - pos.buy_fee;
             

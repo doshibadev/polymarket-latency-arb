@@ -307,7 +307,7 @@ impl LiveWallet {
     }
 
     /// Get bid/ask from cache (matches paper.rs)
-    fn get_bid_ask(&self, symbol: &str, direction: &str) -> (f64, f64) {
+    pub fn get_bid_ask(&self, symbol: &str, direction: &str) -> (f64, f64) {
         if let Some(cache) = self.price_cache.get(symbol) {
             if direction == "UP" {
                 (cache.up_bid, cache.up_ask)
@@ -565,11 +565,16 @@ impl LiveWallet {
         let market_price = (ask + 0.02).min(0.99);
         
         let rounded_price = Self::round_to_tick(market_price, tick);
-        let rounded_shares = ((shares * 100.0).floor() / 100.0).max(5.0); // enforce min 5 shares
+        let rounded_shares = (shares * 100.0).floor() / 100.0;  // Round down to 2 decimal places, NO minimum shares
         
         // Recalculate actual cost with rounded shares
         let actual_position_size = rounded_shares * entry_price;
         let actual_buy_fee = rounded_shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
+        
+        // Check minimum order size ($1 minimum on Polymarket)
+        if actual_position_size < 1.0 {
+            cleanup_and_return!(format!("BELOW_MIN_ORDER_SIZE: ${:.2} < $1 minimum", actual_position_size));
+        }
         
         // Final balance check with actual amounts
         if (actual_position_size + actual_buy_fee) > self.balance {
@@ -686,6 +691,12 @@ impl LiveWallet {
             Ok(s) => s,
             Err(e) => { error!("Invalid sell size: {}", e); return; }
         };
+        
+        // Skip if position is too small (< $1)
+        if pos.shares * market_price < 1.0 {
+            warn!("Position too small to sell: {} shares @ ${:.2}", pos.shares, market_price);
+            return;
+        }
 
         match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Sell).await {
             Ok(id) => {
