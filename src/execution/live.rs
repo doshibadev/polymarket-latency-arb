@@ -376,16 +376,17 @@ impl LiveWallet {
         token_id: U256,
         price: Decimal,
         shares: Decimal,
+        usdc: Decimal,
         side: Side,
     ) -> Result<String, String> {
         use polymarket_client_sdk::clob::types::Amount;
         for attempt in 0..3u32 {
             // For market orders:
-            // - BUY: amount is USDC to spend  
+            // - BUY: amount is USDC to spend (pre-rounded to 2 decimals for FOK)
             // - SELL: amount is shares to sell
             let amount_result = match side {
-                Side::Buy => Amount::usdc(shares * price),  // USDC amount for buys
-                Side::Sell => Amount::shares(shares),       // Shares for sells
+                Side::Buy => Amount::usdc(usdc),     // Pre-rounded USDC amount for buys
+                Side::Sell => Amount::shares(shares), // Shares for sells
                 _ => return Err("Unsupported side".to_string()),
             };
             
@@ -597,6 +598,10 @@ impl LiveWallet {
             cleanup_and_return!(format!("BELOW_MIN_ORDER_SIZE: ${:.2} < $1 minimum", actual_position_size));
         }
         
+        // For FOK market orders, round USDC amount to 2 decimals to avoid precision errors
+        // The API rejects amounts with too many decimal places for FOK orders
+        let usdc_amount = (rounded_shares * rounded_price * 100.0).floor() / 100.0;
+        
         // Final balance check with actual amounts
         if (actual_position_size + actual_buy_fee) > self.balance {
             cleanup_and_return!("INSUFFICIENT_BALANCE_AFTER_ROUNDING".to_string());
@@ -610,9 +615,13 @@ impl LiveWallet {
             Ok(s) => s,
             Err(e) => cleanup_and_return!(e.to_string()),
         };
+        let usdc = match Decimal::try_from(usdc_amount) {
+            Ok(u) => u,
+            Err(e) => cleanup_and_return!(e.to_string()),
+        };
 
         // Place REAL market order on Polymarket CLOB - uses ask+buffer to ensure fill
-        let order_id = match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Buy).await {
+        let order_id = match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, usdc, Side::Buy).await {
             Ok(id) => id,
             Err(e) => cleanup_and_return!(e),
         };
@@ -718,8 +727,11 @@ impl LiveWallet {
             warn!("Position too small to sell: {} shares @ ${:.2}", pos.shares, market_price);
             return;
         }
+        
+        // For sells, usdc param is not used (we use shares), pass 0
+        let usdc_for_sell = Decimal::ZERO;
 
-        match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Sell).await {
+        match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, usdc_for_sell, Side::Sell).await {
             Ok(id) => {
                 info!(symbol=%pos.symbol, reason=%reason, price=rounded, order_id=%id, "Live SELL placed (market order)");
                 // TODO: Add order status tracking to confirm actual fill price/size
