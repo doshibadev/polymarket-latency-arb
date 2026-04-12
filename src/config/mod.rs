@@ -29,6 +29,7 @@ pub struct AppConfig {
     pub max_exposure_per_market: f64,
     pub max_drawdown_pct: f64,
     pub slippage_bps: u64,           // simulated slippage in basis points for paper trading
+    pub trend_reversal_pct: f64,      // % of spike that must reverse to trigger trend_reversed exit
 }
 
 impl AppConfig {
@@ -44,7 +45,7 @@ impl AppConfig {
             max_entry_price: env::var("MAX_ENTRY_PRICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.80),
             profit_target_pct: env::var("PROFIT_TARGET_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             trailing_stop_pct: env::var("TRAILING_STOP_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0),
-            spike_faded_pct: env::var("SPIKE_FADED_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.02),
+            spike_faded_pct: env::var("SPIKE_FADED_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0),
             spike_faded_ms: env::var("SPIKE_FADED_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200),
             min_hold_ms: env::var("MIN_HOLD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500),
             max_spread_bps: env::var("MAX_SPREAD_BPS").ok().and_then(|v| v.parse().ok()).unwrap_or(100),
@@ -62,20 +63,24 @@ impl AppConfig {
             max_exposure_per_market: env::var("MAX_EXPOSURE_PER_MARKET").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0),
             max_drawdown_pct: env::var("MAX_DRAWDOWN_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.30),
             slippage_bps: env::var("SLIPPAGE_BPS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
+            trend_reversal_pct: env::var("TREND_REVERSAL_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0),
         })
     }
 
     pub fn update_from_json(&mut self, json: serde_json::Value) -> Result<()> {
         if let Some(v) = json.get("threshold_bps").and_then(|v| v.as_u64()) { self.threshold_bps = v; }
         if let Some(v) = json.get("portfolio_pct").and_then(|v| v.as_f64()) { self.portfolio_pct = v; }
-        if let Some(v) = json.get("profit_target_pct").and_then(|v| v.as_f64()) { self.profit_target_pct = v; }
-        if let Some(v) = json.get("trailing_stop_pct").and_then(|v| v.as_f64()) { self.trailing_stop_pct = v; }
-        if let Some(v) = json.get("spike_faded_pct").and_then(|v| v.as_f64()) { self.spike_faded_pct = v; }
-        if let Some(v) = json.get("max_spread_bps").and_then(|v| v.as_u64()) { self.max_spread_bps = v; }
         if let Some(v) = json.get("max_entry_price").and_then(|v| v.as_f64()) { self.max_entry_price = v; }
-        if let Some(v) = json.get("spike_scaling_factor").and_then(|v| v.as_f64()) { self.spike_scaling_factor = v; }
-        if let Some(v) = json.get("ema_alpha").and_then(|v| v.as_f64()) { self.ema_alpha = v; }
+        if let Some(v) = json.get("min_entry_price").and_then(|v| v.as_f64()) { self.min_entry_price = v; }
+        if let Some(v) = json.get("trend_reversal_pct").and_then(|v| v.as_f64()) { self.trend_reversal_pct = v; }
+        if let Some(v) = json.get("spike_faded_pct").and_then(|v| v.as_f64()) { self.spike_faded_pct = v; }
+        if let Some(v) = json.get("spike_faded_ms").and_then(|v| v.as_u64()) { self.spike_faded_ms = v; }
+        if let Some(v) = json.get("min_hold_ms").and_then(|v| v.as_u64()) { self.min_hold_ms = v; }
         if let Some(v) = json.get("execution_delay_ms").and_then(|v| v.as_u64()) { self.execution_delay_ms = v; }
+        if let Some(v) = json.get("max_orders_per_minute").and_then(|v| v.as_u64()) { self.max_orders_per_minute = v as u32; }
+        if let Some(v) = json.get("max_daily_loss").and_then(|v| v.as_f64()) { self.max_daily_loss = v; }
+        if let Some(v) = json.get("max_exposure_per_market").and_then(|v| v.as_f64()) { self.max_exposure_per_market = v; }
+        if let Some(v) = json.get("max_drawdown_pct").and_then(|v| v.as_f64()) { self.max_drawdown_pct = v; }
         Ok(())
     }
 }

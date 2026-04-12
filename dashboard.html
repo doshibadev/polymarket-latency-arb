@@ -385,31 +385,27 @@
                 </div>
                 <div class="setting-group">
                     <label class="setting-label">Max Entry Price</label>
-                    <input type="number" id="set-maxprice" class="setting-input" step="0.01" placeholder="e.g. 0.70">
+                    <input type="number" id="set-maxprice" class="setting-input" step="0.01" placeholder="e.g. 0.80">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Trailing Stop (%)</label>
-                    <input type="number" id="set-trailing" class="setting-input" step="0.1" placeholder="e.g. 10">
+                    <label class="setting-label">Min Entry Price</label>
+                    <input type="number" id="set-minprice" class="setting-input" step="0.01" placeholder="e.g. 0.05">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Spike Faded Threshold</label>
-                    <input type="number" id="set-spiked-faded" class="setting-input" step="0.01" placeholder="e.g. 0.25">
+                    <label class="setting-label">Trend Reversal (%)</label>
+                    <input type="number" id="set-trend-reversal" class="setting-input" step="1" placeholder="e.g. 50">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Profit Target (%)</label>
-                    <input type="number" id="set-profit" class="setting-input" step="0.1" placeholder="e.g. 0">
+                    <label class="setting-label">Spike Faded (%)</label>
+                    <input type="number" id="set-spike-faded" class="setting-input" step="0.01" placeholder="e.g. 0.02">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Max Spread (BPS)</label>
-                    <input type="number" id="set-spread" class="setting-input" placeholder="e.g. 100">
+                    <label class="setting-label">Spike Faded MS</label>
+                    <input type="number" id="set-spike-faded-ms" class="setting-input" placeholder="e.g. 200">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Spike Scaling Factor</label>
-                    <input type="number" id="set-scaling" class="setting-input" step="0.0001" placeholder="e.g. 0.0001">
-                </div>
-                <div class="setting-group sim-only">
-                    <label class="setting-label">Fee Rate</label>
-                    <input type="number" id="set-fee" class="setting-input" step="0.001" placeholder="e.g. 0.072">
+                    <label class="setting-label">Min Hold MS</label>
+                    <input type="number" id="set-min-hold" class="setting-input" placeholder="e.g. 1500">
                 </div>
                 <div class="setting-group sim-only">
                     <label class="setting-label">Execution Delay (ms)</label>
@@ -740,11 +736,11 @@
                     set('set-threshold', (c.threshold_bps / 100).toFixed(0));
                     set('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
                     set('set-maxprice', c.max_entry_price);
-                    set('set-profit', (c.profit_target_pct * 100).toFixed(1));
-                    set('set-trailing', c.trailing_stop_pct);
-                    set('set-spiked-faded', c.spike_faded_pct);
-                    set('set-spread', c.max_spread_bps);
-                    set('set-scaling', c.spike_scaling_factor);
+                    set('set-minprice', c.min_entry_price);
+                    set('set-trend-reversal', c.trend_reversal_pct);
+                    set('set-spike-faded', c.spike_faded_pct);
+                    set('set-spike-faded-ms', c.spike_faded_ms);
+                    set('set-min-hold', c.min_hold_ms);
                     set('set-delay', c.execution_delay_ms);
                     set('set-max-orders', c.max_orders_per_minute);
                     set('set-daily-loss', c.max_daily_loss);
@@ -766,12 +762,12 @@
                 _type: 'settings',
                 threshold_bps: Math.round(parseFloat(document.getElementById('set-threshold').value) * 100),
                 portfolio_pct: parseFloat(document.getElementById('set-portfolio').value) / 100,
-                profit_target_pct: parseFloat(document.getElementById('set-profit').value) / 100,
-                trailing_stop_pct: parseFloat(document.getElementById('set-trailing').value),
-                spike_faded_pct: parseFloat(document.getElementById('set-spiked-faded').value),
-                max_spread_bps: parseInt(document.getElementById('set-spread').value),
                 max_entry_price: parseFloat(document.getElementById('set-maxprice').value),
-                spike_scaling_factor: parseFloat(document.getElementById('set-scaling').value),
+                min_entry_price: parseFloat(document.getElementById('set-minprice').value),
+                trend_reversal_pct: parseFloat(document.getElementById('set-trend-reversal').value),
+                spike_faded_pct: parseFloat(document.getElementById('set-spike-faded').value),
+                spike_faded_ms: parseInt(document.getElementById('set-spike-faded-ms').value),
+                min_hold_ms: parseInt(document.getElementById('set-min-hold').value),
                 execution_delay_ms: parseInt(document.getElementById('set-delay').value),
                 max_orders_per_minute: parseInt(document.getElementById('set-max-orders').value),
                 max_daily_loss: parseFloat(document.getElementById('set-daily-loss').value),
@@ -875,12 +871,12 @@
                 };
                 setIfNotFocused('set-threshold', (c.threshold_bps / 100).toFixed(0));
                 setIfNotFocused('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
-                setIfNotFocused('set-profit', (c.profit_target_pct * 100).toFixed(1));
-                setIfNotFocused('set-trailing', c.trailing_stop_pct);
-                setIfNotFocused('set-spiked-faded', c.spike_faded_pct);
-                setIfNotFocused('set-spread', c.max_spread_bps);
                 setIfNotFocused('set-maxprice', c.max_entry_price);
-                setIfNotFocused('set-scaling', c.spike_scaling_factor);
+                setIfNotFocused('set-minprice', c.min_entry_price);
+                setIfNotFocused('set-trend-reversal', c.trend_reversal_pct);
+                setIfNotFocused('set-spike-faded', c.spike_faded_pct);
+                setIfNotFocused('set-spike-faded-ms', c.spike_faded_ms);
+                setIfNotFocused('set-min-hold', c.min_hold_ms);
                 setIfNotFocused('set-delay', c.execution_delay_ms);
             }
 

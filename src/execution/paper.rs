@@ -450,26 +450,38 @@ impl PaperWallet {
             // Give Polymarket time to update their chart
             let min_hold_passed = held_ms >= self.config.min_hold_ms;
 
-            // Trend reversed - exit if spike goes completely opposite direction
+            // Trend reversed - exit if BTC reverses by X% of the spike magnitude
             // This is the only exit that can trigger before min_hold_time
-            let trend_reversed = if pos.direction == "UP" {
-                // For UP: exit if BTC dropped below entry price (complete reversal)
-                pos.entry_btc > 0.0 && current_btc > 0.0 && current_btc < pos.entry_btc
+            // Example: $30 spike, TREND_REVERSAL_PCT=50% -> exit if BTC reverses $15 from entry
+            // For UP: exit if BTC drops by threshold_dollars from entry_btc
+            // For DOWN: exit if BTC rises by threshold_dollars from entry_btc
+            let trend_reversed = if pos.entry_btc > 0.0 && current_btc > 0.0 && pos.entry_spike.abs() > 0.0 {
+                let threshold_dollars = pos.entry_spike.abs() * (self.config.trend_reversal_pct / 100.0);
+                if pos.direction == "UP" {
+                    // For UP: we entered on a spike up, exit if BTC drops by threshold_dollars
+                    let drop_from_entry = pos.entry_btc - current_btc;
+                    drop_from_entry >= threshold_dollars
+                } else {
+                    // For DOWN: we entered on a spike down, exit if BTC rises by threshold_dollars
+                    let rise_from_entry = current_btc - pos.entry_btc;
+                    rise_from_entry >= threshold_dollars
+                }
             } else {
-                // For DOWN: exit if BTC rose above entry price (complete reversal)
-                pos.entry_btc > 0.0 && current_btc > 0.0 && current_btc > pos.entry_btc
+                false
             };
 
-            // Spike faded (new logic): exit if BTC reverses X% from peak
-            // For UP: peak_btc is highest since entry, exit if current drops X% from peak
-            // For DOWN: trough_btc is lowest since entry, exit if current rises X% from trough
-            let spike_faded_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 {
+            // Spike faded: exit if BTC reverses by X% of the spike magnitude from peak/trough
+            // For UP: peak_btc is highest since entry, exit if BTC drops by threshold_dollars from peak
+            // For DOWN: trough_btc is lowest since entry, exit if BTC rises by threshold_dollars from trough
+            // Example: $30 spike, SPIKE_FADED_PCT=50% -> exit if BTC reverses $15 from peak/trough
+            let spike_faded_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 && pos.entry_spike.abs() > 0.0 {
+                let threshold_dollars = pos.entry_spike.abs() * (self.config.spike_faded_pct / 100.0);
                 if pos.direction == "UP" {
                     // For UP: check if BTC dropped from peak
                     let peak = pos.peak_btc;
                     if peak > 0.0 {
-                        let drop_pct = (peak - current_btc) / peak * 100.0;
-                        drop_pct >= self.config.spike_faded_pct
+                        let drop_from_peak = peak - current_btc;
+                        drop_from_peak >= threshold_dollars
                     } else {
                         false
                     }
@@ -477,8 +489,8 @@ impl PaperWallet {
                     // For DOWN: check if BTC rose from trough
                     let trough = pos.trough_btc;
                     if trough > 0.0 {
-                        let rise_pct = (current_btc - trough) / trough * 100.0;
-                        rise_pct >= self.config.spike_faded_pct
+                        let rise_from_trough = current_btc - trough;
+                        rise_from_trough >= threshold_dollars
                     } else {
                         false
                     }
@@ -522,20 +534,21 @@ impl PaperWallet {
             
             let current_btc = state.last_binance;
             
-            let spike_faded_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 {
+            let spike_faded_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 && pos.entry_spike.abs() > 0.0 {
+                let threshold_dollars = pos.entry_spike.abs() * (self.config.spike_faded_pct / 100.0);
                 if pos.direction == "UP" {
                     let peak = pos.peak_btc;
                     if peak > 0.0 {
-                        let drop_pct = (peak - current_btc) / peak * 100.0;
-                        drop_pct >= self.config.spike_faded_pct
+                        let drop_from_peak = peak - current_btc;
+                        drop_from_peak >= threshold_dollars
                     } else {
                         false
                     }
                 } else {
                     let trough = pos.trough_btc;
                     if trough > 0.0 {
-                        let rise_pct = (current_btc - trough) / trough * 100.0;
-                        rise_pct >= self.config.spike_faded_pct
+                        let rise_from_trough = current_btc - trough;
+                        rise_from_trough >= threshold_dollars
                     } else {
                         false
                     }

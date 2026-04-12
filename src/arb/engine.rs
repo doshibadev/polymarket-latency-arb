@@ -26,6 +26,8 @@ struct SymbolState {
     // Pre-computed baselines for faster spike detection
     pub baseline_200ms: Option<f64>,
     pub baseline_1s: Option<f64>,
+    // Cooldown after position closes before allowing re-entry
+    pub last_close_time: Option<Instant>,
 }
 
 pub struct ArbEngine {
@@ -212,14 +214,17 @@ impl ArbEngine {
             "config": {
                 "threshold_bps": self.config.threshold_bps,
                 "portfolio_pct": self.config.portfolio_pct,
-                "profit_target_pct": self.config.profit_target_pct,
-                "trailing_stop_pct": self.config.trailing_stop_pct,
-                "spike_faded_pct": self.config.spike_faded_pct,
-                "max_spread_bps": self.config.max_spread_bps,
                 "max_entry_price": self.config.max_entry_price,
-                "spike_scaling_factor": self.config.spike_scaling_factor,
-                "ema_alpha": self.config.ema_alpha,
+                "min_entry_price": self.config.min_entry_price,
+                "trend_reversal_pct": self.config.trend_reversal_pct,
+                "spike_faded_pct": self.config.spike_faded_pct,
+                "spike_faded_ms": self.config.spike_faded_ms,
+                "min_hold_ms": self.config.min_hold_ms,
                 "execution_delay_ms": self.config.execution_delay_ms,
+                "max_orders_per_minute": self.config.max_orders_per_minute,
+                "max_daily_loss": self.config.max_daily_loss,
+                "max_exposure_per_market": self.config.max_exposure_per_market,
+                "max_drawdown_pct": self.config.max_drawdown_pct,
             }
         });
 
@@ -349,7 +354,7 @@ impl ArbEngine {
                     // Force-close all positions if any market is within 5 seconds of ending
                     let now = Self::now_secs();
                     let market_ending = self.symbol_states.values()
-                        .any(|s| s.market_end_ts.map_or(false, |end| now >= end.saturating_sub(5)));
+                        .any(|s| s.market_end_ts.map_or(false, |end| now >= end.saturating_sub(2)));
                     if market_ending && !self.wallet.open_positions.is_empty() {
                         let indices: Vec<usize> = (0..self.wallet.open_positions.len()).rev().collect();
                         for idx in indices {
@@ -404,8 +409,11 @@ impl ArbEngine {
                             _net_market_value += pos.shares * ((b + a) / 2.0);
                         }
                         let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
-                        // Reset spike gate so next spike triggers a fresh entry
-                        for state in self.symbol_states.values_mut() { state.last_spike_usd = 0.0; }
+                        // Reset spike gate and set cooldown so next spike triggers a fresh entry
+                        for state in self.symbol_states.values_mut() { 
+                            state.last_spike_usd = 0.0; 
+                            state.last_close_time = Some(Instant::now());
+                        }
                     }
                 }
                 Some(clob_update) = self.clob_rx.recv() => {
@@ -416,8 +424,11 @@ impl ArbEngine {
                             _net_market_value += pos.shares * ((b + a) / 2.0);
                         }
                         let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
-                        // Reset spike gate so next spike triggers a fresh entry
-                        for state in self.symbol_states.values_mut() { state.last_spike_usd = 0.0; }
+                        // Reset spike gate and set cooldown so next spike triggers a fresh entry
+                        for state in self.symbol_states.values_mut() { 
+                            state.last_spike_usd = 0.0; 
+                            state.last_close_time = Some(Instant::now());
+                        }
                     }
                 }
                 Some(market) = self.market_rx.recv() => { self.handle_market_update(market).await; }
@@ -654,7 +665,7 @@ impl ArbEngine {
         
         if let Some(end_ts) = state.market_end_ts {
             let now = Self::now_secs();
-            if now >= end_ts.saturating_sub(5) {
+            if now >= end_ts.saturating_sub(2) {
                 let state = self.symbol_states.get_mut(symbol).unwrap();
                 let should_log = state.last_rejection.as_ref()
                     .map_or(true, |(r, t)| r != "MARKET_ENDING" || t.elapsed().as_secs() >= 5);
@@ -666,8 +677,12 @@ impl ArbEngine {
             }
         }
 
+        // Check cooldown - don't re-enter too quickly after a close
+        let cooldown_ms = 3000; // 3 second cooldown after a position closes
+        let cooldown_ok = state.last_close_time.map_or(true, |t| t.elapsed().as_millis() >= cooldown_ms);
+        
         // New spike or significantly larger spike for scaling in
-        if abs_spike > state.last_spike_usd * 1.1 {
+        if abs_spike > state.last_spike_usd * 1.1 && cooldown_ok {
             // Get entry price BEFORE open_position (pending entry hasn't been promoted yet)
             let entry_price = self.wallet.get_share_price(symbol, direction);
             match self.wallet.open_position(symbol, direction, adjusted_spike, threshold_usd) {
