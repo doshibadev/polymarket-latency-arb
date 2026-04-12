@@ -520,7 +520,6 @@ impl LiveWallet {
             scale_level,
             hold_to_resolution: false,
             peak_spike: spike.abs(),
-            spike_low_since: None,
             // BTC trailing stop - will be set by engine when it has BTC price
             entry_btc: 0.0,
             peak_btc: 0.0,

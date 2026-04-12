@@ -20,10 +20,8 @@ pub struct OpenPosition {
     pub highest_price: f64,
     pub scale_level: u32,
     pub hold_to_resolution: bool,
-    #[serde(skip)]
-    pub spike_low_since: Option<Instant>, // when spike first dropped below threshold
     pub peak_spike: f64,           // highest spike seen since entry
-    // BTC-based trailing stop fields
+    // BTC-based exit fields
     pub entry_btc: f64,            // BTC price at entry
     pub peak_btc: f64,             // highest BTC since entry (for UP positions)
     pub trough_btc: f64,           // lowest BTC since entry (for DOWN positions)
@@ -334,62 +332,6 @@ impl PaperWallet {
         if state.spike_history_len < 16 { state.spike_history_len += 1; }
     }
     
-    /// Get spike measured from 1.0s ago (matches Polymarket delay window)
-    fn get_long_baseline_spike(&self, symbol: &str, current_price: f64) -> f64 {
-        let state = match self.symbol_states.get(symbol) {
-            Some(s) => s,
-            None => return 0.0,
-        };
-        let cutoff = std::time::Duration::from_millis(1000);
-        let now = Instant::now();
-        
-        // Find price from ~1.0s ago
-        for i in 0..state.btc_history_len {
-            let idx = if state.btc_history_idx >= i + 1 {
-                state.btc_history_idx - i - 1
-            } else {
-                64 - (i + 1 - state.btc_history_idx)
-            };
-            let (price, time) = state.btc_price_history[idx];
-            if now.duration_since(time) >= cutoff {
-                return current_price - price;
-            }
-        }
-        0.0
-    }
-
-    /// Check if price is consolidating (not moving much in last 500ms)
-    /// Returns true if price range in last 500ms is less than threshold
-    fn is_consolidating(&self, symbol: &str, threshold: f64) -> bool {
-        let state = match self.symbol_states.get(symbol) {
-            Some(s) => s,
-            None => return false,
-        };
-        let cutoff = std::time::Duration::from_millis(500);
-        let now = Instant::now();
-        
-        let mut recent_prices: Vec<f64> = Vec::new();
-        for i in 0..state.btc_history_len {
-            let idx = if state.btc_history_idx >= i + 1 {
-                state.btc_history_idx - i - 1
-            } else {
-                64 - (i + 1 - state.btc_history_idx)
-            };
-            let (price, time) = state.btc_price_history[idx];
-            if now.duration_since(time) <= cutoff {
-                recent_prices.push(price);
-            }
-        }
-        
-        if recent_prices.len() < 3 {
-            return false;
-        }
-        
-        let max_price = recent_prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let min_price = recent_prices.iter().cloned().fold(f64::INFINITY, f64::min);
-        (max_price - min_price).abs() < threshold
-    }
-
     /// Called by engine on each Binance tick to evaluate hold-to-resolution for open positions
     pub fn update_hold_status(
         &mut self,
@@ -786,7 +728,6 @@ impl PaperWallet {
                 scale_level: p.scale_level,
                 hold_to_resolution: false,
                 peak_spike: p.spike.abs(),
-                spike_low_since: None,
                 // BTC trailing stop - will be set by engine when it has BTC price
                 entry_btc: 0.0,
                 peak_btc: 0.0,
