@@ -365,9 +365,19 @@ impl ArbEngine {
                             .filter(|(_, pos)| pos.symbol == symbol)
                             .filter_map(|(idx, pos)| {
                                 let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
-                                // Check if position is losing (share price dropped from entry)
-                                let is_losing = current_price < pos.entry_price;
-                                if is_losing {
+                                
+                                // DON'T exit if in HOLD mode (share price > threshold)
+                                // HOLD mode positions are managed by try_close_position with BTC margin checks
+                                if current_price > self.config.hold_min_share_price {
+                                    return None;
+                                }
+                                
+                                // Only exit if losing by more than threshold from entry
+                                // This prevents exiting positions that are just slightly down
+                                let loss_pct = (pos.entry_price - current_price) / pos.entry_price;
+                                let is_losing_significantly = loss_pct > self.config.early_exit_loss_pct;
+                                
+                                if is_losing_significantly {
                                     Some((idx, current_price, pos.symbol.clone()))
                                 } else {
                                     None
