@@ -278,14 +278,8 @@ impl LiveWallet {
         for pos in &mut self.open_positions {
             if pos.symbol != symbol { continue; }
             
-            // Initialize entry_btc if not set (first update after position opened)
-            if pos.entry_btc == 0.0 {
-                pos.entry_btc = current_btc;
-                pos.peak_btc = current_btc;
-                pos.trough_btc = current_btc;
-            }
-            
-            // Update peak/trough
+            // entry_btc is now set immediately when position is created
+            // Just update peak/trough here
             if current_btc > pos.peak_btc {
                 pos.peak_btc = current_btc;
             }
@@ -351,14 +345,15 @@ impl LiveWallet {
         Err("Max retries exceeded".to_string())
     }
 
-    /// Open a live position — entry_price passed from engine (paper wallet share price state)
+    /// Open a live position — matches paper.rs logic exactly
     pub async fn open_position(
         &mut self,
         symbol: &str,
         direction: &str,
         spike: f64,
-        entry_price: f64,
-        market_end_ts: Option<u64>,
+        _threshold_usd: f64,
+        allow_scaling: bool,
+        current_btc: f64,
     ) -> Result<u32, String> {
         // Reset daily PnL at midnight UTC
         let today = chrono::Utc::now().date_naive().day();
@@ -401,22 +396,16 @@ impl LiveWallet {
                 market_exposure, position_size_planned, self.config.max_exposure_per_market));
         }
 
-        // Check market ending FIRST before any other validation
-        if let Some(end_ts) = market_end_ts {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            if now >= end_ts.saturating_sub(5) {
-                return Err("MARKET_ENDING".to_string());
-            }
-        }
-
-        let existing = self.open_positions.iter()
+        // SCALE LEVEL CHECK - matches paper.rs exactly
+        let existing: Vec<_> = self.open_positions.iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
-            .count();
-        let scale_level = existing as u32 + 1;
-        if scale_level > 1 { return Err("MAX_SCALE_LEVEL".to_string()); }
+            .collect();
+        let scale_level = (existing.len()) as u32 + 1;
+
+        // In HOLD mode (allow_scaling=true), ignore MAX_SCALE_LEVEL to add to winning positions
+        if !allow_scaling && scale_level > 1 { 
+            return Err("MAX_SCALE_LEVEL".to_string()); 
+        }
 
         let token_id = self.get_token_id(symbol, direction)
             .ok_or_else(|| "NO_TOKEN_ID".to_string())?;
@@ -426,46 +415,71 @@ impl LiveWallet {
         let book_req = OrderBookSummaryRequest::builder()
             .token_id(token_id)
             .build();
-        match self.clob.order_book(&book_req).await {
+        
+        // Get entry price from orderbook - matches paper.rs logic
+        let entry_price = match self.clob.order_book(&book_req).await {
             Ok(book) => {
                 // Check if market is active (has bids/asks)
                 if book.bids.is_empty() && book.asks.is_empty() {
                     return Err("MARKET_INACTIVE_NO_LIQUIDITY".to_string());
                 }
+                
+                // Calculate mid price from best bid/ask
+                let best_bid: f64 = book.bids.first()
+                    .and_then(|b| f64::try_from(b.price).ok())
+                    .unwrap_or(0.0);
+                let best_ask: f64 = book.asks.first()
+                    .and_then(|a| f64::try_from(a.price).ok())
+                    .unwrap_or(0.0);
+                
+                if best_bid <= 0.0 || best_ask <= 0.0 {
+                    return Err("NO_PRICE_DATA".to_string());
+                }
+                
+                (best_bid + best_ask) / 2.0
             },
             Err(e) => {
                 // Orderbook doesn't exist - market likely expired/resolved
                 return Err(format!("MARKET_CLOSED: {}", e));
             }
-        }
+        };
 
+        // ENTRY PRICE CHECKS - matches paper.rs exactly
         if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }
         if entry_price > self.config.max_entry_price { return Err("PRICE_TOO_HIGH".to_string()); }
         if entry_price < self.config.min_entry_price { return Err("PRICE_TOO_LOW".to_string()); }
 
-        let position_size = self.balance * self.config.portfolio_pct;
+        // POSITION SIZING - matches paper.rs exactly
+        let position_size = self.balance * self.config.portfolio_pct * (1.0 / scale_level as f64);
         
-        // SAFETY: Cap position size to prevent catastrophic losses
-        // Use current balance (not starting) to handle drawdowns gracefully
-        let max_position_size = self.balance * 0.8; // Max 80% of current balance per trade
-        let position_size = position_size.min(max_position_size);
+        // Position sizing based on share price - scale down for cheaper shares
+        // Cheap shares (< 20 cents) are higher risk, use smaller position size
+        let position_size = if entry_price < 0.20 {
+            position_size * 0.25  // 25% of normal for very cheap shares
+        } else if entry_price < 0.50 {
+            position_size * 0.50  // 50% of normal for cheap shares
+        } else {
+            position_size  // Full size for 50+ cent shares
+        };
         
-        // CRITICAL SAFETY CHECKS - These prevented the $20 loss incident
-        if entry_price < 0.05 {
-            return Err(format!("CRITICAL_SAFETY: Entry price {:.3} < 0.05 (5 cents minimum)", entry_price));
-        }
-        if position_size > self.balance * 0.15 { 
-            return Err(format!("CRITICAL_SAFETY: Position ${:.2} > 15% of balance ${:.2}", position_size, self.balance)); 
-        }
-        if position_size > 5.0 { 
-            return Err(format!("CRITICAL_SAFETY: Position ${:.2} > $5 maximum per trade", position_size)); 
-        }
-
         let shares = position_size / entry_price;
         let buy_fee = shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
 
+        // MINIMUM ORDER SIZE CHECK - matches paper.rs
         if position_size < 1.0 { return Err("BELOW_MIN_ORDER_SIZE".to_string()); }
         if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
+
+        // ADDITIONAL SAFETY CHECKS for live trading
+        // These are extra protections beyond paper trading
+        if entry_price < 0.05 {
+            return Err(format!("CRITICAL_SAFETY: Entry price {:.3} < 0.05 (5 cents minimum)", entry_price));
+        }
+        if position_size > self.balance * 0.25 { 
+            return Err(format!("CRITICAL_SAFETY: Position ${:.2} > 25% of balance ${:.2}", position_size, self.balance)); 
+        }
+        if position_size > 10.0 { 
+            return Err(format!("CRITICAL_SAFETY: Position ${:.2} > $10 maximum per trade", position_size)); 
+        }
 
         let tick = 0.01f64;
         let rounded_price = Self::round_to_tick(entry_price, tick);
@@ -473,21 +487,16 @@ impl LiveWallet {
         let price = Decimal::try_from(rounded_price).map_err(|e| e.to_string())?;
         let size = Decimal::try_from(rounded_shares).map_err(|e| e.to_string())?;
 
-        // Final safety validation before submitting order
-        if rounded_shares * entry_price > self.balance * 0.15 {
-            return Err(format!("FINAL_SAFETY: Order value ${:.2} exceeds 15% of balance ${:.2}", 
-                rounded_shares * entry_price, self.balance));
-        }
-
         let order_id = Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Buy).await?;
-        info!(symbol=%symbol, direction=%direction, shares=shares, price=rounded_price, order_id=%order_id, "Live BUY placed");
+        info!(symbol=%symbol, direction=%direction, shares=rounded_shares, price=rounded_price, order_id=%order_id, "Live BUY placed");
 
         // Track order timestamp for rate limiting
         self.order_timestamps.push(std::time::Instant::now());
 
         self.pending_order_ids.insert(format!("{}:{}", symbol, direction), order_id);
-        // DON'T decrease balance here - only decrease when order is confirmed filled
-        // self.balance -= position_size + buy_fee;
+        
+        // Reserve balance immediately - matches paper.rs logic
+        self.balance -= position_size + buy_fee;
 
         self.trade_history.push(TradeRecord {
             symbol: symbol.to_string(),
@@ -510,7 +519,7 @@ impl LiveWallet {
             direction: direction.to_string(),
             entry_price,
             avg_entry_price: entry_price,
-            shares,
+            shares: rounded_shares,
             position_size,
             buy_fee,
             entry_spike: spike,
@@ -519,10 +528,10 @@ impl LiveWallet {
             scale_level,
             hold_to_resolution: false,
             peak_spike: spike.abs(),
-            // BTC trailing stop - will be set by engine when it has BTC price
-            entry_btc: 0.0,
-            peak_btc: 0.0,
-            trough_btc: 0.0,
+            // BTC price set immediately at entry to avoid race condition - matches paper.rs
+            entry_btc: current_btc,
+            peak_btc: current_btc,
+            trough_btc: current_btc,
             spike_faded_since: None,
         });
 

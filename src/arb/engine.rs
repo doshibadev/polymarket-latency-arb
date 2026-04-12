@@ -768,9 +768,10 @@ impl ArbEngine {
                         let sym = symbol.to_string();
                         let dir = direction.to_string();
                         let spk = adjusted_spike;
-                        let end_ts = state.market_end_ts;
+                        let thresh = threshold_usd;
+                        let btc = current_btc;
                         if let Some(lw) = &mut self.live_wallet {
-                            match lw.open_position(&sym, &dir, spk, entry_price, end_ts).await {
+                            match lw.open_position(&sym, &dir, spk, thresh, in_hold_mode, btc).await {
                                 Ok(live_level) => {
                                     self.add_signal(&sym, &dir, spk, "EXECUTED", Some(format!("LIVE_LEVEL_{}", live_level)));
                                 }
