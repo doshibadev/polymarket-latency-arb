@@ -112,6 +112,15 @@ struct PendingOrder {
     submitted_at: std::time::Instant,
 }
 
+/// Cache share prices from WebSocket (matches paper.rs)
+#[derive(Clone, Default)]
+struct SymbolPriceCache {
+    pub up_bid: f64,
+    pub up_ask: f64,
+    pub down_bid: f64,
+    pub down_ask: f64,
+}
+
 pub struct LiveWallet {
     pub balance: f64,
     pub starting_balance: f64,
@@ -133,6 +142,7 @@ pub struct LiveWallet {
     pending_order_ids: HashMap<String, String>,   // "symbol:direction" -> order_id
     order_timestamps: Vec<std::time::Instant>,    // For rate limiting
     pending_orders: Vec<PendingOrder>,            // Track in-flight orders to prevent race conditions
+    price_cache: HashMap<String, SymbolPriceCache>, // Cache WebSocket prices (matches paper.rs)
 }
 
 impl LiveWallet {
@@ -203,6 +213,7 @@ impl LiveWallet {
             pending_order_ids: HashMap::new(),
             order_timestamps: Vec::new(),
             pending_orders: Vec::new(),
+            price_cache: HashMap::new(),
         })
     }
 
@@ -281,6 +292,41 @@ impl LiveWallet {
 
     pub fn clear_tokens(&mut self, symbol: &str) {
         self.token_map.retain(|_, (s, _)| s != symbol);
+    }
+
+    /// Update share prices from WebSocket (matches paper.rs)
+    pub fn update_share_price(&mut self, symbol: &str, direction: &str, bid: f64, ask: f64) {
+        let cache = self.price_cache.entry(symbol.to_string()).or_default();
+        if direction == "UP" {
+            cache.up_bid = bid;
+            cache.up_ask = ask;
+        } else {
+            cache.down_bid = bid;
+            cache.down_ask = ask;
+        }
+    }
+
+    /// Get bid/ask from cache (matches paper.rs)
+    fn get_bid_ask(&self, symbol: &str, direction: &str) -> (f64, f64) {
+        if let Some(cache) = self.price_cache.get(symbol) {
+            if direction == "UP" {
+                (cache.up_bid, cache.up_ask)
+            } else {
+                (cache.down_bid, cache.down_ask)
+            }
+        } else {
+            (0.0, 0.0)
+        }
+    }
+
+    /// Get share price from cache (matches paper.rs)
+    fn get_share_price(&self, symbol: &str, direction: &str) -> f64 {
+        let (bid, ask) = self.get_bid_ask(symbol, direction);
+        if bid > 0.0 && ask > 0.0 {
+            (bid + ask) / 2.0
+        } else {
+            0.0
+        }
     }
 
     /// Clean up stale pending orders (called periodically by engine)
@@ -457,39 +503,8 @@ impl LiveWallet {
             None => cleanup_and_return!("NO_TOKEN_ID".to_string()),
         };
 
-        // Verify orderbook exists before placing order
-        use polymarket_client_sdk::clob::types::request::OrderBookSummaryRequest;
-        let book_req = OrderBookSummaryRequest::builder()
-            .token_id(token_id)
-            .build();
-        
-        // Get entry price from orderbook - REAL DATA from Polymarket CLOB
-        let entry_price = match self.clob.order_book(&book_req).await {
-            Ok(book) => {
-                // Check if market is active (has bids/asks)
-                if book.bids.is_empty() && book.asks.is_empty() {
-                    cleanup_and_return!("MARKET_INACTIVE_NO_LIQUIDITY".to_string());
-                }
-                
-                // Calculate mid price from best bid/ask - REAL orderbook data
-                let best_bid: f64 = book.bids.first()
-                    .and_then(|b| f64::try_from(b.price).ok())
-                    .unwrap_or(0.0);
-                let best_ask: f64 = book.asks.first()
-                    .and_then(|a| f64::try_from(a.price).ok())
-                    .unwrap_or(0.0);
-                
-                if best_bid <= 0.0 || best_ask <= 0.0 {
-                    cleanup_and_return!("NO_PRICE_DATA".to_string());
-                }
-                
-                (best_bid + best_ask) / 2.0
-            },
-            Err(e) => {
-                // Orderbook doesn't exist - market likely expired/resolved
-                cleanup_and_return!(format!("MARKET_CLOSED: {}", e));
-            }
-        };
+        // Get entry price from WebSocket cache (matches paper.rs exactly)
+        let entry_price = self.get_share_price(symbol, direction);
 
         // ENTRY PRICE CHECKS - matches paper.rs exactly
         if entry_price <= 0.0 { cleanup_and_return!("NO_PRICE_DATA".to_string()); }

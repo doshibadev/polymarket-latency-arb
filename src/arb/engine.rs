@@ -651,6 +651,10 @@ impl ArbEngine {
 
     async fn handle_clob_update(&mut self, update: SharePriceUpdate) -> bool {
         self.wallet.update_share_price(&update.symbol, &update.direction, update.best_bid, update.best_ask);
+        // Update live wallet price cache too (matches paper.rs)
+        if let Some(lw) = &mut self.live_wallet {
+            lw.update_share_price(&update.symbol, &update.direction, update.best_bid, update.best_ask);
+        }
         self.wallet.flush_pending();
         self.wallet.try_close_position().await
     }

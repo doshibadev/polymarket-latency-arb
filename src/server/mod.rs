@@ -19,6 +19,11 @@ pub struct ServerState {
 pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serde_json::Value>) {
     let state = Arc::new(ServerState { tx, cmd_tx });
 
+    // Check if dashboard.html exists
+    if !std::path::Path::new("dashboard.html").exists() {
+        warn!("dashboard.html not found in current directory: {:?}", std::env::current_dir());
+    }
+
     let app = Router::new()
         .route("/", any_service(ServeFile::new("dashboard.html")))
         .route("/ws", get(ws_handler))
@@ -36,8 +41,14 @@ pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serd
         .unwrap_or(3000);
     
     let addr = format!("0.0.0.0:{}", port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            panic!("Failed to bind to {}: {}. Port might already be in use.", addr, e);
+        }
+    };
     info!("Dashboard server running on http://localhost:{}", port);
+    info!("Working directory: {:?}", std::env::current_dir());
     axum::serve(listener, app).await.unwrap();
 }
 
