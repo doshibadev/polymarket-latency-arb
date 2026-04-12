@@ -29,8 +29,15 @@ pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serd
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
-    info!("Dashboard server running on http://localhost:3001");
+    // Read port from environment variable, default to 3000
+    let port = std::env::var("DASHBOARD_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(3000);
+    
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    info!("Dashboard server running on http://localhost:{}", port);
     axum::serve(listener, app).await.unwrap();
 }
 
