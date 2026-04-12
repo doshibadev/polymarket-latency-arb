@@ -104,6 +104,14 @@ pub async fn ensure_approvals(signer: &K256Signer) -> Result<(), Box<dyn std::er
 }
 
 /// Mirrors PaperWallet exactly but executes real CLOB orders
+/// Track in-flight orders to prevent race conditions
+#[derive(Clone)]
+struct PendingOrder {
+    symbol: String,
+    direction: String,
+    submitted_at: std::time::Instant,
+}
+
 pub struct LiveWallet {
     pub balance: f64,
     pub starting_balance: f64,
@@ -124,6 +132,7 @@ pub struct LiveWallet {
     token_map: HashMap<String, (String, String)>, // token_id -> (symbol, direction)
     pending_order_ids: HashMap<String, String>,   // "symbol:direction" -> order_id
     order_timestamps: Vec<std::time::Instant>,    // For rate limiting
+    pending_orders: Vec<PendingOrder>,            // Track in-flight orders to prevent race conditions
 }
 
 impl LiveWallet {
@@ -193,6 +202,7 @@ impl LiveWallet {
             token_map: HashMap::new(),
             pending_order_ids: HashMap::new(),
             order_timestamps: Vec::new(),
+            pending_orders: Vec::new(),
         })
     }
 
@@ -271,6 +281,17 @@ impl LiveWallet {
 
     pub fn clear_tokens(&mut self, symbol: &str) {
         self.token_map.retain(|_, (s, _)| s != symbol);
+    }
+
+    /// Clean up stale pending orders (called periodically by engine)
+    pub fn cleanup_pending_orders(&mut self) {
+        let before = self.pending_orders.len();
+        let now = std::time::Instant::now();
+        self.pending_orders.retain(|p| now.duration_since(p.submitted_at).as_secs() < 5);
+        let after = self.pending_orders.len();
+        if before > after {
+            warn!("Cleaned up {} stale pending orders", before - after);
+        }
     }
 
     /// Update BTC trailing stop tracking for all open positions of a symbol
@@ -397,18 +418,44 @@ impl LiveWallet {
         }
 
         // SCALE LEVEL CHECK - matches paper.rs exactly
+        // Clean up stale pending orders (older than 5 seconds = failed/stuck)
+        let now = std::time::Instant::now();
+        self.pending_orders.retain(|p| now.duration_since(p.submitted_at).as_secs() < 5);
+        
+        // Count existing positions + in-flight orders (matches paper.rs logic)
         let existing: Vec<_> = self.open_positions.iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
             .collect();
-        let scale_level = (existing.len()) as u32 + 1;
+        let pending_same = self.pending_orders.iter()
+            .filter(|p| p.symbol == symbol && p.direction == direction)
+            .count();
+        let scale_level = (existing.len() + pending_same) as u32 + 1;
 
         // In HOLD mode (allow_scaling=true), ignore MAX_SCALE_LEVEL to add to winning positions
         if !allow_scaling && scale_level > 1 { 
             return Err("MAX_SCALE_LEVEL".to_string()); 
         }
 
-        let token_id = self.get_token_id(symbol, direction)
-            .ok_or_else(|| "NO_TOKEN_ID".to_string())?;
+        // Mark this order as in-flight BEFORE any async operations to prevent race conditions
+        let pending_marker = now;
+        self.pending_orders.push(PendingOrder {
+            symbol: symbol.to_string(),
+            direction: direction.to_string(),
+            submitted_at: pending_marker,
+        });
+
+        // Helper macro to clean up pending order on early return
+        macro_rules! cleanup_and_return {
+            ($err:expr) => {{
+                self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
+                return Err($err);
+            }};
+        }
+
+        let token_id = match self.get_token_id(symbol, direction) {
+            Some(id) => id,
+            None => cleanup_and_return!("NO_TOKEN_ID".to_string()),
+        };
 
         // Verify orderbook exists before placing order
         use polymarket_client_sdk::clob::types::request::OrderBookSummaryRequest;
@@ -416,15 +463,15 @@ impl LiveWallet {
             .token_id(token_id)
             .build();
         
-        // Get entry price from orderbook - matches paper.rs logic
+        // Get entry price from orderbook - REAL DATA from Polymarket CLOB
         let entry_price = match self.clob.order_book(&book_req).await {
             Ok(book) => {
                 // Check if market is active (has bids/asks)
                 if book.bids.is_empty() && book.asks.is_empty() {
-                    return Err("MARKET_INACTIVE_NO_LIQUIDITY".to_string());
+                    cleanup_and_return!("MARKET_INACTIVE_NO_LIQUIDITY".to_string());
                 }
                 
-                // Calculate mid price from best bid/ask
+                // Calculate mid price from best bid/ask - REAL orderbook data
                 let best_bid: f64 = book.bids.first()
                     .and_then(|b| f64::try_from(b.price).ok())
                     .unwrap_or(0.0);
@@ -433,21 +480,21 @@ impl LiveWallet {
                     .unwrap_or(0.0);
                 
                 if best_bid <= 0.0 || best_ask <= 0.0 {
-                    return Err("NO_PRICE_DATA".to_string());
+                    cleanup_and_return!("NO_PRICE_DATA".to_string());
                 }
                 
                 (best_bid + best_ask) / 2.0
             },
             Err(e) => {
                 // Orderbook doesn't exist - market likely expired/resolved
-                return Err(format!("MARKET_CLOSED: {}", e));
+                cleanup_and_return!(format!("MARKET_CLOSED: {}", e));
             }
         };
 
         // ENTRY PRICE CHECKS - matches paper.rs exactly
-        if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }
-        if entry_price > self.config.max_entry_price { return Err("PRICE_TOO_HIGH".to_string()); }
-        if entry_price < self.config.min_entry_price { return Err("PRICE_TOO_LOW".to_string()); }
+        if entry_price <= 0.0 { cleanup_and_return!("NO_PRICE_DATA".to_string()); }
+        if entry_price > self.config.max_entry_price { cleanup_and_return!("PRICE_TOO_HIGH".to_string()); }
+        if entry_price < self.config.min_entry_price { cleanup_and_return!("PRICE_TOO_LOW".to_string()); }
 
         // POSITION SIZING - matches paper.rs exactly
         let position_size = self.balance * self.config.portfolio_pct * (1.0 / scale_level as f64);
@@ -466,29 +513,42 @@ impl LiveWallet {
         let buy_fee = shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
 
         // MINIMUM ORDER SIZE CHECK - matches paper.rs
-        if position_size < 1.0 { return Err("BELOW_MIN_ORDER_SIZE".to_string()); }
-        if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
+        if position_size < 1.0 { cleanup_and_return!("BELOW_MIN_ORDER_SIZE".to_string()); }
+        if (position_size + buy_fee) > self.balance { cleanup_and_return!("INSUFFICIENT_BALANCE".to_string()); }
 
         // ADDITIONAL SAFETY CHECKS for live trading
         // These are extra protections beyond paper trading
         if entry_price < 0.05 {
-            return Err(format!("CRITICAL_SAFETY: Entry price {:.3} < 0.05 (5 cents minimum)", entry_price));
+            cleanup_and_return!(format!("CRITICAL_SAFETY: Entry price {:.3} < 0.05 (5 cents minimum)", entry_price));
         }
         if position_size > self.balance * 0.25 { 
-            return Err(format!("CRITICAL_SAFETY: Position ${:.2} > 25% of balance ${:.2}", position_size, self.balance)); 
+            cleanup_and_return!(format!("CRITICAL_SAFETY: Position ${:.2} > 25% of balance ${:.2}", position_size, self.balance)); 
         }
         if position_size > 10.0 { 
-            return Err(format!("CRITICAL_SAFETY: Position ${:.2} > $10 maximum per trade", position_size)); 
+            cleanup_and_return!(format!("CRITICAL_SAFETY: Position ${:.2} > $10 maximum per trade", position_size)); 
         }
 
         let tick = 0.01f64;
         let rounded_price = Self::round_to_tick(entry_price, tick);
         let rounded_shares = ((shares * 100.0).floor() / 100.0).max(5.0); // enforce min 5 shares
-        let price = Decimal::try_from(rounded_price).map_err(|e| e.to_string())?;
-        let size = Decimal::try_from(rounded_shares).map_err(|e| e.to_string())?;
+        let price = match Decimal::try_from(rounded_price) {
+            Ok(p) => p,
+            Err(e) => cleanup_and_return!(e.to_string()),
+        };
+        let size = match Decimal::try_from(rounded_shares) {
+            Ok(s) => s,
+            Err(e) => cleanup_and_return!(e.to_string()),
+        };
 
-        let order_id = Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Buy).await?;
+        // Place REAL order on Polymarket CLOB - this is NOT simulated
+        let order_id = match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Buy).await {
+            Ok(id) => id,
+            Err(e) => cleanup_and_return!(e),
+        };
         info!(symbol=%symbol, direction=%direction, shares=rounded_shares, price=rounded_price, order_id=%order_id, "Live BUY placed");
+
+        // Order successfully placed - remove from pending orders
+        self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
 
         // Track order timestamp for rate limiting
         self.order_timestamps.push(std::time::Instant::now());

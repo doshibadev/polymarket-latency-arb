@@ -511,6 +511,10 @@ impl ArbEngine {
                         }
                     }
                     self.wallet.flush_pending();
+                    // Clean up stale pending orders in live wallet
+                    if let Some(lw) = &mut self.live_wallet {
+                        lw.cleanup_pending_orders();
+                    }
                 }
                 _ = save_timer.tick() => {
                     self.wallet.save_state();
