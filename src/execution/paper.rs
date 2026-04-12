@@ -627,7 +627,6 @@ impl PaperWallet {
         let buy_fee = self.calculate_fee(shares, entry_price);
         if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
         if position_size < 1.0 { return Err("BELOW_MIN_ORDER_SIZE".to_string()); }
-        if shares < 5.0 { return Err("BELOW_MIN_SHARES".to_string()); }
 
         // Reserve balance immediately so concurrent entries don't over-allocate
         self.balance -= position_size + buy_fee;

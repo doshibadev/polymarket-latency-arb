@@ -451,8 +451,8 @@ impl LiveWallet {
         let position_size = position_size.min(max_position_size);
         
         // CRITICAL SAFETY CHECKS - These prevented the $20 loss incident
-        if entry_price < 0.11 { 
-            return Err(format!("CRITICAL_SAFETY: Entry price {:.3} < 0.11 (11 cents minimum)", entry_price)); 
+        if entry_price < 0.05 {
+            return Err(format!("CRITICAL_SAFETY: Entry price {:.3} < 0.05 (5 cents minimum)", entry_price));
         }
         if position_size > self.balance * 0.15 { 
             return Err(format!("CRITICAL_SAFETY: Position ${:.2} > 15% of balance ${:.2}", position_size, self.balance)); 
@@ -465,7 +465,6 @@ impl LiveWallet {
         let buy_fee = shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
 
         if position_size < 1.0 { return Err("BELOW_MIN_ORDER_SIZE".to_string()); }
-        if shares < 5.0 { return Err("BELOW_MIN_SHARES".to_string()); }
         if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
 
         let tick = 0.01f64;
