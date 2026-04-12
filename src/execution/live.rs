@@ -400,7 +400,7 @@ impl LiveWallet {
                 .amount(amount)
                 .price(price)
                 .side(side.clone())
-                .order_type(OrderType::FOK)  // FOK = Fill-Or-Kill (immediate execution with market price)
+                .order_type(OrderType::FAK)  // FAK = Fill-And-Kill (fills as much as possible, cancels rest)
                 .build()
                 .await
                 .map_err(|e| e.to_string())?;
@@ -500,6 +500,10 @@ impl LiveWallet {
 
         // In HOLD mode (allow_scaling=true), ignore MAX_SCALE_LEVEL to add to winning positions
         if !allow_scaling && scale_level > 1 { 
+            // Log why we're rejecting - helps debug stuck pending orders
+            if pending_same > 0 {
+                warn!("MAX_SCALE_LEVEL rejected: {} existing positions, {} pending orders for {} {}", existing.len(), pending_same, symbol, direction);
+            }
             return Err("MAX_SCALE_LEVEL".to_string()); 
         }
 
