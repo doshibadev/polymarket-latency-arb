@@ -381,7 +381,7 @@ impl LiveWallet {
                 .amount(Amount::shares(shares).map_err(|e| e.to_string())?)
                 .price(price)
                 .side(side.clone())
-                .order_type(OrderType::FOK)
+                .order_type(OrderType::FOK)  // FOK = Fill-Or-Kill (immediate execution with market price)
                 .build()
                 .await
                 .map_err(|e| e.to_string())?;
@@ -544,7 +544,13 @@ impl LiveWallet {
         }
 
         let tick = 0.01f64;
-        let rounded_price = Self::round_to_tick(entry_price, tick);
+        
+        // MARKET ORDER: Use ask price for buys to execute immediately
+        // Get the ask price from cache (real-time WebSocket data)
+        let (_bid, ask) = self.get_bid_ask(symbol, direction);
+        let market_price = if ask > 0.0 { ask } else { entry_price };
+        
+        let rounded_price = Self::round_to_tick(market_price, tick);
         let rounded_shares = ((shares * 100.0).floor() / 100.0).max(5.0); // enforce min 5 shares
         let price = match Decimal::try_from(rounded_price) {
             Ok(p) => p,
@@ -555,12 +561,12 @@ impl LiveWallet {
             Err(e) => cleanup_and_return!(e.to_string()),
         };
 
-        // Place REAL order on Polymarket CLOB - this is NOT simulated
+        // Place REAL market order on Polymarket CLOB - uses ask price to execute immediately
         let order_id = match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Buy).await {
             Ok(id) => id,
             Err(e) => cleanup_and_return!(e),
         };
-        info!(symbol=%symbol, direction=%direction, shares=rounded_shares, price=rounded_price, order_id=%order_id, "Live BUY placed");
+        info!(symbol=%symbol, direction=%direction, shares=rounded_shares, price=rounded_price, order_id=%order_id, "Live BUY placed (market order)");
 
         // Order successfully placed - remove from pending orders
         self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
@@ -632,7 +638,13 @@ impl LiveWallet {
         };
 
         let tick = 0.01f64;
-        let rounded = Self::round_to_tick(current_price, tick);
+        
+        // MARKET ORDER: Use bid price for sells to execute immediately
+        // Get the bid price from cache (real-time WebSocket data)
+        let (bid, _ask) = self.get_bid_ask(&pos.symbol, &pos.direction);
+        let market_price = if bid > 0.0 { bid } else { current_price };
+        
+        let rounded = Self::round_to_tick(market_price, tick);
         let price = match Decimal::try_from(rounded) {
             Ok(p) => p,
             Err(e) => { error!("Invalid sell price: {}", e); return; }
@@ -643,14 +655,14 @@ impl LiveWallet {
 
         match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Sell).await {
             Ok(id) => {
-                info!(symbol=%pos.symbol, reason=%reason, price=rounded, order_id=%id, "Live SELL placed");
+                info!(symbol=%pos.symbol, reason=%reason, price=rounded, order_id=%id, "Live SELL placed (market order)");
                 // TODO: Add order status tracking to confirm actual fill price/size
             },
             Err(e) => error!("Sell order failed: {}", e),
         }
 
-        // Sell is maker (limit) — no fee
-        let net_revenue = pos.shares * current_price;
+        // Use actual market price for PnL calculation
+        let net_revenue = pos.shares * market_price;
         let pnl = net_revenue - (pos.position_size + pos.buy_fee);
 
         self.balance += net_revenue;
