@@ -30,6 +30,9 @@ pub struct AppConfig {
     pub max_drawdown_pct: f64,
     pub slippage_bps: u64,           // simulated slippage in basis points for paper trading
     pub trend_reversal_pct: f64,      // % of spike that must reverse to trigger trend_reversed exit
+    pub stop_loss_pct: f64,           // % drop from entry price to trigger stop-loss exit (0 = disabled)
+    pub hold_safety_margin: f64,      // $ margin from price_to_beat to exit in hold mode (e.g., 20 = exit if within $20)
+    pub hold_min_share_price: f64,    // minimum share price to enter hold mode (e.g., 0.80 = 80 cents)
 }
 
 impl AppConfig {
@@ -64,6 +67,9 @@ impl AppConfig {
             max_drawdown_pct: env::var("MAX_DRAWDOWN_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.30),
             slippage_bps: env::var("SLIPPAGE_BPS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
             trend_reversal_pct: env::var("TREND_REVERSAL_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0),
+            stop_loss_pct: env::var("STOP_LOSS_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0),
+            hold_safety_margin: env::var("HOLD_SAFETY_MARGIN").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0),
+            hold_min_share_price: env::var("HOLD_MIN_SHARE_PRICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.80),
         })
     }
 
@@ -81,6 +87,9 @@ impl AppConfig {
         if let Some(v) = json.get("max_daily_loss").and_then(|v| v.as_f64()) { self.max_daily_loss = v; }
         if let Some(v) = json.get("max_exposure_per_market").and_then(|v| v.as_f64()) { self.max_exposure_per_market = v; }
         if let Some(v) = json.get("max_drawdown_pct").and_then(|v| v.as_f64()) { self.max_drawdown_pct = v; }
+        if let Some(v) = json.get("stop_loss_pct").and_then(|v| v.as_f64()) { self.stop_loss_pct = v; }
+        if let Some(v) = json.get("hold_safety_margin").and_then(|v| v.as_f64()) { self.hold_safety_margin = v; }
+        if let Some(v) = json.get("hold_min_share_price").and_then(|v| v.as_f64()) { self.hold_min_share_price = v; }
         Ok(())
     }
 }

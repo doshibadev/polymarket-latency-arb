@@ -351,7 +351,68 @@ impl ArbEngine {
                             }
                         }
                     }
-                    // Force-close all positions if any market is within 5 seconds of ending
+                    // Early exit for losing positions 30 seconds before market end
+                    // This gives us time to exit gracefully instead of being forced out
+                    let now = Self::now_secs();
+                    let early_exit_needed = self.symbol_states.iter()
+                        .filter(|(_, s)| s.market_end_ts.map_or(false, |end| now >= end.saturating_sub(30)))
+                        .map(|(k, _)| k.clone())
+                        .collect::<Vec<_>>();
+                    
+                    for symbol in early_exit_needed {
+                        let positions_to_close: Vec<(usize, f64, String)> = self.wallet.open_positions.iter()
+                            .enumerate()
+                            .filter(|(_, pos)| pos.symbol == symbol)
+                            .filter_map(|(idx, pos)| {
+                                let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
+                                // Check if position is losing (share price dropped from entry)
+                                let is_losing = current_price < pos.entry_price;
+                                if is_losing {
+                                    Some((idx, current_price, pos.symbol.clone()))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        
+                        for (idx, current_price, _sym) in positions_to_close.iter().rev() {
+                            let pos = self.wallet.open_positions.remove(*idx);
+                            
+                            // Mirror to live wallet
+                            if let Some(lw) = &mut self.live_wallet {
+                                if let Some(live_idx) = lw.open_positions.iter().position(|p| p.symbol == pos.symbol && p.direction == pos.direction) {
+                                    lw.close_position_at(live_idx, *current_price, "early_exit_losing").await;
+                                }
+                            }
+                            
+                            let sell_fee = self.wallet.calculate_fee(pos.shares, *current_price);
+                            let net_revenue = (pos.shares * current_price) - sell_fee;
+                            let pnl = net_revenue - (pos.position_size + pos.buy_fee);
+                            self.wallet.balance += net_revenue;
+                            self.wallet.trade_count += 1;
+                            if pnl > 0.0 { self.wallet.wins += 1; } else { self.wallet.losses += 1; }
+                            self.wallet.total_fees_paid += pos.buy_fee + sell_fee;
+                            self.wallet.total_volume += pos.position_size + (pos.shares * current_price);
+                            self.wallet.trade_history.push(crate::execution::paper::TradeRecord {
+                                symbol: pos.symbol.clone(),
+                                r#type: "exit".to_string(),
+                                question: String::new(),
+                                direction: pos.direction.clone(),
+                                entry_price: Some(pos.entry_price),
+                                exit_price: Some(*current_price),
+                                shares: pos.shares,
+                                cost: pos.position_size,
+                                pnl: Some(pnl),
+                                cumulative_pnl: None,
+                                balance_after: None,
+                                timestamp: chrono::Local::now().to_rfc3339(),
+                                close_reason: Some("early_exit_losing".to_string()),
+                            });
+                            info!(symbol=%pos.symbol, pnl=pnl, "Early exit for losing position before market end");
+                        }
+                    }
+                    
+                    // Force-close all positions if any market is within 2 seconds of ending
                     let now = Self::now_secs();
                     let market_ending = self.symbol_states.values()
                         .any(|s| s.market_end_ts.map_or(false, |end| now >= end.saturating_sub(2)));
@@ -478,6 +539,8 @@ impl ArbEngine {
                     state.price_to_beat = Some(update.price);
                     state.price_to_beat_set = true;
                     info!(symbol=%update.symbol, price_to_beat=update.price, "Price to beat set from first Chainlink tick");
+                    // Update wallet with market metadata for hold mode
+                    self.wallet.set_market_metadata(&update.symbol, state.price_to_beat, state.market_end_ts);
                 }
             }
         }
@@ -685,7 +748,16 @@ impl ArbEngine {
         if abs_spike > state.last_spike_usd * 1.1 && cooldown_ok {
             // Get entry price BEFORE open_position (pending entry hasn't been promoted yet)
             let entry_price = self.wallet.get_share_price(symbol, direction);
-            match self.wallet.open_position(symbol, direction, adjusted_spike, threshold_usd) {
+            
+            // Check if we're in HOLD mode (share price > threshold, < 30s remaining)
+            let now_secs = Self::now_secs();
+            let time_remaining = state.market_end_ts.and_then(|end| {
+                if end > now_secs { Some(end - now_secs) } else { None }
+            });
+            let in_hold_mode = entry_price > self.config.hold_min_share_price 
+                && time_remaining.map_or(false, |t| t <= 30);
+            
+            match self.wallet.open_position(symbol, direction, adjusted_spike, threshold_usd, in_hold_mode) {
                 Ok(level) => {
                     state.last_spike_usd = abs_spike;
 

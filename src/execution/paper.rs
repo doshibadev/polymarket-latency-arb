@@ -81,6 +81,8 @@ struct SymbolMarketState {
     pub btc_price_history: [(f64, Instant); 64], // (price, time) for long-baseline spike calc
     pub btc_history_len: usize,
     pub btc_history_idx: usize,
+    pub last_price_to_beat: Option<f64>,  // price_to_beat for hold mode
+    pub last_market_end_ts: Option<u64>,  // market end timestamp for hold mode
 }
 
 impl Default for SymbolMarketState {
@@ -99,6 +101,8 @@ impl Default for SymbolMarketState {
             btc_price_history: [(0.0, Instant::now()); 64],
             btc_history_len: 0,
             btc_history_idx: 0,
+            last_price_to_beat: None,
+            last_market_end_ts: None,
         }
     }
 }
@@ -254,6 +258,12 @@ impl PaperWallet {
     pub fn set_market_info(&mut self, symbol: &str, question: String) {
         let state = self.symbol_states.entry(symbol.to_string()).or_default();
         state.question = question;
+    }
+
+    pub fn set_market_metadata(&mut self, symbol: &str, price_to_beat: Option<f64>, market_end_ts: Option<u64>) {
+        let state = self.symbol_states.entry(symbol.to_string()).or_default();
+        state.last_price_to_beat = price_to_beat;
+        state.last_market_end_ts = market_end_ts;
     }
 
     pub fn reset_prices(&mut self, symbol: &str) {
@@ -433,6 +443,12 @@ impl PaperWallet {
     pub async fn try_close_position(&mut self) -> bool {
         let mut to_close = Vec::new();
 
+        // Calculate current time for hold mode
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         // First pass: collect all data needed for decisions
         for (idx, pos) in self.open_positions.iter().enumerate() {
             let current_price = self.get_share_price(&pos.symbol, &pos.direction);
@@ -446,25 +462,56 @@ impl PaperWallet {
             let current_btc = state.last_binance;
             let held_ms = pos.entry_time.elapsed().as_millis() as u64;
             
+            // Calculate time remaining for hold mode
+            let time_remaining = state.last_market_end_ts.and_then(|end| {
+                if end > now_secs { Some(end - now_secs) } else { None }
+            });
+            
+            // HOLD MODE: share price > threshold AND < 30s remaining
+            // In hold mode, we're likely to win but need to watch BTC closely
+            let in_hold_mode = current_price > self.config.hold_min_share_price 
+                && time_remaining.map_or(false, |t| t <= 30);
+            
+            if in_hold_mode {
+                // In hold mode, only exit if BTC gets too close to price_to_beat
+                // This is our edge: we see BTC moving 1.5-2s before Chainlink updates
+                if let Some(ptb) = state.last_price_to_beat {
+                    if current_btc > 0.0 {
+                        let margin = if pos.direction == "UP" {
+                            current_btc - ptb  // For UP: we win if BTC >= ptb
+                        } else {
+                            ptb - current_btc  // For DOWN: we win if BTC < ptb
+                        };
+                        
+                        // Exit if margin drops below safety threshold
+                        if margin < self.config.hold_safety_margin {
+                            to_close.push((idx, "hold_safety_exit"));
+                            continue;
+                        } else {
+                            // Safe margin, skip all other exits
+                            continue;
+                        }
+                    }
+                }
+                // If we can't check margin, skip other exits anyway (hold mode)
+                continue;
+            }
+            
             // Minimum hold time check - don't exit too early
             // Give Polymarket time to update their chart
             let min_hold_passed = held_ms >= self.config.min_hold_ms;
 
-            // Trend reversed - exit if BTC reverses by X% of the spike magnitude
+            // Trend reversed - exit if BTC crosses back past entry price (complete reversal)
             // This is the only exit that can trigger before min_hold_time
-            // Example: $30 spike, TREND_REVERSAL_PCT=50% -> exit if BTC reverses $15 from entry
-            // For UP: exit if BTC drops by threshold_dollars from entry_btc
-            // For DOWN: exit if BTC rises by threshold_dollars from entry_btc
-            let trend_reversed = if pos.entry_btc > 0.0 && current_btc > 0.0 && pos.entry_spike.abs() > 0.0 {
-                let threshold_dollars = pos.entry_spike.abs() * (self.config.trend_reversal_pct / 100.0);
+            // For UP: we entered on a spike UP, exit if BTC drops below entry_btc
+            // For DOWN: we entered on a spike DOWN, exit if BTC rises above entry_btc
+            let trend_reversed = if pos.entry_btc > 0.0 && current_btc > 0.0 {
                 if pos.direction == "UP" {
-                    // For UP: we entered on a spike up, exit if BTC drops by threshold_dollars
-                    let drop_from_entry = pos.entry_btc - current_btc;
-                    drop_from_entry >= threshold_dollars
+                    // For UP: exit if BTC drops below where we entered
+                    current_btc < pos.entry_btc
                 } else {
-                    // For DOWN: we entered on a spike down, exit if BTC rises by threshold_dollars
-                    let rise_from_entry = current_btc - pos.entry_btc;
-                    rise_from_entry >= threshold_dollars
+                    // For DOWN: exit if BTC rises above where we entered
+                    current_btc > pos.entry_btc
                 }
             } else {
                 false
@@ -504,11 +551,22 @@ impl PaperWallet {
                 t.elapsed().as_millis() >= self.config.spike_faded_ms as u128
             });
 
+            // Stop-loss: exit if share price drops by X% from entry
+            // Works the same for both UP and DOWN - we're long shares, price drop = loss
+            let stop_loss_hit = if self.config.stop_loss_pct > 0.0 && min_hold_passed {
+                let stop_price = pos.entry_price * (1.0 - self.config.stop_loss_pct / 100.0);
+                current_price <= stop_price
+            } else {
+                false
+            };
+
             let near_end = held_ms > 295000;
 
             // Determine exit reason (priority order)
             let reason = if trend_reversed { 
                 Some("trend_reversed") 
+            } else if min_hold_passed && stop_loss_hit { 
+                Some("stop_loss") 
             } else if min_hold_passed && spike_faded_confirmed { 
                 Some("spike_faded") 
             } else if min_hold_passed && near_end { 
@@ -619,7 +677,7 @@ impl PaperWallet {
         closed
     }
 
-    pub fn open_position(&mut self, symbol: &str, direction: &str, spike: f64, threshold_usd: f64) -> std::result::Result<u32, String> {
+    pub fn open_position(&mut self, symbol: &str, direction: &str, spike: f64, threshold_usd: f64, allow_scaling: bool) -> std::result::Result<u32, String> {
         let existing: Vec<_> = self.open_positions.iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
             .collect();
@@ -628,7 +686,8 @@ impl PaperWallet {
             .count();
         let scale_level = (existing.len() + pending_same) as u32 + 1;
 
-        if scale_level > 1 { return Err("MAX_SCALE_LEVEL".to_string()); }
+        // In HOLD mode (allow_scaling=true), ignore MAX_SCALE_LEVEL to add to winning positions
+        if !allow_scaling && scale_level > 1 { return Err("MAX_SCALE_LEVEL".to_string()); }
 
         let entry_price = self.get_share_price(symbol, direction);
         if entry_price <= 0.0 { return Err("NO_PRICE_DATA".to_string()); }
@@ -636,6 +695,17 @@ impl PaperWallet {
         if entry_price < self.config.min_entry_price { return Err("PRICE_TOO_LOW".to_string()); }
 
         let position_size = self.balance * self.portfolio_pct * (1.0 / scale_level as f64);
+        
+        // Position sizing based on share price - scale down for cheaper shares
+        // Cheap shares (< 20 cents) are higher risk, use smaller position size
+        let position_size = if entry_price < 0.20 {
+            position_size * 0.25  // 25% of normal for very cheap shares
+        } else if entry_price < 0.50 {
+            position_size * 0.50  // 50% of normal for cheap shares
+        } else {
+            position_size  // Full size for 50+ cent shares
+        };
+        
         let shares = position_size / entry_price;
         let buy_fee = self.calculate_fee(shares, entry_price);
         if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
