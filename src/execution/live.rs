@@ -380,9 +380,23 @@ impl LiveWallet {
     ) -> Result<String, String> {
         use polymarket_client_sdk::clob::types::Amount;
         for attempt in 0..3u32 {
+            // For market orders:
+            // - BUY: amount is USDC to spend  
+            // - SELL: amount is shares to sell
+            let amount_result = match side {
+                Side::Buy => Amount::usdc(shares * price),  // USDC amount for buys
+                Side::Sell => Amount::shares(shares),       // Shares for sells
+                _ => return Err("Unsupported side".to_string()),
+            };
+            
+            let amount = match amount_result {
+                Ok(a) => a,
+                Err(e) => return Err(format!("Invalid amount: {}", e)),
+            };
+            
             let order = clob.market_order()
                 .token_id(token_id)
-                .amount(Amount::shares(shares).map_err(|e| e.to_string())?)
+                .amount(amount)
                 .price(price)
                 .side(side.clone())
                 .order_type(OrderType::FOK)  // FOK = Fill-Or-Kill (immediate execution with market price)
@@ -533,8 +547,7 @@ impl LiveWallet {
         let shares = position_size / entry_price;
         let buy_fee = shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
 
-        // MINIMUM ORDER SIZE CHECK - matches paper.rs
-        if position_size < 1.0 { cleanup_and_return!("BELOW_MIN_ORDER_SIZE".to_string()); }
+        // Preliminary balance check (will recheck after rounding)
         if (position_size + buy_fee) > self.balance { cleanup_and_return!("INSUFFICIENT_BALANCE".to_string()); }
 
         // ADDITIONAL SAFETY CHECKS for live trading
@@ -565,7 +578,15 @@ impl LiveWallet {
         let market_price = (ask + 0.02).min(0.99);
         
         let rounded_price = Self::round_to_tick(market_price, tick);
-        let rounded_shares = (shares * 100.0).floor() / 100.0;  // Round down to 2 decimal places, NO minimum shares
+        
+        // Round shares to 2 decimal places for Polymarket API
+        // Polymarket requires: maker amount max 2 decimals, taker amount max 4 decimals
+        let rounded_shares = (shares * 100.0).floor() / 100.0;
+        
+        // Skip if rounded to 0 shares
+        if rounded_shares < 0.01 {
+            cleanup_and_return!(format!("SHARES_TOO_SMALL: {:.4} shares rounds to 0", shares));
+        }
         
         // Recalculate actual cost with rounded shares
         let actual_position_size = rounded_shares * entry_price;
