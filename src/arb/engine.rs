@@ -749,6 +749,9 @@ impl ArbEngine {
             // Get entry price BEFORE open_position (pending entry hasn't been promoted yet)
             let entry_price = self.wallet.get_share_price(symbol, direction);
             
+            // Get current BTC price to set entry_btc immediately
+            let current_btc = state.last_binance.map(|(p, _)| p).unwrap_or(0.0);
+            
             // Check if we're in HOLD mode (share price > threshold, < 30s remaining)
             let now_secs = Self::now_secs();
             let time_remaining = state.market_end_ts.and_then(|end| {
@@ -757,7 +760,7 @@ impl ArbEngine {
             let in_hold_mode = entry_price > self.config.hold_min_share_price 
                 && time_remaining.map_or(false, |t| t <= 30);
             
-            match self.wallet.open_position(symbol, direction, adjusted_spike, threshold_usd, in_hold_mode) {
+            match self.wallet.open_position(symbol, direction, adjusted_spike, threshold_usd, in_hold_mode, current_btc) {
                 Ok(level) => {
                     state.last_spike_usd = abs_spike;
 

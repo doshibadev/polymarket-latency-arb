@@ -130,6 +130,7 @@ pub struct PendingEntry {
     pub shares: f64,
     pub buy_fee: f64,
     pub submitted_at: Instant,
+    pub entry_btc: f64,  // BTC price at entry to avoid race condition
 }
 
 pub struct PaperWallet {
@@ -317,14 +318,8 @@ impl PaperWallet {
         for pos in &mut self.open_positions {
             if pos.symbol != symbol { continue; }
             
-            // Initialize entry_btc if not set (first update after position opened)
-            if pos.entry_btc == 0.0 {
-                pos.entry_btc = current_btc;
-                pos.peak_btc = current_btc;
-                pos.trough_btc = current_btc;
-            }
-            
-            // Update peak/trough
+            // entry_btc is now set immediately when position is created
+            // Just update peak/trough here
             if current_btc > pos.peak_btc {
                 pos.peak_btc = current_btc;
             }
@@ -677,7 +672,7 @@ impl PaperWallet {
         closed
     }
 
-    pub fn open_position(&mut self, symbol: &str, direction: &str, spike: f64, threshold_usd: f64, allow_scaling: bool) -> std::result::Result<u32, String> {
+    pub fn open_position(&mut self, symbol: &str, direction: &str, spike: f64, threshold_usd: f64, allow_scaling: bool, current_btc: f64) -> std::result::Result<u32, String> {
         let existing: Vec<_> = self.open_positions.iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
             .collect();
@@ -727,6 +722,7 @@ impl PaperWallet {
             shares,
             buy_fee,
             submitted_at: Instant::now(),
+            entry_btc: current_btc,  // Set BTC price immediately to avoid race condition
         });
 
         Ok(scale_level)
@@ -810,10 +806,10 @@ impl PaperWallet {
                 scale_level: p.scale_level,
                 hold_to_resolution: false,
                 peak_spike: p.spike.abs(),
-                // BTC trailing stop - will be set by engine when it has BTC price
-                entry_btc: 0.0,
-                peak_btc: 0.0,
-                trough_btc: 0.0,
+                // BTC price set immediately at entry to avoid race condition
+                entry_btc: p.entry_btc,
+                peak_btc: p.entry_btc,
+                trough_btc: p.entry_btc,
                 spike_faded_since: None,
             });
             info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened at ask price");
