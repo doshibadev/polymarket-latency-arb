@@ -545,10 +545,15 @@ impl LiveWallet {
 
         let tick = 0.01f64;
         
-        // MARKET ORDER: Use ask price for buys to execute immediately
+        // MARKET ORDER: Use ask price + buffer for buys to ensure immediate fill
         // Get the ask price from cache (real-time WebSocket data)
         let (_bid, ask) = self.get_bid_ask(symbol, direction);
-        let market_price = if ask > 0.0 { ask } else { entry_price };
+        // Add 2 ticks buffer to ensure we cross the spread and fill completely
+        let market_price = if ask > 0.0 { 
+            (ask + 0.02).min(0.99)  // Add 2 cents buffer, cap at 99 cents
+        } else { 
+            entry_price 
+        };
         
         let rounded_price = Self::round_to_tick(market_price, tick);
         let rounded_shares = ((shares * 100.0).floor() / 100.0).max(5.0); // enforce min 5 shares
@@ -561,7 +566,7 @@ impl LiveWallet {
             Err(e) => cleanup_and_return!(e.to_string()),
         };
 
-        // Place REAL market order on Polymarket CLOB - uses ask price to execute immediately
+        // Place REAL market order on Polymarket CLOB - uses ask+buffer to ensure fill
         let order_id = match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, Side::Buy).await {
             Ok(id) => id,
             Err(e) => cleanup_and_return!(e),
@@ -639,10 +644,15 @@ impl LiveWallet {
 
         let tick = 0.01f64;
         
-        // MARKET ORDER: Use bid price for sells to execute immediately
+        // MARKET ORDER: Use bid price - buffer for sells to ensure immediate fill
         // Get the bid price from cache (real-time WebSocket data)
         let (bid, _ask) = self.get_bid_ask(&pos.symbol, &pos.direction);
-        let market_price = if bid > 0.0 { bid } else { current_price };
+        // Subtract 2 ticks buffer to ensure we cross the spread and fill completely
+        let market_price = if bid > 0.0 { 
+            (bid - 0.02).max(0.01)  // Subtract 2 cents buffer, floor at 1 cent
+        } else { 
+            current_price 
+        };
         
         let rounded = Self::round_to_tick(market_price, tick);
         let price = match Decimal::try_from(rounded) {
