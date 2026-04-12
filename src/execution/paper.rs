@@ -27,6 +27,8 @@ pub struct OpenPosition {
     pub trough_btc: f64,           // lowest BTC since entry (for DOWN positions)
     #[serde(skip)]
     pub spike_faded_since: Option<Instant>, // when spike_faded reversal first detected
+    #[serde(skip)]
+    pub trend_reversed_since: Option<Instant>, // when trend_reversed first detected
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -496,21 +498,25 @@ impl PaperWallet {
             // Give Polymarket time to update their chart
             let min_hold_passed = held_ms >= self.config.min_hold_ms;
 
-            // Trend reversed - exit if BTC crosses back past entry price (complete reversal)
-            // This is the only exit that can trigger before min_hold_time
-            // For UP: we entered on a spike UP, exit if BTC drops below entry_btc
-            // For DOWN: we entered on a spike DOWN, exit if BTC rises above entry_btc
-            let trend_reversed = if pos.entry_btc > 0.0 && current_btc > 0.0 {
+            // Trend reversed - exit if BTC reverses by threshold amount from entry
+            // Queued exit: if detected before min_hold_ms, wait until min_hold_ms passes
+            // This lets Polymarket update their chart so share prices move in our favor
+            // For UP: exit if BTC drops $X below entry_btc
+            // For DOWN: exit if BTC rises $X above entry_btc
+            let trend_reversed_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 {
                 if pos.direction == "UP" {
-                    // For UP: exit if BTC drops below where we entered
-                    current_btc < pos.entry_btc
+                    // For UP: exit if BTC drops below threshold
+                    current_btc < (pos.entry_btc - self.config.trend_reversal_threshold)
                 } else {
-                    // For DOWN: exit if BTC rises above where we entered
-                    current_btc > pos.entry_btc
+                    // For DOWN: exit if BTC rises above threshold
+                    current_btc > (pos.entry_btc + self.config.trend_reversal_threshold)
                 }
             } else {
                 false
             };
+            
+            // Trend reversed requires min_hold_ms to pass (queued exit)
+            let trend_reversed = trend_reversed_hit && min_hold_passed;
 
             // Spike faded: exit if BTC reverses by X% of the spike magnitude from peak/trough
             // For UP: peak_btc is highest since entry, exit if BTC drops by threshold_dollars from peak
@@ -587,6 +593,7 @@ impl PaperWallet {
             
             let current_btc = state.last_binance;
             
+            // Track spike_faded_since
             let spike_faded_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 && pos.entry_spike.abs() > 0.0 {
                 let threshold_dollars = pos.entry_spike.abs() * (self.config.spike_faded_pct / 100.0);
                 if pos.direction == "UP" {
@@ -616,6 +623,25 @@ impl PaperWallet {
                 }
             } else {
                 pos.spike_faded_since = None;
+            }
+            
+            // Track trend_reversed_since
+            let trend_reversed_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 {
+                if pos.direction == "UP" {
+                    current_btc < (pos.entry_btc - self.config.trend_reversal_threshold)
+                } else {
+                    current_btc > (pos.entry_btc + self.config.trend_reversal_threshold)
+                }
+            } else {
+                false
+            };
+            
+            if trend_reversed_hit {
+                if pos.trend_reversed_since.is_none() {
+                    pos.trend_reversed_since = Some(Instant::now());
+                }
+            } else {
+                pos.trend_reversed_since = None;
             }
         }
 
@@ -816,6 +842,7 @@ impl PaperWallet {
                 peak_btc: p.entry_btc,
                 trough_btc: p.entry_btc,
                 spike_faded_since: None,
+                trend_reversed_since: None,
             });
             info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened at ask price");
         }

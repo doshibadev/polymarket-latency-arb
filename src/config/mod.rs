@@ -34,6 +34,7 @@ pub struct AppConfig {
     pub hold_safety_margin: f64,      // $ margin from price_to_beat to exit in hold mode (e.g., 20 = exit if within $20)
     pub hold_min_share_price: f64,    // minimum share price to enter hold mode (e.g., 0.80 = 80 cents)
     pub early_exit_loss_pct: f64,     // % loss threshold for early exit before market end (e.g., 0.20 = 20%)
+    pub trend_reversal_threshold: f64, // $ minimum BTC reversal to trigger trend_reversed (e.g., 10.0 = $10)
 }
 
 impl AppConfig {
@@ -72,6 +73,7 @@ impl AppConfig {
             hold_safety_margin: env::var("HOLD_SAFETY_MARGIN").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0),
             hold_min_share_price: env::var("HOLD_MIN_SHARE_PRICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.80),
             early_exit_loss_pct: env::var("EARLY_EXIT_LOSS_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.20),
+            trend_reversal_threshold: env::var("TREND_REVERSAL_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0),
         })
     }
 
@@ -93,6 +95,7 @@ impl AppConfig {
         if let Some(v) = json.get("hold_safety_margin").and_then(|v| v.as_f64()) { self.hold_safety_margin = v; }
         if let Some(v) = json.get("hold_min_share_price").and_then(|v| v.as_f64()) { self.hold_min_share_price = v; }
         if let Some(v) = json.get("early_exit_loss_pct").and_then(|v| v.as_f64()) { self.early_exit_loss_pct = v; }
+        if let Some(v) = json.get("trend_reversal_threshold").and_then(|v| v.as_f64()) { self.trend_reversal_threshold = v; }
         Ok(())
     }
 }

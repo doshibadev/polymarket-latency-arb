@@ -533,6 +533,7 @@ impl LiveWallet {
             peak_btc: current_btc,
             trough_btc: current_btc,
             spike_faded_since: None,
+            trend_reversed_since: None,
         });
 
         Ok(scale_level)

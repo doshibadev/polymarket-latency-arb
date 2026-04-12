@@ -1,6 +1,5 @@
 target/
 .DS_Store
 .env
-Polymarket-Trading-Bot/
 .vscode
-simulation.json
+paper_wallet_state.json
