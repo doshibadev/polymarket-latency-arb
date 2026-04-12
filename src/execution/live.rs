@@ -363,7 +363,11 @@ impl LiveWallet {
     }
 
     fn round_to_tick(price: f64, tick: f64) -> f64 {
-        (price / tick).round() * tick
+        if tick <= 0.0 {
+            price  // Return original price if tick is invalid
+        } else {
+            (price / tick).round() * tick
+        }
     }
 
     async fn post_with_retry(
@@ -435,9 +439,11 @@ impl LiveWallet {
         }
 
         // DRAWDOWN CHECK: Stop if drawdown exceeds threshold
-        let drawdown = (self.starting_balance - self.balance) / self.starting_balance;
-        if drawdown > self.config.max_drawdown_pct {
-            return Err(format!("DRAWDOWN_EXCEEDED: {:.1}% > {:.1}%", drawdown * 100.0, self.config.max_drawdown_pct * 100.0));
+        if self.starting_balance > 0.0 {
+            let drawdown = (self.starting_balance - self.balance) / self.starting_balance;
+            if drawdown > self.config.max_drawdown_pct {
+                return Err(format!("DRAWDOWN_EXCEEDED: {:.1}% > {:.1}%", drawdown * 100.0, self.config.max_drawdown_pct * 100.0));
+            }
         }
 
         // DAILY LOSS LIMIT: Stop if daily losses exceed threshold
@@ -548,15 +554,28 @@ impl LiveWallet {
         // MARKET ORDER: Use ask price + buffer for buys to ensure immediate fill
         // Get the ask price from cache (real-time WebSocket data)
         let (_bid, ask) = self.get_bid_ask(symbol, direction);
+        
+        // Validate ask price exists
+        if ask <= 0.0 {
+            cleanup_and_return!("NO_ASK_PRICE".to_string());
+        }
+        
         // Add 2 ticks buffer to ensure we cross the spread and fill completely
-        let market_price = if ask > 0.0 { 
-            (ask + 0.02).min(0.99)  // Add 2 cents buffer, cap at 99 cents
-        } else { 
-            entry_price 
-        };
+        // Cap at 0.99 to avoid invalid prices
+        let market_price = (ask + 0.02).min(0.99);
         
         let rounded_price = Self::round_to_tick(market_price, tick);
         let rounded_shares = ((shares * 100.0).floor() / 100.0).max(5.0); // enforce min 5 shares
+        
+        // Recalculate actual cost with rounded shares
+        let actual_position_size = rounded_shares * entry_price;
+        let actual_buy_fee = rounded_shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
+        
+        // Final balance check with actual amounts
+        if (actual_position_size + actual_buy_fee) > self.balance {
+            cleanup_and_return!("INSUFFICIENT_BALANCE_AFTER_ROUNDING".to_string());
+        }
+        
         let price = match Decimal::try_from(rounded_price) {
             Ok(p) => p,
             Err(e) => cleanup_and_return!(e.to_string()),
@@ -581,8 +600,8 @@ impl LiveWallet {
 
         self.pending_order_ids.insert(format!("{}:{}", symbol, direction), order_id);
         
-        // Reserve balance immediately - matches paper.rs logic
-        self.balance -= position_size + buy_fee;
+        // Reserve balance with actual amounts
+        self.balance -= actual_position_size + actual_buy_fee;
 
         self.trade_history.push(TradeRecord {
             symbol: symbol.to_string(),
@@ -591,8 +610,8 @@ impl LiveWallet {
             direction: direction.to_string(),
             entry_price: Some(entry_price),
             exit_price: None,
-            shares,
-            cost: position_size,
+            shares: rounded_shares,  // Use rounded shares consistently
+            cost: actual_position_size,
             pnl: None,
             cumulative_pnl: Some(self.cumulative_pnl),
             balance_after: Some(self.balance),
@@ -606,8 +625,8 @@ impl LiveWallet {
             entry_price,
             avg_entry_price: entry_price,
             shares: rounded_shares,
-            position_size,
-            buy_fee,
+            position_size: actual_position_size,
+            buy_fee: actual_buy_fee,
             entry_spike: spike,
             entry_time: Instant::now(),
             highest_price: entry_price,
@@ -647,19 +666,24 @@ impl LiveWallet {
         // MARKET ORDER: Use bid price - buffer for sells to ensure immediate fill
         // Get the bid price from cache (real-time WebSocket data)
         let (bid, _ask) = self.get_bid_ask(&pos.symbol, &pos.direction);
+        
+        // Validate bid price exists
+        if bid <= 0.0 {
+            error!("No bid price available for {} {}", pos.symbol, pos.direction);
+            return;
+        }
+        
         // Subtract 2 ticks buffer to ensure we cross the spread and fill completely
-        let market_price = if bid > 0.0 { 
-            (bid - 0.02).max(0.01)  // Subtract 2 cents buffer, floor at 1 cent
-        } else { 
-            current_price 
-        };
+        // Floor at 0.01 to avoid invalid prices
+        let market_price = (bid - 0.02).max(0.01);
         
         let rounded = Self::round_to_tick(market_price, tick);
         let price = match Decimal::try_from(rounded) {
             Ok(p) => p,
             Err(e) => { error!("Invalid sell price: {}", e); return; }
         };
-        let size = match Decimal::try_from((pos.shares * 100.0).floor() / 100.0) {            Ok(s) => s,
+        let size = match Decimal::try_from((pos.shares * 100.0).floor() / 100.0) {
+            Ok(s) => s,
             Err(e) => { error!("Invalid sell size: {}", e); return; }
         };
 
