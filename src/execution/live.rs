@@ -294,6 +294,11 @@ impl LiveWallet {
         self.token_map.retain(|_, (s, _)| s != symbol);
     }
 
+    /// Clear cached prices for a symbol (used during market transitions)
+    pub fn clear_price_cache(&mut self, symbol: &str) {
+        self.price_cache.remove(symbol);
+    }
+
     /// Update share prices from WebSocket (matches paper.rs)
     pub fn update_share_price(&mut self, symbol: &str, direction: &str, bid: f64, ask: f64) {
         let cache = self.price_cache.entry(symbol.to_string()).or_default();
@@ -320,7 +325,7 @@ impl LiveWallet {
     }
 
     /// Get share price from cache (matches paper.rs)
-    fn get_share_price(&self, symbol: &str, direction: &str) -> f64 {
+    pub fn get_share_price(&self, symbol: &str, direction: &str) -> f64 {
         let (bid, ask) = self.get_bid_ask(symbol, direction);
         if bid > 0.0 && ask > 0.0 {
             (bid + ask) / 2.0
@@ -561,7 +566,10 @@ impl LiveWallet {
         } else {
             position_size  // Full size for 50+ cent shares
         };
-        
+
+        // Cap position size at $20 — enter with max instead of rejecting
+        let position_size = position_size.min(20.0);
+
         let shares = position_size / entry_price;
         let buy_fee = shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
 
@@ -569,15 +577,8 @@ impl LiveWallet {
         if (position_size + buy_fee) > self.balance { cleanup_and_return!("INSUFFICIENT_BALANCE".to_string()); }
 
         // ADDITIONAL SAFETY CHECKS for live trading
-        // These are extra protections beyond paper trading
         if entry_price < 0.05 {
             cleanup_and_return!(format!("CRITICAL_SAFETY: Entry price {:.3} < 0.05 (5 cents minimum)", entry_price));
-        }
-        if position_size > self.balance * 0.25 { 
-            cleanup_and_return!(format!("CRITICAL_SAFETY: Position ${:.2} > 25% of balance ${:.2}", position_size, self.balance)); 
-        }
-        if position_size > 10.0 { 
-            cleanup_and_return!(format!("CRITICAL_SAFETY: Position ${:.2} > $10 maximum per trade", position_size)); 
         }
 
         let tick = 0.01f64;
@@ -646,6 +647,15 @@ impl LiveWallet {
         // Use actual filled amounts (FAK may fill partially)
         let actual_shares: f64 = filled_shares.try_into().unwrap_or(rounded_shares);
         let actual_usdc: f64 = filled_usdc.try_into().unwrap_or(usdc_amount);
+
+        // Guard against zero-fill FAK — don't create phantom positions
+        if actual_shares <= 0.0 || actual_usdc <= 0.0 {
+            self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
+            // Restore the reserved balance since nothing filled
+            self.balance += position_size + buy_fee;
+            warn!(symbol=%symbol, direction=%direction, "FAK got zero fill — no position created");
+            return Err("FAK_NO_FILL".to_string());
+        }
         
         // Recalculate position size based on actual fill
         let final_position_size = actual_usdc;
@@ -707,6 +717,67 @@ impl LiveWallet {
 
     pub async fn close_position_at(&mut self, idx: usize, current_price: f64, reason: &str) {
         if idx >= self.open_positions.len() { return; }
+
+        // Validate we CAN sell before removing the position
+        let pos = &self.open_positions[idx];
+        let token_id = match self.get_token_id(&pos.symbol, &pos.direction) {
+            Some(id) => id,
+            None => {
+                // No token ID = market transitioned. Record loss and remove position.
+                let pos = self.open_positions.remove(idx);
+                let pnl = -(pos.position_size + pos.buy_fee);
+                self.cumulative_pnl += pnl;
+                self.daily_pnl += pnl;
+                self.trade_count += 1;
+                self.losses += 1;
+                self.total_fees_paid += pos.buy_fee;
+                self.trade_history.push(TradeRecord {
+                    symbol: pos.symbol.clone(), r#type: "exit".to_string(), question: String::new(),
+                    direction: pos.direction.clone(), entry_price: Some(pos.entry_price),
+                    exit_price: Some(0.0), shares: pos.shares, cost: pos.position_size,
+                    pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
+                    balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
+                    close_reason: Some(format!("{}_no_token", reason)),
+                });
+                error!("No token ID for {} {} — recorded loss", pos.symbol, pos.direction);
+                return;
+            }
+        };
+
+        let (bid, _ask) = self.get_bid_ask(&pos.symbol, &pos.direction);
+        let tick = 0.01f64;
+
+        // If no bid price or position too small to sell, record as loss instead of silently dropping
+        let market_price = if bid > 0.0 {
+            (bid - 0.02).max(0.01)
+        } else {
+            0.0
+        };
+
+        let can_sell = bid > 0.0 && pos.shares * market_price >= 1.0;
+
+        if !can_sell {
+            // Can't sell — record exit as loss, restore nothing (shares are on-chain but unsellable)
+            let pos = self.open_positions.remove(idx);
+            let pnl = -(pos.position_size + pos.buy_fee);
+            self.cumulative_pnl += pnl;
+            self.daily_pnl += pnl;
+            self.trade_count += 1;
+            self.losses += 1;
+            self.total_fees_paid += pos.buy_fee;
+            self.trade_history.push(TradeRecord {
+                symbol: pos.symbol.clone(), r#type: "exit".to_string(), question: String::new(),
+                direction: pos.direction.clone(), entry_price: Some(pos.entry_price),
+                exit_price: Some(market_price), shares: pos.shares, cost: pos.position_size,
+                pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
+                balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
+                close_reason: Some(format!("{}_unsellable", reason)),
+            });
+            warn!("Position unsellable: {} {} — bid={:.4}, value=${:.2}", pos.symbol, pos.direction, bid, pos.shares * market_price);
+            return;
+        }
+
+        // Now safe to remove — we know we can attempt the sell
         let pos = self.open_positions.remove(idx);
 
         // Cancel pending buy if still open
@@ -717,57 +788,67 @@ impl LiveWallet {
             }
         }
 
-        let token_id = match self.get_token_id(&pos.symbol, &pos.direction) {
-            Some(id) => id,
-            None => { error!("No token ID for {} {}", pos.symbol, pos.direction); return; }
-        };
-
-        let tick = 0.01f64;
-        
-        // MARKET ORDER: Use bid price - buffer for sells to ensure immediate fill
-        // Get the bid price from cache (real-time WebSocket data)
-        let (bid, _ask) = self.get_bid_ask(&pos.symbol, &pos.direction);
-        
-        // Validate bid price exists
-        if bid <= 0.0 {
-            error!("No bid price available for {} {}", pos.symbol, pos.direction);
-            return;
-        }
-        
-        // Subtract 2 ticks buffer to ensure we cross the spread and fill completely
-        // Floor at 0.01 to avoid invalid prices
-        let market_price = (bid - 0.02).max(0.01);
-        
         let rounded = Self::round_to_tick(market_price, tick);
         let price = match Decimal::try_from(rounded) {
             Ok(p) => p,
-            Err(e) => { error!("Invalid sell price: {}", e); return; }
+            Err(e) => {
+                // Record loss on conversion error
+                let pnl = -(pos.position_size + pos.buy_fee);
+                self.cumulative_pnl += pnl;
+                self.daily_pnl += pnl;
+                self.trade_count += 1;
+                self.losses += 1;
+                self.trade_history.push(TradeRecord {
+                    symbol: pos.symbol.clone(), r#type: "exit".to_string(), question: String::new(),
+                    direction: pos.direction.clone(), entry_price: Some(pos.entry_price),
+                    exit_price: Some(0.0), shares: pos.shares, cost: pos.position_size,
+                    pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
+                    balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
+                    close_reason: Some(format!("{}_price_error", reason)),
+                });
+                error!("Invalid sell price: {}", e);
+                return;
+            }
         };
         let size = match Decimal::try_from((pos.shares * 100.0).floor() / 100.0) {
             Ok(s) => s,
-            Err(e) => { error!("Invalid sell size: {}", e); return; }
+            Err(e) => {
+                let pnl = -(pos.position_size + pos.buy_fee);
+                self.cumulative_pnl += pnl;
+                self.daily_pnl += pnl;
+                self.trade_count += 1;
+                self.losses += 1;
+                self.trade_history.push(TradeRecord {
+                    symbol: pos.symbol.clone(), r#type: "exit".to_string(), question: String::new(),
+                    direction: pos.direction.clone(), entry_price: Some(pos.entry_price),
+                    exit_price: Some(0.0), shares: pos.shares, cost: pos.position_size,
+                    pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
+                    balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
+                    close_reason: Some(format!("{}_size_error", reason)),
+                });
+                error!("Invalid sell size: {}", e);
+                return;
+            }
         };
-        
-        // Skip if position is too small (< $1)
-        if pos.shares * market_price < 1.0 {
-            warn!("Position too small to sell: {} shares @ ${:.2}", pos.shares, market_price);
-            return;
-        }
-        
+
         // For sells, usdc param is not used (we use shares), pass 0
         let usdc_for_sell = Decimal::ZERO;
 
-        match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, usdc_for_sell, Side::Sell).await {
+        let sell_succeeded = match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, usdc_for_sell, Side::Sell).await {
             Ok((id, filled_shares, filled_usdc)) => {
                 let fs: f64 = filled_shares.try_into().unwrap_or(0.0);
                 let fu: f64 = filled_usdc.try_into().unwrap_or(0.0);
                 info!(symbol=%pos.symbol, reason=%reason, price=rounded, order_id=%id, filled_shares=fs, filled_usdc=fu, "Live SELL placed (FAK market order)");
+                true
             },
-            Err(e) => error!("Sell order failed: {}", e),
-        }
+            Err(e) => {
+                error!("Sell order failed: {} — recording loss for {} {}", e, pos.symbol, pos.direction);
+                false
+            }
+        };
 
-        // Use actual market price for PnL calculation
-        let net_revenue = pos.shares * market_price;
+        // Always record the exit — use market_price for PnL (sync_from_clob corrects balance later)
+        let net_revenue = if sell_succeeded { pos.shares * market_price } else { 0.0 };
         let pnl = net_revenue - (pos.position_size + pos.buy_fee);
 
         self.balance += net_revenue;
@@ -784,14 +865,14 @@ impl LiveWallet {
             question: String::new(),
             direction: pos.direction.clone(),
             entry_price: Some(pos.entry_price),
-            exit_price: Some(current_price),
+            exit_price: Some(if sell_succeeded { market_price } else { 0.0 }),
             shares: pos.shares,
             cost: pos.position_size,
             pnl: Some(pnl),
             cumulative_pnl: Some(self.cumulative_pnl),
             balance_after: Some(self.balance),
             timestamp: chrono::Local::now().to_rfc3339(),
-            close_reason: Some(reason.to_string()),
+            close_reason: Some(if sell_succeeded { reason.to_string() } else { format!("{}_sell_failed", reason) }),
         });
     }
 }

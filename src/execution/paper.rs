@@ -726,16 +726,14 @@ impl PaperWallet {
         } else {
             position_size  // Full size for 50+ cent shares
         };
-        
+
+        // Cap position size at $20 — enter with max instead of rejecting
+        let position_size = position_size.min(20.0);
+
         let shares = position_size / entry_price;
         let buy_fee = self.calculate_fee(shares, entry_price);
         if (position_size + buy_fee) > self.balance { return Err("INSUFFICIENT_BALANCE".to_string()); }
         if position_size < 1.0 { return Err("BELOW_MIN_ORDER_SIZE".to_string()); }
-        
-        // SAFETY: Max position size check for paper trading
-        if position_size > 20.0 { 
-            return Err(format!("MAX_POSITION_SIZE: ${:.2} > $20 maximum per trade", position_size)); 
-        }
 
         // Reserve balance immediately so concurrent entries don't over-allocate
         self.balance -= position_size + buy_fee;

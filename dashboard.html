@@ -640,6 +640,7 @@
         let startingBalance = 27.0;
         const spikeHistory = { labels: [], data: [] };
         const MAX_SPIKE_POINTS = 120;
+        let wsMessageCount = 0; // Throttle chart updates
 
         // Position age timers
         let positionEntryTimes = []; // ms timestamps
@@ -1018,7 +1019,7 @@
                 `;
             }).join('');
 
-            const signals = (sim.signals || []).slice().reverse();
+            const signals = (sim.signals || []).slice(-50).reverse();
             document.getElementById('signal-log').innerHTML = signals.map(s => `
                 <div class="term-line">
                     <span style="color:var(--text-muted)">${s.t}</span>
@@ -1030,7 +1031,7 @@
                 </div>
             `).join('');
 
-            const settled = (sim.trades || []).filter(t => t.type === 'exit').slice().reverse();
+            const settled = (sim.trades || []).filter(t => t.type === 'exit').slice(-30).reverse();
             document.getElementById('list-settled').innerHTML = settled.map(t => {
                 const pnlPct = t.entry_price && t.exit_price
                     ? ((t.exit_price - t.entry_price) / t.entry_price * 100 * (t.direction === 'DOWN' ? -1 : 1)).toFixed(2)
@@ -1050,7 +1051,9 @@
                 </div>`;
             }).join('');
 
-            if (sim.history && sim.history.length > 0) {
+            // Throttle main chart update to ~1/sec (every 5th WS message at 200ms interval)
+            wsMessageCount++;
+            if (sim.history && sim.history.length > 0 && wsMessageCount % 5 === 0) {
                 myChart.data.labels = sim.history.map(h => h.t);
                 myChart.data.datasets[0].data = sim.history.map(h => h.v);
                 myChart.update();
@@ -1066,7 +1069,6 @@
             ws.onmessage = (e) => {
                 try {
                     const data = JSON.parse(e.data);
-                    console.log('WS message received:', data);
                     updateUI(data);
                 } catch (err) {
                     console.error('Failed to parse WS message:', err);

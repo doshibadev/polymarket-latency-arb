@@ -28,6 +28,8 @@ struct SymbolState {
     pub baseline_1s: Option<f64>,
     // Cooldown after position closes before allowing re-entry
     pub last_close_time: Option<Instant>,
+    // Cooldown after market transition to prevent buying stale tokens
+    pub last_market_update: Option<Instant>,
 }
 
 pub struct ArbEngine {
@@ -380,25 +382,25 @@ impl ArbEngine {
                         .filter(|(_, s)| s.market_end_ts.map_or(false, |end| now >= end.saturating_sub(30)))
                         .map(|(k, _)| k.clone())
                         .collect::<Vec<_>>();
-                    
-                    for symbol in early_exit_needed {
+
+                    for symbol in &early_exit_needed {
                         let positions_to_close: Vec<(usize, f64, String)> = self.wallet.open_positions.iter()
                             .enumerate()
-                            .filter(|(_, pos)| pos.symbol == symbol)
+                            .filter(|(_, pos)| pos.symbol == *symbol)
                             .filter_map(|(idx, pos)| {
                                 let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
-                                
+
                                 // DON'T exit if in HOLD mode (share price > threshold)
                                 // HOLD mode positions are managed by try_close_position with BTC margin checks
                                 if current_price > self.config.hold_min_share_price {
                                     return None;
                                 }
-                                
+
                                 // Only exit if losing by more than threshold from entry
                                 // This prevents exiting positions that are just slightly down
                                 let loss_pct = (pos.entry_price - current_price) / pos.entry_price;
                                 let is_losing_significantly = loss_pct > self.config.early_exit_loss_pct;
-                                
+
                                 if is_losing_significantly {
                                     Some((idx, current_price, pos.symbol.clone()))
                                 } else {
@@ -406,17 +408,17 @@ impl ArbEngine {
                                 }
                             })
                             .collect();
-                        
+
                         for (idx, current_price, _sym) in positions_to_close.iter().rev() {
                             let pos = self.wallet.open_positions.remove(*idx);
-                            
+
                             // Mirror to live wallet
                             if let Some(lw) = &mut self.live_wallet {
                                 if let Some(live_idx) = lw.open_positions.iter().position(|p| p.symbol == pos.symbol && p.direction == pos.direction) {
                                     lw.close_position_at(live_idx, *current_price, "early_exit_losing").await;
                                 }
                             }
-                            
+
                             let sell_fee = self.wallet.calculate_fee(pos.shares, *current_price);
                             let net_revenue = (pos.shares * current_price) - sell_fee;
                             let pnl = net_revenue - (pos.position_size + pos.buy_fee);
@@ -442,12 +444,37 @@ impl ArbEngine {
                             });
                             info!(symbol=%pos.symbol, pnl=pnl, "Early exit for losing position before market end");
                         }
+
+                        // Independent early exit for live wallet positions that have no paper counterpart
+                        if let Some(lw) = &mut self.live_wallet {
+                            let live_to_close: Vec<usize> = lw.open_positions.iter()
+                                .enumerate()
+                                .filter(|(_, pos)| pos.symbol == *symbol)
+                                .filter_map(|(idx, pos)| {
+                                    let current_price = lw.get_share_price(&pos.symbol, &pos.direction);
+                                    if current_price > self.config.hold_min_share_price { return None; }
+                                    let loss_pct = (pos.entry_price - current_price) / pos.entry_price;
+                                    if loss_pct > self.config.early_exit_loss_pct {
+                                        Some(idx)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            for idx in live_to_close.into_iter().rev() {
+                                let price = lw.get_share_price(&lw.open_positions[idx].symbol, &lw.open_positions[idx].direction);
+                                lw.close_position_at(idx, price, "early_exit_losing").await;
+                            }
+                        }
                     }
-                    
+
                     // Force-close all positions if any market is within 2 seconds of ending
                     let now = Self::now_secs();
-                    let market_ending = self.symbol_states.values()
-                        .any(|s| s.market_end_ts.map_or(false, |end| now >= end.saturating_sub(2)));
+                    let ending_symbols: Vec<String> = self.symbol_states.iter()
+                        .filter(|(_, s)| s.market_end_ts.map_or(false, |end| now >= end.saturating_sub(2)))
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    let market_ending = !ending_symbols.is_empty();
                     if market_ending && !self.wallet.open_positions.is_empty() {
                         let indices: Vec<usize> = (0..self.wallet.open_positions.len()).rev().collect();
                         for idx in indices {
@@ -491,6 +518,20 @@ impl ArbEngine {
                             _net_market_value += p.shares * ((b + a) / 2.0);
                         }
                         let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
+                    }
+                    // Independent force-close for live wallet positions (catches orphaned positions)
+                    if market_ending {
+                        if let Some(lw) = &mut self.live_wallet {
+                            let live_to_close: Vec<usize> = lw.open_positions.iter()
+                                .enumerate()
+                                .filter(|(_, pos)| ending_symbols.contains(&pos.symbol))
+                                .map(|(idx, _)| idx)
+                                .collect();
+                            for idx in live_to_close.into_iter().rev() {
+                                let price = lw.get_share_price(&lw.open_positions[idx].symbol, &lw.open_positions[idx].direction);
+                                lw.close_position_at(idx, price, "market_end").await;
+                            }
+                        }
                     }
                     self.broadcast_state();
                 }
@@ -692,9 +733,17 @@ impl ArbEngine {
             state.price_to_beat = None;
             state.price_to_beat_set = false;
             state.btc_history.clear();
+            state.baseline_200ms = None;
+            state.baseline_1s = None;
+            state.spike_confirmed_since = None;
+            state.last_spike_usd = 0.0;
+            // Block spike detection for 3 seconds after market transition
+            state.last_market_update = Some(Instant::now());
         }
-        // Register token IDs in live wallet so it can place orders
+        // Clear old tokens FIRST, then register new ones for live wallet
         if let Some(lw) = &mut self.live_wallet {
+            lw.clear_tokens(&market.symbol);
+            lw.clear_price_cache(&market.symbol);
             lw.register_tokens(&market.up_token_id, &market.down_token_id, &market.symbol);
         }
         self.wallet.set_market_info(&market.symbol, market.question);
@@ -712,6 +761,14 @@ impl ArbEngine {
 
         // Need to re-fetch state to modify it
         let state = self.symbol_states.get_mut(symbol).unwrap();
+
+        // Block spike detection for 3 seconds after market transition
+        // Prevents buying stale tokens from the old market window
+        if let Some(t) = state.last_market_update {
+            if t.elapsed().as_millis() < 3000 {
+                return;
+            }
+        }
 
         // Fast spike detection using pre-computed baseline (no iteration)
         let fast_spike = match state.baseline_200ms {
