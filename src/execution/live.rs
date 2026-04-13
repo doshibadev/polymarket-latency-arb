@@ -440,6 +440,11 @@ impl LiveWallet {
                 }
                 Err(e) => {
                     let msg = format!("Network error: {}", e);
+                    // "no orders found to match" means the order book is empty — don't retry
+                    if msg.contains("no orders found to match") {
+                        warn!("FAK order found no liquidity (empty book) — not retrying");
+                        return Err(msg);
+                    }
                     warn!(attempt=attempt+1, error=%msg, "Order network error");
                     if attempt == 2 { return Err(msg); }
                     tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64)).await;
@@ -583,18 +588,27 @@ impl LiveWallet {
 
         let tick = 0.01f64;
         
-        // MARKET ORDER: Use ask price + buffer for buys to ensure immediate fill
-        // Get the ask price from cache (real-time WebSocket data)
+        // MARKET ORDER: For FAK buys, the price field is the worst-price limit (max we'll pay per share).
+        // The SDK uses this price to calculate taker_amount (shares) and maker_amount (USDC) for the
+        // on-chain order struct. Setting it too far from the actual ask causes mismatched amounts that
+        // won't match resting orders on the book.
+        //
+        // Strategy: use the cached ask + 4 cents buffer. This means:
+        // - We'll fill at the actual ask (or better)
+        // - Max overpay is 4 cents per share above the cached ask
+        // - If the ask has moved more than 4 cents, we don't chase it
         let (_bid, ask) = self.get_bid_ask(symbol, direction);
-        
-        // Validate ask price exists
+
+        // Validate ask price exists (if cache shows no ask, book is likely empty)
         if ask <= 0.0 {
             cleanup_and_return!("NO_ASK_PRICE".to_string());
         }
-        
-        // Add 2 ticks buffer to ensure we cross the spread and fill completely
-        // Cap at 0.99 to avoid invalid prices
-        let market_price = (ask + 0.02).min(0.99);
+
+        // Max overpay: 4 cents above the current best ask, capped at valid price range
+        let market_price = (ask + 0.04).min(0.99);
+
+        info!(symbol=%symbol, direction=%direction, cached_ask=ask, limit_price=market_price,
+              position_size=position_size, "Sending FAK buy order");
         
         let rounded_price = Self::round_to_tick(market_price, tick);
         
@@ -616,9 +630,10 @@ impl LiveWallet {
             cleanup_and_return!(format!("BELOW_MIN_ORDER_SIZE: ${:.2} < $1 minimum", actual_position_size));
         }
         
-        // For FOK market orders, round USDC amount to 2 decimals to avoid precision errors
-        // The API rejects amounts with too many decimal places for FOK orders
-        let usdc_amount = (rounded_shares * rounded_price * 100.0).floor() / 100.0;
+        // For FAK buys, the USDC amount is how much we want to SPEND, not shares × limit_price.
+        // We want to spend our position_size worth of USDC at whatever price the book offers.
+        // Round to 2 decimals as required by Polymarket API.
+        let usdc_amount = (actual_position_size * 100.0).floor() / 100.0;
         
         // Final balance check with actual amounts
         if (actual_position_size + actual_buy_fee) > self.balance {
@@ -747,13 +762,18 @@ impl LiveWallet {
         let tick = 0.01f64;
 
         // If no bid price or position too small to sell, record as loss instead of silently dropping
-        let market_price = if bid > 0.0 {
-            (bid - 0.02).max(0.01)
+        // For FAK sells, the price is the MINIMUM we'll accept per share.
+        // Use bid - 4 cents as our worst acceptable price (matching the buy-side 4c buffer).
+        // The CLOB fills at resting bid prices, so we typically get the actual bid.
+        let market_price = if bid > 0.04 {
+            (bid - 0.04).max(0.01)
+        } else if bid > 0.0 {
+            0.01  // Very low bid — accept anything to exit
         } else {
             0.0
         };
 
-        let can_sell = bid > 0.0 && pos.shares * market_price >= 1.0;
+        let can_sell = bid > 0.0 && pos.shares * bid >= 1.0;  // Use bid for min order check
 
         if !can_sell {
             // Can't sell — record exit as loss, restore nothing (shares are on-chain but unsellable)
@@ -767,12 +787,12 @@ impl LiveWallet {
             self.trade_history.push(TradeRecord {
                 symbol: pos.symbol.clone(), r#type: "exit".to_string(), question: String::new(),
                 direction: pos.direction.clone(), entry_price: Some(pos.entry_price),
-                exit_price: Some(market_price), shares: pos.shares, cost: pos.position_size,
+                exit_price: Some(0.0), shares: pos.shares, cost: pos.position_size,
                 pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
                 balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some(format!("{}_unsellable", reason)),
             });
-            warn!("Position unsellable: {} {} — bid={:.4}, value=${:.2}", pos.symbol, pos.direction, bid, pos.shares * market_price);
+            warn!("Position unsellable: {} {} — bid={:.4}, value=${:.2}", pos.symbol, pos.direction, bid, pos.shares * bid);
             return;
         }
 
