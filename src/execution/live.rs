@@ -649,10 +649,9 @@ impl LiveWallet {
         let actual_usdc: f64 = filled_usdc.try_into().unwrap_or(usdc_amount);
 
         // Guard against zero-fill FAK — don't create phantom positions
+        // Note: balance has NOT been deducted yet (that happens at line 675), so we just clean up and exit
         if actual_shares <= 0.0 || actual_usdc <= 0.0 {
             self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
-            // Restore the reserved balance since nothing filled
-            self.balance += position_size + buy_fee;
             warn!(symbol=%symbol, direction=%direction, "FAK got zero fill — no position created");
             return Err("FAK_NO_FILL".to_string());
         }
@@ -715,7 +714,7 @@ impl LiveWallet {
         Ok(scale_level)
     }
 
-    pub async fn close_position_at(&mut self, idx: usize, current_price: f64, reason: &str) {
+    pub async fn close_position_at(&mut self, idx: usize, _current_price: f64, reason: &str) {
         if idx >= self.open_positions.len() { return; }
 
         // Validate we CAN sell before removing the position
@@ -839,16 +838,23 @@ impl LiveWallet {
                 let fs: f64 = filled_shares.try_into().unwrap_or(0.0);
                 let fu: f64 = filled_usdc.try_into().unwrap_or(0.0);
                 info!(symbol=%pos.symbol, reason=%reason, price=rounded, order_id=%id, filled_shares=fs, filled_usdc=fu, "Live SELL placed (FAK market order)");
-                true
+                // Use actual fill revenue if available, otherwise fallback to estimate
+                if fu > 0.0 { fu } else { pos.shares * market_price }
             },
             Err(e) => {
                 error!("Sell order failed: {} — recording loss for {} {}", e, pos.symbol, pos.direction);
-                false
+                0.0  // No revenue on failure
             }
         };
 
-        // Always record the exit — use market_price for PnL (sync_from_clob corrects balance later)
-        let net_revenue = if sell_succeeded { pos.shares * market_price } else { 0.0 };
+        // sell_succeeded now holds the revenue amount (>0 = success, 0 = failure)
+        let gross_revenue = sell_succeeded;
+        let sell_fee = if gross_revenue > 0.0 {
+            pos.shares * self.config.crypto_fee_rate * pos.entry_price * (1.0 - pos.entry_price)
+        } else {
+            0.0
+        };
+        let net_revenue = gross_revenue - sell_fee;
         let pnl = net_revenue - (pos.position_size + pos.buy_fee);
 
         self.balance += net_revenue;
@@ -856,8 +862,8 @@ impl LiveWallet {
         self.daily_pnl += pnl;
         self.trade_count += 1;
         if pnl > 0.0 { self.wins += 1; } else { self.losses += 1; }
-        self.total_fees_paid += pos.buy_fee;
-        self.total_volume += pos.position_size + (pos.shares * current_price);
+        self.total_fees_paid += pos.buy_fee + sell_fee;
+        self.total_volume += pos.position_size + gross_revenue;
 
         self.trade_history.push(TradeRecord {
             symbol: pos.symbol.clone(),
@@ -865,14 +871,14 @@ impl LiveWallet {
             question: String::new(),
             direction: pos.direction.clone(),
             entry_price: Some(pos.entry_price),
-            exit_price: Some(if sell_succeeded { market_price } else { 0.0 }),
+            exit_price: Some(if gross_revenue > 0.0 { gross_revenue / pos.shares } else { 0.0 }),
             shares: pos.shares,
             cost: pos.position_size,
             pnl: Some(pnl),
             cumulative_pnl: Some(self.cumulative_pnl),
             balance_after: Some(self.balance),
             timestamp: chrono::Local::now().to_rfc3339(),
-            close_reason: Some(if sell_succeeded { reason.to_string() } else { format!("{}_sell_failed", reason) }),
+            close_reason: Some(if gross_revenue > 0.0 { reason.to_string() } else { format!("{}_sell_failed", reason) }),
         });
     }
 }

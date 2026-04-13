@@ -832,6 +832,9 @@
 
         const updateUI = (sim) => {
             if (!sim) return;
+            wsMessageCount++;
+            // Skip heavy DOM/chart updates when tab is hidden (browser backgrounded)
+            if (document.hidden) return;
             const totalVal = sim.total_portfolio_value || 0;
             startingBalance = sim.starting_balance || 27.0;
             const totalPnL = sim.total_pnl || 0;
@@ -931,7 +934,7 @@
                 document.getElementById('spike-threshold-neg').style.left = (50 - threshPct) + '%';
             }
 
-            // Spike mini-chart
+            // Spike mini-chart (throttled to ~1/sec with main chart)
             if (spikeChart) {
                 const now = new Date().toLocaleTimeString([], {hour12:false});
                 spikeHistory.labels.push(now);
@@ -940,9 +943,11 @@
                     spikeHistory.labels.shift();
                     spikeHistory.data.shift();
                 }
-                spikeChart.data.labels = spikeHistory.labels;
-                spikeChart.data.datasets[0].data = spikeHistory.data;
-                spikeChart.update();
+                if (wsMessageCount % 5 === 0) {
+                    spikeChart.data.labels = spikeHistory.labels;
+                    spikeChart.data.datasets[0].data = spikeHistory.data;
+                    spikeChart.update();
+                }
             }
 
             if (m.end_ts) {
@@ -990,7 +995,7 @@
             const feeDrag = (sim.total_volume || 0) > 0 ? ((sim.total_fees || 0) / (sim.total_volume || 1) * 100).toFixed(3) : '0.000';
             document.getElementById('stat-fee-drag').innerText = feeDrag + '%';
 
-            const trades = (sim.trades || []).slice().reverse().slice(0, 30);
+            const trades = (sim.trades || []).slice(-30).reverse();
             document.getElementById('list-trades').innerHTML = trades.map(t => {
                 const isExit = t.type === 'exit';
                 const pnlClass = isExit ? (t.pnl >= 0 ? 'val-up' : 'val-down') : '';
@@ -1052,7 +1057,6 @@
             }).join('');
 
             // Throttle main chart update to ~1/sec (every 5th WS message at 200ms interval)
-            wsMessageCount++;
             if (sim.history && sim.history.length > 0 && wsMessageCount % 5 === 0) {
                 myChart.data.labels = sim.history.map(h => h.t);
                 myChart.data.datasets[0].data = sim.history.map(h => h.v);
