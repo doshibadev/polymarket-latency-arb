@@ -4,7 +4,7 @@ use crate::execution::PaperWallet;
 use crate::execution::LiveWallet;
 use crate::polymarket::{MarketData, SharePriceUpdate};
 use crate::rtds::PriceUpdate;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, broadcast};
 use tracing::{info, warn};
@@ -26,6 +26,13 @@ struct SymbolState {
     // Pre-computed baselines for faster spike detection
     pub baseline_200ms: Option<f64>,
     pub baseline_1s: Option<f64>,
+    pub baseline_5s: Option<f64>,
+    // Decimated price history: 1 sample per ~500ms, 30s window (for trend detection)
+    pub btc_history_slow: VecDeque<(f64, Instant)>,
+    pub baseline_30s: Option<f64>,
+    // Trend magnitudes (binance - baseline) in USD
+    pub trend_5s_usd: f64,
+    pub trend_30s_usd: f64,
     // Cooldown after position closes before allowing re-entry
     pub last_close_time: Option<Instant>,
     // Cooldown after market transition to prevent buying stale tokens
@@ -595,7 +602,7 @@ impl ArbEngine {
                 state.last_binance = Some((update.price, update.timestamp));
                 let now = Instant::now();
                 state.btc_history.push((update.price, now));
-                state.btc_history.retain(|(_, t)| t.elapsed().as_millis() < 2000);
+                state.btc_history.retain(|(_, t)| t.elapsed().as_millis() < 6000);
                 
                 // Update pre-computed baselines for faster spike detection
                 // Find price from ~200ms ago for fast spike
@@ -609,6 +616,37 @@ impl ArbEngine {
                 state.baseline_1s = state.btc_history.iter()
                     .find(|(_, t)| now.duration_since(*t) >= cutoff_1s)
                     .map(|(p, _)| *p);
+
+                // Find price from ~5s ago for trend detection
+                let cutoff_5s = std::time::Duration::from_millis(5000);
+                state.baseline_5s = state.btc_history.iter()
+                    .find(|(_, t)| now.duration_since(*t) >= cutoff_5s)
+                    .map(|(p, _)| *p);
+
+                // Decimated slow buffer: 1 sample per ~500ms, 30s window (for longer trend)
+                let should_sample = state.btc_history_slow.back()
+                    .map(|(_, t)| now.duration_since(*t) >= Duration::from_millis(500))
+                    .unwrap_or(true);
+                if should_sample {
+                    state.btc_history_slow.push_back((update.price, now));
+                    while state.btc_history_slow.front()
+                        .map(|(_, t)| now.duration_since(*t) > Duration::from_secs(31))
+                        .unwrap_or(false)
+                    {
+                        state.btc_history_slow.pop_front();
+                    }
+                }
+                state.baseline_30s = state.btc_history_slow.front()
+                    .filter(|(_, t)| now.duration_since(*t) >= Duration::from_secs(28))
+                    .map(|(p, _)| *p);
+
+                // Compute trend magnitudes
+                state.trend_5s_usd = state.baseline_5s
+                    .map(|base| update.price - base)
+                    .unwrap_or(0.0);
+                state.trend_30s_usd = state.baseline_30s
+                    .map(|base| update.price - base)
+                    .unwrap_or(0.0);
             } else {
                 state.last_chainlink = Some((update.price, update.timestamp));
                 // Use first Chainlink tick of new window as price to beat (fallback)
@@ -735,6 +773,11 @@ impl ArbEngine {
             state.btc_history.clear();
             state.baseline_200ms = None;
             state.baseline_1s = None;
+            state.baseline_5s = None;
+            state.btc_history_slow.clear();
+            state.baseline_30s = None;
+            state.trend_5s_usd = 0.0;
+            state.trend_30s_usd = 0.0;
             state.spike_confirmed_since = None;
             state.last_spike_usd = 0.0;
             // Block spike detection for 3 seconds after market transition
@@ -810,6 +853,98 @@ impl ArbEngine {
         if !spike_sustained || !confirmed {
             return;
         }
+
+        // Extract trend values from state before any other borrows
+        // These are Copy types so they don't extend the borrow
+        let trend_5s = state.trend_5s_usd;
+        let trend_30s = state.trend_30s_usd;
+        let ptb = state.price_to_beat;
+
+        // --- TREND-AWARE ENTRY FILTER ---
+        if self.config.trend_filter_enabled {
+            let spike_direction = adjusted_spike.signum(); // +1.0 = UP spike, -1.0 = DOWN spike
+
+            // Use the stronger trend signal (5s or 30s)
+            let (trend_magnitude, trend_dir) = if trend_30s.abs() > trend_5s.abs() {
+                (trend_30s, trend_30s.signum())
+            } else {
+                (trend_5s, trend_5s.signum())
+            };
+            let trend_abs = trend_magnitude.abs();
+            let is_counter_trend = spike_direction != 0.0
+                && trend_dir != 0.0
+                && spike_direction != trend_dir;
+
+            // Gate 1: Trend-based dynamic threshold
+            // If entering against the trend, require a bigger spike proportional to trend strength
+            if is_counter_trend && trend_abs >= self.config.trend_min_magnitude_usd {
+                let t = ((trend_abs - self.config.trend_min_magnitude_usd)
+                    / (self.config.trend_max_magnitude_usd - self.config.trend_min_magnitude_usd))
+                    .clamp(0.0, 1.0);
+                let multiplier = 1.0 + t * (self.config.counter_trend_multiplier - 1.0);
+                let required_spike = threshold_usd * multiplier;
+
+                if abs_spike < required_spike {
+                    let state = self.symbol_states.get_mut(symbol).unwrap();
+                    let should_log = state.last_rejection.as_ref()
+                        .is_none_or(|(r, t)| r != "COUNTER_TREND" || t.elapsed().as_secs() >= 3);
+                    if should_log {
+                        state.last_rejection = Some(("COUNTER_TREND".to_string(), Instant::now()));
+                        self.add_signal(symbol, direction, adjusted_spike, "REJECTED",
+                            Some(format!("COUNTER_TREND(trend={:.0},need={:.0})", trend_magnitude, required_spike)));
+                    }
+                    return;
+                }
+            }
+
+            // Gate 2: Price-to-beat distance filter
+            // If BTC is far from price_to_beat in the wrong direction, reject or penalize
+            if let Some(price_to_beat) = ptb {
+                let ptb_distance = binance - price_to_beat; // positive = BTC above ptb
+                let trade_is_up = spike_direction > 0.0;
+
+                // Counter-PTB: buying UP when BTC is well below ptb, or DOWN when well above
+                let is_counter_ptb = (trade_is_up && ptb_distance < -self.config.ptb_neutral_zone_usd)
+                    || (!trade_is_up && ptb_distance > self.config.ptb_neutral_zone_usd);
+
+                if is_counter_ptb {
+                    let ptb_abs = ptb_distance.abs();
+
+                    // Hard reject: too far from ptb for this direction to win
+                    if ptb_abs > self.config.ptb_max_counter_distance_usd {
+                        let state = self.symbol_states.get_mut(symbol).unwrap();
+                        let should_log = state.last_rejection.as_ref()
+                            .is_none_or(|(r, t)| r != "PTB_TOO_FAR" || t.elapsed().as_secs() >= 5);
+                        if should_log {
+                            state.last_rejection = Some(("PTB_TOO_FAR".to_string(), Instant::now()));
+                            self.add_signal(symbol, direction, adjusted_spike, "REJECTED",
+                                Some(format!("PTB_TOO_FAR(dist={:.0},max={:.0})", ptb_distance, self.config.ptb_max_counter_distance_usd)));
+                        }
+                        return;
+                    }
+
+                    // Soft penalty: scale threshold up based on distance from ptb
+                    let ptb_t = ((ptb_abs - self.config.ptb_neutral_zone_usd)
+                        / (self.config.ptb_max_counter_distance_usd - self.config.ptb_neutral_zone_usd))
+                        .clamp(0.0, 1.0);
+                    let ptb_multiplier = 1.0 + ptb_t; // 1.0 to 2.0
+                    let required_spike = threshold_usd * ptb_multiplier;
+
+                    if abs_spike < required_spike {
+                        let state = self.symbol_states.get_mut(symbol).unwrap();
+                        let should_log = state.last_rejection.as_ref()
+                            .is_none_or(|(r, t)| r != "PTB_COUNTER" || t.elapsed().as_secs() >= 3);
+                        if should_log {
+                            state.last_rejection = Some(("PTB_COUNTER".to_string(), Instant::now()));
+                            self.add_signal(symbol, direction, adjusted_spike, "REJECTED",
+                                Some(format!("PTB_COUNTER(dist={:.0},need={:.0})", ptb_distance, required_spike)));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
         let (bid, ask) = self.wallet.get_bid_ask(symbol, direction);
         
         if bid <= 0.0 || ask <= 0.0 {

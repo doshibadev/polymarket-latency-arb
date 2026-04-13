@@ -35,6 +35,13 @@ pub struct AppConfig {
     pub hold_min_share_price: f64,    // minimum share price to enter hold mode (e.g., 0.80 = 80 cents)
     pub early_exit_loss_pct: f64,     // % loss threshold for early exit before market end (e.g., 0.20 = 20%)
     pub trend_reversal_threshold: f64, // $ minimum BTC reversal to trigger trend_reversed (e.g., 10.0 = $10)
+    // Trend filter: prevent counter-trend entries
+    pub trend_filter_enabled: bool,          // master switch for trend filter
+    pub trend_min_magnitude_usd: f64,        // minimum trend size (USD) to trigger counter-trend penalty
+    pub counter_trend_multiplier: f64,       // max multiplier for counter-trend threshold (e.g., 2.5x)
+    pub trend_max_magnitude_usd: f64,        // trend size (USD) at which multiplier maxes out
+    pub ptb_neutral_zone_usd: f64,           // within this distance of ptb, no directional penalty
+    pub ptb_max_counter_distance_usd: f64,   // hard reject counter-ptb trades beyond this distance
 }
 
 impl AppConfig {
@@ -74,6 +81,12 @@ impl AppConfig {
             hold_min_share_price: env::var("HOLD_MIN_SHARE_PRICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.80),
             early_exit_loss_pct: env::var("EARLY_EXIT_LOSS_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.20),
             trend_reversal_threshold: env::var("TREND_REVERSAL_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0),
+            trend_filter_enabled: env::var("TREND_FILTER_ENABLED").ok().and_then(|v| v.parse().ok()).unwrap_or(true),
+            trend_min_magnitude_usd: env::var("TREND_MIN_MAGNITUDE_USD").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0),
+            counter_trend_multiplier: env::var("COUNTER_TREND_MULTIPLIER").ok().and_then(|v| v.parse().ok()).unwrap_or(2.5),
+            trend_max_magnitude_usd: env::var("TREND_MAX_MAGNITUDE_USD").ok().and_then(|v| v.parse().ok()).unwrap_or(150.0),
+            ptb_neutral_zone_usd: env::var("PTB_NEUTRAL_ZONE_USD").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0),
+            ptb_max_counter_distance_usd: env::var("PTB_MAX_COUNTER_DISTANCE_USD").ok().and_then(|v| v.parse().ok()).unwrap_or(200.0),
         })
     }
 
@@ -96,6 +109,10 @@ impl AppConfig {
         if let Some(v) = json.get("hold_min_share_price").and_then(|v| v.as_f64()) { self.hold_min_share_price = v; }
         if let Some(v) = json.get("early_exit_loss_pct").and_then(|v| v.as_f64()) { self.early_exit_loss_pct = v; }
         if let Some(v) = json.get("trend_reversal_threshold").and_then(|v| v.as_f64()) { self.trend_reversal_threshold = v; }
+        if let Some(v) = json.get("trend_filter_enabled").and_then(|v| v.as_bool()) { self.trend_filter_enabled = v; }
+        if let Some(v) = json.get("trend_min_magnitude_usd").and_then(|v| v.as_f64()) { self.trend_min_magnitude_usd = v; }
+        if let Some(v) = json.get("counter_trend_multiplier").and_then(|v| v.as_f64()) { self.counter_trend_multiplier = v; }
+        if let Some(v) = json.get("ptb_max_counter_distance_usd").and_then(|v| v.as_f64()) { self.ptb_max_counter_distance_usd = v; }
         Ok(())
     }
 }
