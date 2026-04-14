@@ -673,20 +673,20 @@ impl LiveWallet {
         if entry_price > self.config.max_entry_price { cleanup_and_return!("PRICE_TOO_HIGH".to_string()); }
         if entry_price < self.config.min_entry_price { cleanup_and_return!("PRICE_TOO_LOW".to_string()); }
 
-        // POSITION SIZING - matches paper.rs exactly
-        let position_size = self.balance * self.config.portfolio_pct * (1.0 / scale_level as f64);
-        
-        // Position sizing based on share price - scale down for cheaper shares
-        // Cheap shares (< 20 cents) are higher risk, use smaller position size
-        let position_size = if entry_price < 0.20 {
-            position_size * 0.25  // 25% of normal for very cheap shares
+        // Position sizing based on share price tiers (matches paper.rs)
+        // Cheaper shares = smaller position (higher risk), expensive shares = larger position
+        let portfolio_pct = if entry_price < 0.20 {
+            0.10  // 10% for very cheap shares
         } else if entry_price < 0.50 {
-            position_size * 0.50  // 50% of normal for cheap shares
+            0.15  // 15% for mid-range shares
+        } else if entry_price < 0.75 {
+            0.20  // 20% for higher-priced shares
         } else {
-            position_size  // Full size for 50+ cent shares
+            self.config.portfolio_pct  // config default for 75c+
         };
+        let position_size = self.balance * portfolio_pct * (1.0 / scale_level as f64);
 
-        // Cap position size at $20 — enter with max instead of rejecting
+        // Cap position size at $20
         let position_size = position_size.min(20.0);
 
         let shares = position_size / entry_price;

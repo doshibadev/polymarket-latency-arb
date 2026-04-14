@@ -238,7 +238,24 @@ impl ArbEngine {
             "total_volume": volume,
             "positions": positions,
             "trades": trade_history_ref,
-            "history": self.wallet.history,
+            "history": if is_live {
+                // Live mode: build chart from trade history (only updates on closed trades)
+                let mut chart_points = Vec::new();
+                chart_points.push(json!({ "t": "start", "v": starting_balance }));
+                let mut running_value = starting_balance;
+                for trade in trade_history_ref.iter().filter(|t| t.r#type == "exit") {
+                    if let Some(pnl) = trade.pnl {
+                        running_value += pnl;
+                        chart_points.push(json!({
+                            "t": &trade.timestamp[11..19], // extract HH:MM:SS
+                            "v": running_value
+                        }));
+                    }
+                }
+                json!(chart_points)
+            } else {
+                json!(self.wallet.history)
+            },
             "signals": self.signals,
             "markets": markets,
             "wallet_address": wallet_address,
