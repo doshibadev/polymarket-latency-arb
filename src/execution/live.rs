@@ -143,6 +143,7 @@ pub struct LiveWallet {
     order_timestamps: Vec<std::time::Instant>,    // For rate limiting
     pending_orders: Vec<PendingOrder>,            // Track in-flight orders to prevent race conditions
     price_cache: HashMap<String, SymbolPriceCache>, // Cache WebSocket prices (matches paper.rs)
+    zero_balance_flags: HashMap<String, Instant>, // "symbol:direction" -> first zero-balance detection time
 }
 
 impl LiveWallet {
@@ -214,6 +215,7 @@ impl LiveWallet {
             order_timestamps: Vec::new(),
             pending_orders: Vec::new(),
             price_cache: HashMap::new(),
+            zero_balance_flags: HashMap::new(),
         })
     }
 
@@ -249,31 +251,69 @@ impl LiveWallet {
             });
         }
 
-        // Check actual token balances for positions not tracked by pending_order_ids.
-        // Detects positions where shares were sold externally (e.g., manually on Polymarket)
-        // or consumed by market resolution.
+        // External close detection: check if positions were sold externally or resolved.
+        // Safety guards:
+        //   1. Only check positions older than 30 seconds (CLOB cache is stale after recent buys)
+        //   2. Call update_balance_allowance first to refresh the CLOB's cached on-chain balance
+        //   3. Require zero balance to persist for 10+ seconds (two consecutive sync_from_clob calls)
         use polymarket_client_sdk::clob::types::AssetType;
+        let now = Instant::now();
         let mut stale_indices = Vec::new();
+        let mut still_zero_keys = Vec::new();
+
         for (idx, pos) in self.open_positions.iter().enumerate() {
+            // Skip positions younger than 30 seconds — CLOB cache may not have updated yet
+            if pos.entry_time.elapsed().as_secs() < 30 { continue; }
+
             let key = format!("{}:{}", pos.symbol, pos.direction);
-            if self.pending_order_ids.contains_key(&key) { continue; } // Handled above
+            if self.pending_order_ids.contains_key(&key) { continue; } // Handled by order check above
 
             if let Some(token_id) = self.get_token_id(&pos.symbol, &pos.direction) {
-                let req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                // Force CLOB to refresh its cached on-chain balance before querying
+                let update_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                    .asset_type(AssetType::Conditional)
+                    .token_id(token_id.clone())
+                    .build();
+                let _ = self.clob.update_balance_allowance(update_req).await;
+
+                // Now query the (hopefully fresh) balance
+                let query_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
                     .asset_type(AssetType::Conditional)
                     .token_id(token_id)
                     .build();
-                if let Ok(b) = self.clob.balance_allowance(req).await {
-                    let raw: f64 = b.balance.try_into().unwrap_or(1.0);
+                if let Ok(b) = self.clob.balance_allowance(query_req).await {
+                    let raw: f64 = b.balance.try_into().unwrap_or(1.0); // Default to 1 (keep) on parse error
                     if raw <= 0.0 {
-                        stale_indices.push(idx);
+                        // Zero balance detected — check if this is the second consecutive zero reading
+                        if let Some(first_zero) = self.zero_balance_flags.get(&key) {
+                            if first_zero.elapsed().as_secs() >= 10 {
+                                // Confirmed: zero for 10+ seconds after the 30s grace period
+                                stale_indices.push(idx);
+                                still_zero_keys.push(key.clone());
+                                info!(symbol=%pos.symbol, direction=%pos.direction,
+                                    age_secs=pos.entry_time.elapsed().as_secs(),
+                                    "Position confirmed externally closed (zero balance for 10+s)");
+                            }
+                            // else: not enough time since first zero — keep waiting
+                        } else {
+                            // First time seeing zero — flag it, will recheck on next sync
+                            self.zero_balance_flags.insert(key.clone(), now);
+                            warn!(symbol=%pos.symbol, direction=%pos.direction,
+                                "Zero token balance detected — flagged, will confirm on next sync");
+                        }
+                    } else {
+                        // Balance is positive — clear any previous zero flag
+                        self.zero_balance_flags.remove(&key);
                     }
                 }
             }
         }
-        // Remove positions where shares are 0 (sold externally or resolved)
+
+        // Remove confirmed stale positions
         for idx in stale_indices.into_iter().rev() {
             let pos = self.open_positions.remove(idx);
+            let key = format!("{}:{}", pos.symbol, pos.direction);
+            self.zero_balance_flags.remove(&key);
             let pnl = -(pos.position_size + pos.buy_fee); // Assume total loss (don't know sell price)
             self.cumulative_pnl += pnl;
             self.daily_pnl += pnl;
@@ -288,8 +328,13 @@ impl LiveWallet {
                 balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some("external_close".to_string()),
             });
-            warn!(symbol=%pos.symbol, direction=%pos.direction, "Position removed — shares no longer on-chain (external close/resolution)");
+            warn!(symbol=%pos.symbol, direction=%pos.direction, "Position removed — confirmed no shares on-chain (external close/resolution)");
         }
+
+        // Clean up zero_balance_flags for positions that no longer exist
+        self.zero_balance_flags.retain(|key, _| {
+            self.open_positions.iter().any(|p| format!("{}:{}", p.symbol, p.direction) == *key)
+        });
     }
 
     /// Auto-redeem winning tokens after market resolution (on-chain tx, costs gas)
