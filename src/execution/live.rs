@@ -683,7 +683,11 @@ impl LiveWallet {
         // Track order timestamp for rate limiting
         self.order_timestamps.push(std::time::Instant::now());
 
-        self.pending_order_ids.insert(format!("{}:{}", symbol, direction), order_id);
+        // FAK orders fill instantly — do NOT track in pending_order_ids.
+        // sync_from_clob() checks pending_order_ids against "Live" CLOB orders,
+        // but FAK orders are already Filled/Killed (not "Live"), so tracking them
+        // causes sync_from_clob to silently delete the position 200ms later.
+        // The pending_order_ids map is only for resting limit orders (GTC).
         
         // Reserve balance with actual filled amounts
         self.balance -= final_position_size + final_buy_fee;

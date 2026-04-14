@@ -713,38 +713,8 @@ impl ArbEngine {
         let closed = self.wallet.try_close_position().await;
 
         // Mirror closes to live wallet
-        if closed && self.live_wallet.is_some() {
-            // Find positions that were just closed (in trade_history but not in open_positions)
-            let recent_exits: Vec<_> = self.wallet.trade_history.iter().rev()
-                .take_while(|t| t.r#type == "exit")
-                .filter(|t| {
-                    // Only exits from last 500ms
-                    chrono::Local::now().timestamp_millis() -
-                        chrono::DateTime::parse_from_rfc3339(&t.timestamp)
-                            .map(|d| d.timestamp_millis()).unwrap_or(0) < 500
-                })
-                .map(|t| (t.symbol.clone(), t.direction.clone(), t.exit_price.unwrap_or(0.0), t.close_reason.clone()))
-                .collect();
-
-            for (sym, dir, price, reason) in recent_exits {
-                if let Some(lw) = &mut self.live_wallet {
-                    // Find matching position index in live wallet
-                    if let Some(idx) = lw.open_positions.iter().position(|p| p.symbol == sym && p.direction == dir) {
-                        let reason_str = reason.as_deref().unwrap_or("exit");
-                        // Convert to &'static str for the interface
-                        let r: &'static str = match reason_str {
-                            "trailing_stop" => "trailing_stop",
-                            "trend_reversed" => "trend_reversed",
-                            "spike_faded" => "spike_faded",
-                            "near_end" => "near_end",
-                            "market_end" => "market_end",
-                            "manual" => "manual",
-                            _ => "exit",
-                        };
-                        lw.close_position_at(idx, price, r).await;
-                    }
-                }
-            }
+        if closed {
+            self.mirror_closes_to_live().await;
         }
 
         closed
@@ -757,7 +727,52 @@ impl ArbEngine {
             lw.update_share_price(&update.symbol, &update.direction, update.best_bid, update.best_ask);
         }
         self.wallet.flush_pending();
-        self.wallet.try_close_position().await
+        let closed = self.wallet.try_close_position().await;
+
+        // Mirror closes to live wallet (same as handle_price_update)
+        if closed {
+            self.mirror_closes_to_live().await;
+        }
+
+        closed
+    }
+
+    /// Mirror paper wallet exits to live wallet.
+    /// Scans paper trade_history for recent exits (last 500ms) and closes
+    /// the matching live wallet position with the same reason.
+    async fn mirror_closes_to_live(&mut self) {
+        if self.live_wallet.is_none() { return; }
+
+        let recent_exits: Vec<_> = self.wallet.trade_history.iter().rev()
+            .take_while(|t| t.r#type == "exit")
+            .filter(|t| {
+                // Only exits from last 500ms
+                chrono::Local::now().timestamp_millis() -
+                    chrono::DateTime::parse_from_rfc3339(&t.timestamp)
+                        .map(|d| d.timestamp_millis()).unwrap_or(0) < 500
+            })
+            .map(|t| (t.symbol.clone(), t.direction.clone(), t.exit_price.unwrap_or(0.0), t.close_reason.clone()))
+            .collect();
+
+        for (sym, dir, price, reason) in recent_exits {
+            if let Some(lw) = &mut self.live_wallet {
+                if let Some(idx) = lw.open_positions.iter().position(|p| p.symbol == sym && p.direction == dir) {
+                    let reason_str = reason.as_deref().unwrap_or("exit");
+                    let r: &'static str = match reason_str {
+                        "trailing_stop" => "trailing_stop",
+                        "trend_reversed" => "trend_reversed",
+                        "spike_faded" => "spike_faded",
+                        "stop_loss" => "stop_loss",
+                        "near_end" => "near_end",
+                        "market_end" => "market_end",
+                        "manual" => "manual",
+                        "hold_safety_exit" => "hold_safety_exit",
+                        _ => "exit",
+                    };
+                    lw.close_position_at(idx, price, r).await;
+                }
+            }
+        }
     }
 
     pub async fn handle_market_update(&mut self, market: MarketData) {
