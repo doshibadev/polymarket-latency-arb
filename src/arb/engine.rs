@@ -1083,7 +1083,14 @@ impl ArbEngine {
                                     // Reset spike gate so next spike can trigger a fresh entry
                                     let state = self.symbol_states.get_mut(symbol).unwrap();
                                     state.last_spike_usd = 0.0;
-                                    self.add_signal(&sym, &dir, spk, "REJECTED", Some(format!("LIVE:{}", e)));
+                                    // Dedup live rejections — same 3-second cooldown as paper rejections
+                                    let live_reason = format!("LIVE:{}", e);
+                                    let should_log = state.last_rejection.as_ref()
+                                        .map_or(true, |(r, t)| r != &live_reason || t.elapsed().as_secs() >= 3);
+                                    if should_log {
+                                        state.last_rejection = Some((live_reason.clone(), Instant::now()));
+                                        self.add_signal(&sym, &dir, spk, "REJECTED", Some(live_reason));
+                                    }
                                 }
                             }
                         }

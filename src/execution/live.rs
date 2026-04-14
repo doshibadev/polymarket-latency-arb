@@ -228,7 +228,11 @@ impl LiveWallet {
         // Real balance — ground truth
         if let Ok(b) = self.clob.balance_allowance(Default::default()).await {
             if let Ok(raw) = f64::try_from(b.balance) {
-                self.balance = raw / 1_000_000.0;
+                let new_balance = raw / 1_000_000.0;
+                if (new_balance - self.balance).abs() > 0.01 {
+                    info!(previous=self.balance, on_chain=new_balance, "USDC balance synced from CLOB");
+                }
+                self.balance = new_balance;
             }
         }
 
@@ -283,6 +287,10 @@ impl LiveWallet {
                     .build();
                 if let Ok(b) = self.clob.balance_allowance(query_req).await {
                     let raw: f64 = b.balance.try_into().unwrap_or(1.0); // Default to 1 (keep) on parse error
+                    info!(symbol=%pos.symbol, direction=%pos.direction,
+                          on_chain_shares=raw, tracked_shares=pos.shares,
+                          age_secs=pos.entry_time.elapsed().as_secs(),
+                          "Position balance check");
                     if raw <= 0.0 {
                         // Zero balance detected — check if this is the second consecutive zero reading
                         if let Some(first_zero) = self.zero_balance_flags.get(&key) {
@@ -765,9 +773,13 @@ impl LiveWallet {
         
         // Recalculate position size based on actual fill
         let final_position_size = actual_usdc;
-        let final_buy_fee = actual_shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
-        
-        info!(symbol=%symbol, direction=%direction, requested_shares=rounded_shares, filled_shares=actual_shares, price=rounded_price, order_id=%order_id, "Live BUY placed (FAK market order)");
+        // Compute actual fill price from FAK response (may differ from cached WebSocket price due to book-walking)
+        let actual_entry_price = actual_usdc / actual_shares;
+        let final_buy_fee = actual_shares * self.config.crypto_fee_rate * actual_entry_price * (1.0 - actual_entry_price);
+
+        info!(symbol=%symbol, direction=%direction, cached_price=entry_price, fill_price=actual_entry_price,
+              requested_shares=rounded_shares, filled_shares=actual_shares, filled_usdc=actual_usdc,
+              order_id=%order_id, "Live BUY filled (FAK)");
 
         // Order successfully placed - remove from pending orders
         self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
@@ -789,7 +801,7 @@ impl LiveWallet {
             r#type: "entry".to_string(),
             question: String::new(),
             direction: direction.to_string(),
-            entry_price: Some(entry_price),
+            entry_price: Some(actual_entry_price),
             exit_price: None,
             shares: actual_shares,  // Use actual filled shares
             cost: final_position_size,
@@ -803,14 +815,14 @@ impl LiveWallet {
         self.open_positions.push(OpenPosition {
             symbol: symbol.to_string(),
             direction: direction.to_string(),
-            entry_price,
-            avg_entry_price: entry_price,
+            entry_price: actual_entry_price,
+            avg_entry_price: actual_entry_price,
             shares: actual_shares,  // Use actual filled shares
             position_size: final_position_size,
             buy_fee: final_buy_fee,
             entry_spike: spike,
             entry_time: Instant::now(),
-            highest_price: entry_price,
+            highest_price: actual_entry_price,
             scale_level,
             hold_to_resolution: false,
             peak_spike: spike.abs(),
@@ -820,6 +832,7 @@ impl LiveWallet {
             trough_btc: current_btc,
             spike_faded_since: None,
             trend_reversed_since: None,
+            trailing_stop_activated: false,
         });
 
         Ok(scale_level)
@@ -908,6 +921,13 @@ impl LiveWallet {
         // what we actually hold. Always sell what we ACTUALLY have, not what we think we have.
         let actual_shares = {
             use polymarket_client_sdk::clob::types::AssetType;
+            // Force CLOB to refresh its cached on-chain balance before querying
+            let update_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                .asset_type(AssetType::Conditional)
+                .token_id(token_id.clone())
+                .build();
+            let _ = self.clob.update_balance_allowance(update_req).await;
+
             let balance_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
                 .asset_type(AssetType::Conditional)
                 .token_id(token_id)

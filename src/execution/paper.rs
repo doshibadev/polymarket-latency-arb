@@ -29,6 +29,7 @@ pub struct OpenPosition {
     pub spike_faded_since: Option<Instant>, // when spike_faded reversal first detected
     #[serde(skip)]
     pub trend_reversed_since: Option<Instant>, // when trend_reversed first detected
+    pub trailing_stop_activated: bool,      // true once share price gains activation_pct% from entry
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -291,9 +292,27 @@ impl PaperWallet {
                 if direction == "UP" {
                     // Track highest price reached
                     if mid_price > pos.highest_price { pos.highest_price = mid_price; }
+                    // Activate trailing stop once share price gains enough from entry
+                    if !pos.trailing_stop_activated && self.config.trailing_stop_activation > 0.0 {
+                        let threshold = pos.entry_price * (1.0 + self.config.trailing_stop_activation / 100.0);
+                        if pos.highest_price >= threshold {
+                            pos.trailing_stop_activated = true;
+                            info!(symbol=%symbol, direction=%direction, entry=pos.entry_price, peak=pos.highest_price,
+                                  "Trailing stop ACTIVATED (share price gained {}%+)", self.config.trailing_stop_activation);
+                        }
+                    }
                 } else {
                     // For DOWN positions, track lowest price reached (shares gain value as price drops)
                     if mid_price < pos.highest_price { pos.highest_price = mid_price; }
+                    // Activate trailing stop for DOWN: price must drop enough below entry
+                    if !pos.trailing_stop_activated && self.config.trailing_stop_activation > 0.0 {
+                        let threshold = pos.entry_price * (1.0 - self.config.trailing_stop_activation / 100.0);
+                        if pos.highest_price <= threshold {
+                            pos.trailing_stop_activated = true;
+                            info!(symbol=%symbol, direction=%direction, entry=pos.entry_price, best=pos.highest_price,
+                                  "Trailing stop ACTIVATED (share price dropped {}%+)", self.config.trailing_stop_activation);
+                        }
+                    }
                 }
             }
         }
@@ -597,19 +616,38 @@ impl PaperWallet {
                 false
             };
 
+            // Trailing stop: protect profits by trailing the best share price
+            // Only fires after trailing_stop_activated (share price gained activation_pct% from entry)
+            let trailing_stop_hit = if pos.trailing_stop_activated && self.config.trailing_stop_pct > 0.0 && min_hold_passed {
+                if pos.direction == "UP" {
+                    // For UP: exit if price drops below highest * (1 - pct)
+                    let stop_level = pos.highest_price * (1.0 - self.config.trailing_stop_pct / 100.0);
+                    current_price <= stop_level
+                } else {
+                    // For DOWN: highest_price tracks lowest (best) price
+                    // Exit if price rises above best * (1 + pct)
+                    let stop_level = pos.highest_price * (1.0 + self.config.trailing_stop_pct / 100.0);
+                    current_price >= stop_level
+                }
+            } else {
+                false
+            };
+
             let near_end = held_ms > 295000;
 
             // Determine exit reason (priority order)
-            let reason = if trend_reversed { 
-                Some("trend_reversed") 
-            } else if min_hold_passed && stop_loss_hit { 
-                Some("stop_loss") 
-            } else if min_hold_passed && spike_faded_confirmed { 
-                Some("spike_faded") 
-            } else if min_hold_passed && near_end { 
-                Some("near_end") 
-            } else { 
-                None 
+            let reason = if trend_reversed {
+                Some("trend_reversed")
+            } else if trailing_stop_hit {
+                Some("trailing_stop")
+            } else if min_hold_passed && stop_loss_hit {
+                Some("stop_loss")
+            } else if min_hold_passed && spike_faded_confirmed {
+                Some("spike_faded")
+            } else if min_hold_passed && near_end {
+                Some("near_end")
+            } else {
+                None
             };
 
             if let Some(r) = reason {
@@ -910,6 +948,7 @@ impl PaperWallet {
                 trough_btc: entry_btc,
                 spike_faded_since: None,
                 trend_reversed_since: None,
+                trailing_stop_activated: false,
             });
             info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened at ask price");
         }
