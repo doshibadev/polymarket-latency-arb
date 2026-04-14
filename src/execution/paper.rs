@@ -843,6 +843,16 @@ impl PaperWallet {
             } else {
                 p.entry_price // Fall back to mid price
             };
+
+            // Re-check price bounds at fill time — price may have moved during execution delay
+            // If fill price is now outside min/max, cancel the entry and refund balance
+            if fill_price < self.config.min_entry_price || fill_price > self.config.max_entry_price {
+                self.balance += p.position_size + p.buy_fee;
+                info!(symbol=%p.symbol, direction=%p.direction, fill_price=fill_price,
+                    min=self.config.min_entry_price, max=self.config.max_entry_price,
+                    "Entry cancelled at fill time — price moved outside bounds");
+                continue;
+            }
             
             // Recalculate shares at actual fill price
             let actual_shares = p.position_size / fill_price;

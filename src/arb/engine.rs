@@ -51,6 +51,7 @@ pub struct ArbEngine {
     symbol_states: HashMap<String, SymbolState>,
     signals: Vec<Value>,
     running: bool,
+    last_clob_sync: Option<Instant>,
 }
 
 impl ArbEngine {
@@ -76,6 +77,7 @@ impl ArbEngine {
             symbol_states: HashMap::new(),
             signals: Vec::new(),
             running: false, // starts paused — user must press START
+            last_clob_sync: None,
         }
     }
 
@@ -287,13 +289,8 @@ impl ArbEngine {
                             info!("Settings updated");
                         }
                         Some("start") => {
-                            if let Some(lw) = &self.live_wallet {
-                                info!("Running on-chain approval check before starting live trading...");
-                                match lw.ensure_approvals().await {
-                                    Ok(_) => info!("Approvals confirmed"),
-                                    Err(e) => warn!("Approval check failed (continuing anyway): {}", e),
-                                }
-                            }
+                            // Approvals are permanent on-chain (set during LiveWallet::new).
+                            // Don't check here — it blocks the event loop for seconds.
                             self.running = true;
                             info!("Bot started");
                         }
@@ -311,48 +308,79 @@ impl ArbEngine {
                         Some("close_position") => {
                             if let Some(idx) = cmd.get("index").and_then(|v| v.as_u64()) {
                                 let idx = idx as usize;
-                                if idx < self.wallet.open_positions.len() {
-                                    let pos = self.wallet.open_positions.remove(idx);
-                                    let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
-                                    let sell_fee = self.wallet.calculate_fee(pos.shares, current_price);
-                                    let net_revenue = (pos.shares * current_price) - sell_fee;
-                                    let pnl = net_revenue - (pos.position_size + pos.buy_fee);
-                                    self.wallet.balance += net_revenue;
-                                    self.wallet.trade_count += 1;
-                                    if pnl > 0.0 { self.wallet.wins += 1; } else { self.wallet.losses += 1; }
-                                    self.wallet.total_fees_paid += pos.buy_fee + sell_fee;
-                                    self.wallet.total_volume += pos.position_size + (pos.shares * current_price);
-                                    self.wallet.trade_history.push(crate::execution::paper::TradeRecord {
-                                        symbol: pos.symbol.clone(),
-                                        r#type: "exit".to_string(),
-                                        question: String::new(),
-                                        direction: pos.direction.clone(),
-                                        entry_price: Some(pos.entry_price),
-                                        exit_price: Some(current_price),
-                                        shares: pos.shares,
-                                        cost: pos.position_size,
-                                        pnl: Some(pnl),
-                                        cumulative_pnl: None,
-                                        balance_after: None,
-                                        timestamp: chrono::Local::now().to_rfc3339(),
-                                        close_reason: Some("manual".to_string()),
-                                    });
-                                    info!(symbol=%pos.symbol, pnl=pnl, "Position manually closed");
-                                    // Mirror to live wallet
-                                    if let Some(lw) = &mut self.live_wallet {
-                                        if let Some(live_idx) = lw.open_positions.iter().position(|p| p.symbol == pos.symbol && p.direction == pos.direction) {
-                                            lw.close_position_at(live_idx, current_price, "manual").await;
+
+                                if self.live_wallet.is_some() {
+                                    // LIVE MODE: operate directly on live wallet
+                                    // Dashboard shows lw.open_positions, so the index maps to live wallet
+                                    let lw = self.live_wallet.as_mut().unwrap();
+                                    if idx < lw.open_positions.len() {
+                                        let sym = lw.open_positions[idx].symbol.clone();
+                                        let dir = lw.open_positions[idx].direction.clone();
+                                        let price = lw.get_share_price(&sym, &dir);
+                                        lw.close_position_at(idx, price, "manual").await;
+
+                                        // Also remove matching paper position if it exists
+                                        if let Some(paper_idx) = self.wallet.open_positions.iter()
+                                            .position(|p| p.symbol == sym && p.direction == dir)
+                                        {
+                                            let pos = self.wallet.open_positions.remove(paper_idx);
+                                            let paper_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
+                                            let sell_fee = self.wallet.calculate_fee(pos.shares, paper_price);
+                                            let net_revenue = (pos.shares * paper_price) - sell_fee;
+                                            let pnl = net_revenue - (pos.position_size + pos.buy_fee);
+                                            self.wallet.balance += net_revenue;
+                                            self.wallet.trade_count += 1;
+                                            if pnl > 0.0 { self.wallet.wins += 1; } else { self.wallet.losses += 1; }
+                                            self.wallet.total_fees_paid += pos.buy_fee + sell_fee;
+                                            self.wallet.total_volume += pos.position_size + (pos.shares * paper_price);
+                                            self.wallet.trade_history.push(crate::execution::paper::TradeRecord {
+                                                symbol: pos.symbol.clone(), r#type: "exit".to_string(),
+                                                question: String::new(), direction: pos.direction.clone(),
+                                                entry_price: Some(pos.entry_price), exit_price: Some(paper_price),
+                                                shares: pos.shares, cost: pos.position_size, pnl: Some(pnl),
+                                                cumulative_pnl: None, balance_after: None,
+                                                timestamp: chrono::Local::now().to_rfc3339(),
+                                                close_reason: Some("manual".to_string()),
+                                            });
                                         }
+                                        info!(symbol=%sym, direction=%dir, "Position manually closed (live mode)");
+                                    } else {
+                                        warn!(idx=idx, live_len=lw.open_positions.len(), "Close button: index out of bounds for live wallet");
                                     }
-                                    // Update chart history
-                                    let mut _net_market_value = 0.0;
-                                    for p in &self.wallet.open_positions {
-                                        let (b, a) = self.wallet.get_bid_ask(&p.symbol, &p.direction);
-                                        _net_market_value += p.shares * ((b + a) / 2.0);
+                                } else {
+                                    // PAPER MODE: existing logic
+                                    if idx < self.wallet.open_positions.len() {
+                                        let pos = self.wallet.open_positions.remove(idx);
+                                        let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
+                                        let sell_fee = self.wallet.calculate_fee(pos.shares, current_price);
+                                        let net_revenue = (pos.shares * current_price) - sell_fee;
+                                        let pnl = net_revenue - (pos.position_size + pos.buy_fee);
+                                        self.wallet.balance += net_revenue;
+                                        self.wallet.trade_count += 1;
+                                        if pnl > 0.0 { self.wallet.wins += 1; } else { self.wallet.losses += 1; }
+                                        self.wallet.total_fees_paid += pos.buy_fee + sell_fee;
+                                        self.wallet.total_volume += pos.position_size + (pos.shares * current_price);
+                                        self.wallet.trade_history.push(crate::execution::paper::TradeRecord {
+                                            symbol: pos.symbol.clone(),
+                                            r#type: "exit".to_string(),
+                                            question: String::new(),
+                                            direction: pos.direction.clone(),
+                                            entry_price: Some(pos.entry_price),
+                                            exit_price: Some(current_price),
+                                            shares: pos.shares,
+                                            cost: pos.position_size,
+                                            pnl: Some(pnl),
+                                            cumulative_pnl: None,
+                                            balance_after: None,
+                                            timestamp: chrono::Local::now().to_rfc3339(),
+                                            close_reason: Some("manual".to_string()),
+                                        });
+                                        info!(symbol=%pos.symbol, pnl=pnl, "Position manually closed");
                                     }
-                                    let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
-                                    self.broadcast_state();
                                 }
+                                // Update chart history
+                                let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
+                                self.broadcast_state();
                             }
                         }
                         _ => {
@@ -363,9 +391,34 @@ impl ArbEngine {
                     }
                 }
                 _ = broadcast_timer.tick() => {
-                    // Sync live wallet state from Polymarket (ground truth)
+                    // Sync live wallet state from Polymarket (throttled to every 5s to avoid blocking event loop)
                     if let Some(lw) = &mut self.live_wallet {
-                        lw.sync_from_clob().await;
+                        let should_sync = self.last_clob_sync.map_or(true, |t| t.elapsed().as_secs() >= 5);
+                        if should_sync {
+                            lw.sync_from_clob().await;
+                            self.last_clob_sync = Some(Instant::now());
+                        }
+                    }
+
+                    // Retry orphaned live positions — positions that exist in live wallet but not in paper wallet
+                    // This happens when paper closes successfully but the live sell fails and pushes the position back
+                    if let Some(lw) = &mut self.live_wallet {
+                        let orphaned: Vec<usize> = lw.open_positions.iter()
+                            .enumerate()
+                            .filter(|(_, lp)| {
+                                // Orphan = no matching paper position AND no matching pending entry
+                                !self.wallet.open_positions.iter().any(|pp| pp.symbol == lp.symbol && pp.direction == lp.direction)
+                                && !self.wallet.pending_entries.iter().any(|pe| pe.symbol == lp.symbol && pe.direction == lp.direction)
+                            })
+                            .map(|(idx, _)| idx)
+                            .collect();
+                        for idx in orphaned.into_iter().rev() {
+                            let sym = lw.open_positions[idx].symbol.clone();
+                            let dir = lw.open_positions[idx].direction.clone();
+                            let price = lw.get_share_price(&sym, &dir);
+                            info!(symbol=%sym, direction=%dir, "Retrying sell for orphaned live position");
+                            lw.close_position_at(idx, price, "orphan_retry").await;
+                        }
                     }
 
                     // Auto-redeem resolved markets in live mode

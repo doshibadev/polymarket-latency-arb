@@ -244,9 +244,51 @@ impl LiveWallet {
                 let key = format!("{}:{}", pos.symbol, pos.direction);
                 match self.pending_order_ids.get(&key) {
                     Some(id) => live_ids.contains(id),
-                    None => true, // no pending order = already filled
+                    None => true, // no pending order = already filled, check token balance below
                 }
             });
+        }
+
+        // Check actual token balances for positions not tracked by pending_order_ids.
+        // Detects positions where shares were sold externally (e.g., manually on Polymarket)
+        // or consumed by market resolution.
+        use polymarket_client_sdk::clob::types::AssetType;
+        let mut stale_indices = Vec::new();
+        for (idx, pos) in self.open_positions.iter().enumerate() {
+            let key = format!("{}:{}", pos.symbol, pos.direction);
+            if self.pending_order_ids.contains_key(&key) { continue; } // Handled above
+
+            if let Some(token_id) = self.get_token_id(&pos.symbol, &pos.direction) {
+                let req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                    .asset_type(AssetType::Conditional)
+                    .token_id(token_id)
+                    .build();
+                if let Ok(b) = self.clob.balance_allowance(req).await {
+                    let raw: f64 = b.balance.try_into().unwrap_or(1.0);
+                    if raw <= 0.0 {
+                        stale_indices.push(idx);
+                    }
+                }
+            }
+        }
+        // Remove positions where shares are 0 (sold externally or resolved)
+        for idx in stale_indices.into_iter().rev() {
+            let pos = self.open_positions.remove(idx);
+            let pnl = -(pos.position_size + pos.buy_fee); // Assume total loss (don't know sell price)
+            self.cumulative_pnl += pnl;
+            self.daily_pnl += pnl;
+            self.trade_count += 1;
+            self.losses += 1;
+            self.total_fees_paid += pos.buy_fee;
+            self.trade_history.push(TradeRecord {
+                symbol: pos.symbol.clone(), r#type: "exit".to_string(), question: String::new(),
+                direction: pos.direction.clone(), entry_price: Some(pos.entry_price),
+                exit_price: Some(0.0), shares: pos.shares, cost: pos.position_size,
+                pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
+                balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
+                close_reason: Some("external_close".to_string()),
+            });
+            warn!(symbol=%pos.symbol, direction=%pos.direction, "Position removed — shares no longer on-chain (external close/resolution)");
         }
     }
 
