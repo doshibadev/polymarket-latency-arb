@@ -959,11 +959,12 @@ impl LiveWallet {
             }
         };
 
-        // Try selling up to 3 times: first with tracked shares, then with CLOB-queried balance
+        // Try selling up to 5 times: first with tracked shares, then with CLOB-queried balance
+        // Covers the ~2-4s CLOB cache sync delay after a buy
         let mut current_sell_shares = sell_shares;
         let mut sell_result = None;
 
-        for sell_attempt in 0..3u32 {
+        for sell_attempt in 0..5u32 {
             let size = match Decimal::try_from(current_sell_shares) {
                 Ok(s) => s,
                 Err(e) => {
@@ -983,10 +984,16 @@ impl LiveWallet {
                     sell_result = Some(if fu > 0.0 { fu } else { pos.shares * market_price });
                     break;
                 }
-                Err(e) if e.contains("not enough balance") && sell_attempt < 2 => {
+                Err(e) if e.contains("not enough balance") && sell_attempt < 4 => {
                     // CLOB says we don't have enough shares — refresh balance and retry
+                    let wait_ms = match sell_attempt {
+                        0 => 300,   // Quick first retry
+                        1 => 700,   // Give CLOB more time
+                        2 => 1000,  // Even more time
+                        _ => 1500,  // Last chance
+                    };
                     warn!(symbol=%pos.symbol, attempt=sell_attempt+1,
-                          tried_shares=current_sell_shares,
+                          tried_shares=current_sell_shares, wait_ms=wait_ms,
                           "Sell rejected (not enough balance) — refreshing and retrying");
 
                     use polymarket_client_sdk::clob::types::AssetType;
@@ -996,8 +1003,7 @@ impl LiveWallet {
                         .build();
                     let _ = self.clob.update_balance_allowance(update_req).await;
 
-                    // Short delay to let CLOB sync
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
 
                     let balance_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
                         .asset_type(AssetType::Conditional)
@@ -1010,11 +1016,8 @@ impl LiveWallet {
                             current_sell_shares = (actual * 100.0).floor() / 100.0;
                             info!(symbol=%pos.symbol, actual_shares=actual, selling=current_sell_shares,
                                   "Refreshed share balance, retrying sell");
-                        } else {
-                            // Still 0 — wait longer and retry once more
-                            warn!(symbol=%pos.symbol, raw=raw, "Balance still 0 after refresh, waiting 1s...");
-                            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                         }
+                        // If still 0, just try again with same shares — CLOB might sync between now and next attempt
                     }
                 }
                 Err(e) => {
