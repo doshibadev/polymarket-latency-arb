@@ -1115,13 +1115,11 @@ impl ArbEngine {
                                 }
                                 Err(e) => {
                                     // Live wallet failed — roll back the paper wallet entry
-                                    // Otherwise paper wallet has an orphaned position that blocks
-                                    // all future entries with MAX_SCALE_LEVEL
                                     self.wallet.rollback_pending_entry(&sym, &dir);
-                                    // Reset spike gate so next spike can trigger a fresh entry
+                                    // Keep last_spike_usd so the same spike doesn't re-trigger
+                                    // (it already failed, no point retrying the same magnitude)
+                                    // A NEW bigger spike (>1.1x) will still get through via line 1072
                                     let state = self.symbol_states.get_mut(symbol).unwrap();
-                                    state.last_spike_usd = 0.0;
-                                    // Dedup live rejections — same 3-second cooldown as paper rejections
                                     let live_reason = format!("LIVE:{}", e);
                                     let should_log = state.last_rejection.as_ref()
                                         .map_or(true, |(r, t)| r != &live_reason || t.elapsed().as_secs() >= 3);
