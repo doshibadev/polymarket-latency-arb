@@ -402,22 +402,28 @@ impl ArbEngine {
 
                     // Retry orphaned live positions — positions that exist in live wallet but not in paper wallet
                     // This happens when paper closes successfully but the live sell fails and pushes the position back
+                    // Throttled to every 5 seconds to avoid hammering the API on repeated failures
                     if let Some(lw) = &mut self.live_wallet {
                         let orphaned: Vec<usize> = lw.open_positions.iter()
                             .enumerate()
                             .filter(|(_, lp)| {
                                 // Orphan = no matching paper position AND no matching pending entry
+                                // AND position is older than 5 seconds (avoid racing with fresh entries)
                                 !self.wallet.open_positions.iter().any(|pp| pp.symbol == lp.symbol && pp.direction == lp.direction)
                                 && !self.wallet.pending_entries.iter().any(|pe| pe.symbol == lp.symbol && pe.direction == lp.direction)
+                                && lp.entry_time.elapsed().as_secs() >= 5
                             })
                             .map(|(idx, _)| idx)
                             .collect();
-                        for idx in orphaned.into_iter().rev() {
-                            let sym = lw.open_positions[idx].symbol.clone();
-                            let dir = lw.open_positions[idx].direction.clone();
-                            let price = lw.get_share_price(&sym, &dir);
-                            info!(symbol=%sym, direction=%dir, "Retrying sell for orphaned live position");
-                            lw.close_position_at(idx, price, "orphan_retry").await;
+                        // Only retry if we're on the 5-second sync boundary (same cadence as sync_from_clob)
+                        if !orphaned.is_empty() && self.last_clob_sync.map_or(true, |t| t.elapsed().as_millis() < 500) {
+                            for idx in orphaned.into_iter().rev() {
+                                let sym = lw.open_positions[idx].symbol.clone();
+                                let dir = lw.open_positions[idx].direction.clone();
+                                let price = lw.get_share_price(&sym, &dir);
+                                info!(symbol=%sym, direction=%dir, "Retrying sell for orphaned live position");
+                                lw.close_position_at(idx, price, "orphan_retry").await;
+                            }
                         }
                     }
 

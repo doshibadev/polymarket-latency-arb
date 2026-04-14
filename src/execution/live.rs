@@ -287,11 +287,13 @@ impl LiveWallet {
                     .build();
                 if let Ok(b) = self.clob.balance_allowance(query_req).await {
                     let raw: f64 = b.balance.try_into().unwrap_or(1.0); // Default to 1 (keep) on parse error
+                    // Conditional token balances are in atomic units, divide by 1e6
+                    let shares = raw / 1_000_000.0;
                     info!(symbol=%pos.symbol, direction=%pos.direction,
-                          on_chain_shares=raw, tracked_shares=pos.shares,
+                          on_chain_raw=raw, on_chain_shares=shares, tracked_shares=pos.shares,
                           age_secs=pos.entry_time.elapsed().as_secs(),
                           "Position balance check");
-                    if raw <= 0.0 {
+                    if shares < 0.001 {
                         // Zero balance detected — check if this is the second consecutive zero reading
                         if let Some(first_zero) = self.zero_balance_flags.get(&key) {
                             if first_zero.elapsed().as_secs() >= 10 {
@@ -947,11 +949,13 @@ impl LiveWallet {
             match self.clob.balance_allowance(balance_req).await {
                 Ok(b) => {
                     let raw: f64 = b.balance.try_into().unwrap_or(0.0);
-                    if raw > 0.0 {
-                        info!(symbol=%pos.symbol, tracked=pos.shares, actual=raw, "Queried actual share balance from CLOB");
-                        raw
+                    // Conditional token balances are in atomic units (like USDC), divide by 1e6
+                    let shares = raw / 1_000_000.0;
+                    if shares > 0.001 {
+                        info!(symbol=%pos.symbol, tracked=pos.shares, actual_raw=raw, actual_shares=shares, "Queried actual share balance from CLOB");
+                        shares
                     } else {
-                        warn!(symbol=%pos.symbol, "CLOB returned 0 shares — using tracked shares with 3% haircut");
+                        warn!(symbol=%pos.symbol, raw_balance=raw, "CLOB returned ~0 shares — using tracked shares with 3% haircut");
                         pos.shares * 0.97
                     }
                 }
