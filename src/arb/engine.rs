@@ -1097,6 +1097,20 @@ impl ArbEngine {
                         if let Some(lw) = &mut self.live_wallet {
                             match lw.open_position(&sym, &dir, spk, thresh, in_hold_mode, btc).await {
                                 Ok(live_level) => {
+                                    // Sync paper wallet's pending entry to match live fill exactly.
+                                    // This ensures paper and live positions are identical (same price,
+                                    // shares, cost) so exit decisions from paper correctly apply to live.
+                                    if let Some(live_pos) = lw.open_positions.last() {
+                                        if live_pos.symbol == sym && live_pos.direction == dir {
+                                            self.wallet.sync_pending_to_live_fill(
+                                                &sym, &dir,
+                                                live_pos.entry_price,
+                                                live_pos.shares,
+                                                live_pos.position_size,
+                                                live_pos.buy_fee,
+                                            );
+                                        }
+                                    }
                                     self.add_signal(&sym, &dir, spk, "EXECUTED", Some(format!("LIVE_LEVEL_{}", live_level)));
                                 }
                                 Err(e) => {

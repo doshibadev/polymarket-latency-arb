@@ -134,6 +134,7 @@ pub struct PendingEntry {
     pub buy_fee: f64,
     pub submitted_at: Instant,
     pub entry_btc: f64,  // BTC price at entry to avoid race condition
+    pub live_synced: bool, // true if synced from live fill — skip recalculation in flush_pending
 }
 
 pub struct PaperWallet {
@@ -840,6 +841,7 @@ impl PaperWallet {
             buy_fee,
             submitted_at: Instant::now(),
             entry_btc: current_btc,  // Set BTC price immediately to avoid race condition
+            live_synced: false,
         });
 
         Ok(scale_level)
@@ -852,6 +854,41 @@ impl PaperWallet {
             let entry = self.pending_entries.remove(idx);
             self.balance += entry.position_size + entry.buy_fee;
             info!(symbol=%symbol, direction=%direction, restored=entry.position_size + entry.buy_fee, "Rolled back paper entry (live wallet failed)");
+        }
+    }
+
+    /// Sync a pending paper entry to match the live wallet's actual fill.
+    /// This ensures paper and live positions are identical so exit decisions apply correctly.
+    /// Called after live wallet fills an order — adjusts the pending entry's price, shares,
+    /// position_size, and fees to match the real fill.
+    pub fn sync_pending_to_live_fill(
+        &mut self,
+        symbol: &str,
+        direction: &str,
+        live_entry_price: f64,
+        live_shares: f64,
+        live_position_size: f64,
+        live_buy_fee: f64,
+    ) {
+        if let Some(entry) = self.pending_entries.iter_mut().find(|p| p.symbol == symbol && p.direction == direction) {
+            let old_reserved = entry.position_size + entry.buy_fee;
+            let new_reserved = live_position_size + live_buy_fee;
+
+            // Adjust balance: refund old reservation, apply new one
+            self.balance += old_reserved;
+            self.balance -= new_reserved;
+
+            info!(symbol=%symbol, direction=%direction,
+                  paper_price=entry.entry_price, live_price=live_entry_price,
+                  paper_shares=entry.shares, live_shares=live_shares,
+                  paper_cost=entry.position_size, live_cost=live_position_size,
+                  "Paper entry synced to live fill");
+
+            entry.entry_price = live_entry_price;
+            entry.shares = live_shares;
+            entry.position_size = live_position_size;
+            entry.buy_fee = live_buy_fee;
+            entry.live_synced = true;
         }
     }
 
@@ -874,41 +911,48 @@ impl PaperWallet {
 
         for p in promoted {
             let state = self.symbol_states.get(&p.symbol).cloned().unwrap_or_default();
-            
-            // USE ACTUAL SPREAD FROM ORDERBOOK (not simulated)
-            // For market BUY orders: we pay the ASK price, not the mid
-            // This is real slippage from the actual orderbook
-            let (_bid, ask) = self.get_bid_ask(&p.symbol, &p.direction);
-            
-            // If we have real orderbook data, use the ask price for buys
-            // Otherwise fall back to mid price
-            let fill_price = if ask > 0.0 {
-                ask // Market buy fills at ask
-            } else {
-                p.entry_price // Fall back to mid price
-            };
 
-            // Re-check price bounds at fill time — price may have moved during execution delay
-            // If fill price is now outside min/max, cancel the entry and refund balance
-            if fill_price < self.config.min_entry_price || fill_price > self.config.max_entry_price {
-                self.balance += p.position_size + p.buy_fee;
-                info!(symbol=%p.symbol, direction=%p.direction, fill_price=fill_price,
-                    min=self.config.min_entry_price, max=self.config.max_entry_price,
-                    "Entry cancelled at fill time — price moved outside bounds");
-                continue;
-            }
-            
-            // Recalculate shares at actual fill price
-            let actual_shares = p.position_size / fill_price;
-            let actual_fee = self.calculate_fee(actual_shares, fill_price);
-            
-            // Adjust balance if fee changed
-            let fee_diff = actual_fee - p.buy_fee;
-            if fee_diff > 0.0 && self.balance >= fee_diff {
-                self.balance -= fee_diff;
-            } else if fee_diff < 0.0 {
-                self.balance -= fee_diff; // Add back savings
-            }
+            // If this entry was synced from a live fill, use exact values — no recalculation
+            let (fill_price, actual_shares, actual_fee) = if p.live_synced {
+                (p.entry_price, p.shares, p.buy_fee)
+            } else {
+                // USE ACTUAL SPREAD FROM ORDERBOOK (not simulated)
+                // For market BUY orders: we pay the ASK price, not the mid
+                // This is real slippage from the actual orderbook
+                let (_bid, ask) = self.get_bid_ask(&p.symbol, &p.direction);
+
+                // If we have real orderbook data, use the ask price for buys
+                // Otherwise fall back to mid price
+                let fp = if ask > 0.0 {
+                    ask // Market buy fills at ask
+                } else {
+                    p.entry_price // Fall back to mid price
+                };
+
+                // Re-check price bounds at fill time — price may have moved during execution delay
+                // If fill price is now outside min/max, cancel the entry and refund balance
+                if fp < self.config.min_entry_price || fp > self.config.max_entry_price {
+                    self.balance += p.position_size + p.buy_fee;
+                    info!(symbol=%p.symbol, direction=%p.direction, fill_price=fp,
+                        min=self.config.min_entry_price, max=self.config.max_entry_price,
+                        "Entry cancelled at fill time — price moved outside bounds");
+                    continue;
+                }
+
+                // Recalculate shares at actual fill price
+                let shares = p.position_size / fp;
+                let fee = self.calculate_fee(shares, fp);
+
+                // Adjust balance if fee changed
+                let fee_diff = fee - p.buy_fee;
+                if fee_diff > 0.0 && self.balance >= fee_diff {
+                    self.balance -= fee_diff;
+                } else if fee_diff < 0.0 {
+                    self.balance -= fee_diff; // Add back savings
+                }
+
+                (fp, shares, fee)
+            };
             
             self.trade_history.push(TradeRecord {
                 symbol: p.symbol.clone(),
