@@ -498,32 +498,68 @@ impl PaperWallet {
             // Give Polymarket time to update their chart
             let min_hold_passed = held_ms >= self.config.min_hold_ms;
 
-            // Trend reversed - exit if BTC reverses by threshold amount from entry
-            // Queued exit: if detected before min_hold_ms, wait until min_hold_ms passes
-            // This lets Polymarket update their chart so share prices move in our favor
-            // For UP: exit if BTC drops $X below entry_btc
-            // For DOWN: exit if BTC rises $X above entry_btc
+            // PTB-dynamic exit thresholds: adjust based on distance from price_to_beat
+            // Positive margin = winning side, negative = losing side
+            // Dead zone: -$30 to +$30 → no adjustment (normal exits)
+            // Far winning (>$50): hold longer (wider thresholds, up to 1.5x)
+            // Far losing (<-$30): exit faster (tighter thresholds, down to 0.6x)
+            let ptb_factor = {
+                let ptb_margin = if let Some(ptb) = state.last_price_to_beat {
+                    if current_btc > 0.0 {
+                        if pos.direction == "UP" { current_btc - ptb } else { ptb - current_btc }
+                    } else { 0.0 }
+                } else { 0.0 };
+
+                if ptb_margin > 50.0 {
+                    1.5  // Far winning: 50% wider → ride it out
+                } else if ptb_margin > 30.0 {
+                    1.0 + (ptb_margin - 30.0) / 20.0 * 0.5  // Linear 1.0→1.5
+                } else if ptb_margin < -50.0 {
+                    0.6  // Far losing: 40% tighter → exit fast
+                } else if ptb_margin < -30.0 {
+                    1.0 - ((-ptb_margin) - 30.0) / 20.0 * 0.4  // Linear 1.0→0.6
+                } else {
+                    1.0  // Dead zone: no adjustment
+                }
+            };
+
+            // Trend reversed - exit if BTC reverses by a percentage of the entry spike from entry
+            // Uses trend_reversal_pct (e.g., 50% of spike), floored at trend_reversal_threshold ($10)
+            // PTB factor widens threshold when winning, tightens when losing
             let trend_reversed_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 {
+                let reversal_threshold = (pos.entry_spike.abs() * (self.config.trend_reversal_pct / 100.0))
+                    .max(self.config.trend_reversal_threshold) * ptb_factor;
                 if pos.direction == "UP" {
                     // For UP: exit if BTC drops below threshold
-                    current_btc < (pos.entry_btc - self.config.trend_reversal_threshold)
+                    current_btc < (pos.entry_btc - reversal_threshold)
                 } else {
                     // For DOWN: exit if BTC rises above threshold
-                    current_btc > (pos.entry_btc + self.config.trend_reversal_threshold)
+                    current_btc > (pos.entry_btc + reversal_threshold)
                 }
             } else {
                 false
             };
             
-            // Trend reversed requires min_hold_ms to pass (queued exit)
-            let trend_reversed = trend_reversed_hit && min_hold_passed;
+            // Trend reversed requires BOTH min_hold_ms AND 200ms persistence
+            // This filters out single-tick flash spikes that bounce right back
+            let trend_reversed_confirmed = trend_reversed_hit && pos.trend_reversed_since.map_or(false, |t| {
+                t.elapsed().as_millis() >= 200
+            });
+            let trend_reversed = trend_reversed_confirmed && min_hold_passed;
 
-            // Spike faded: exit if BTC reverses by X% of the spike magnitude from peak/trough
-            // For UP: peak_btc is highest since entry, exit if BTC drops by threshold_dollars from peak
-            // For DOWN: trough_btc is lowest since entry, exit if BTC rises by threshold_dollars from trough
-            // Example: $30 spike, SPIKE_FADED_PCT=50% -> exit if BTC reverses $15 from peak/trough
+            // Spike faded: exit if BTC reverses by X% of the peak favorable move from peak/trough
+            // Uses the GREATER of entry_spike or total favorable move (peak_btc - entry_btc for UP)
+            // This lets big winning runs breathe — if BTC ran $80, need $40 reversal (50%), not $10
+            // PTB factor widens threshold when winning, tightens when losing
             let spike_faded_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 && pos.entry_spike.abs() > 0.0 {
-                let threshold_dollars = pos.entry_spike.abs() * (self.config.spike_faded_pct / 100.0);
+                // Calculate total favorable move from entry
+                let favorable_move = if pos.direction == "UP" {
+                    pos.peak_btc - pos.entry_btc
+                } else {
+                    pos.entry_btc - pos.trough_btc
+                };
+                let reference_move = favorable_move.max(pos.entry_spike.abs());
+                let threshold_dollars = reference_move * (self.config.spike_faded_pct / 100.0) * ptb_factor;
                 if pos.direction == "UP" {
                     // For UP: check if BTC dropped from peak
                     let peak = pos.peak_btc;
@@ -593,9 +629,15 @@ impl PaperWallet {
             
             let current_btc = state.last_binance;
             
-            // Track spike_faded_since
+            // Track spike_faded_since (uses same threshold as exit check)
             let spike_faded_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 && pos.entry_spike.abs() > 0.0 {
-                let threshold_dollars = pos.entry_spike.abs() * (self.config.spike_faded_pct / 100.0);
+                let favorable_move = if pos.direction == "UP" {
+                    pos.peak_btc - pos.entry_btc
+                } else {
+                    pos.entry_btc - pos.trough_btc
+                };
+                let reference_move = favorable_move.max(pos.entry_spike.abs());
+                let threshold_dollars = reference_move * (self.config.spike_faded_pct / 100.0);
                 if pos.direction == "UP" {
                     let peak = pos.peak_btc;
                     if peak > 0.0 {
@@ -625,12 +667,14 @@ impl PaperWallet {
                 pos.spike_faded_since = None;
             }
             
-            // Track trend_reversed_since
+            // Track trend_reversed_since (uses same scaled threshold as exit check)
             let trend_reversed_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 {
+                let reversal_threshold = (pos.entry_spike.abs() * (self.config.trend_reversal_pct / 100.0))
+                    .max(self.config.trend_reversal_threshold);
                 if pos.direction == "UP" {
-                    current_btc < (pos.entry_btc - self.config.trend_reversal_threshold)
+                    current_btc < (pos.entry_btc - reversal_threshold)
                 } else {
-                    current_btc > (pos.entry_btc + self.config.trend_reversal_threshold)
+                    current_btc > (pos.entry_btc + reversal_threshold)
                 }
             } else {
                 false
@@ -821,6 +865,11 @@ impl PaperWallet {
             let dir = p.direction.clone();
             let level = p.scale_level;
             let slippage = fill_price - p.entry_price;
+
+            // Use BTC price at FILL time (now), not signal time (300ms ago)
+            // This makes BTC-based exits (trend_reversed, spike_faded) more accurate
+            let entry_btc = if state.last_binance > 0.0 { state.last_binance } else { p.entry_btc };
+
             self.open_positions.push(OpenPosition {
                 symbol: p.symbol,
                 direction: p.direction,
@@ -835,10 +884,10 @@ impl PaperWallet {
                 scale_level: p.scale_level,
                 hold_to_resolution: false,
                 peak_spike: p.spike.abs(),
-                // BTC price set immediately at entry to avoid race condition
-                entry_btc: p.entry_btc,
-                peak_btc: p.entry_btc,
-                trough_btc: p.entry_btc,
+                // BTC price at fill time for accurate exit calibration
+                entry_btc,
+                peak_btc: entry_btc,
+                trough_btc: entry_btc,
                 spike_faded_since: None,
                 trend_reversed_since: None,
             });

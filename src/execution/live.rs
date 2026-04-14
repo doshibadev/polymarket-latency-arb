@@ -445,6 +445,11 @@ impl LiveWallet {
                         warn!("FAK order found no liquidity (empty book) — not retrying");
                         return Err(msg);
                     }
+                    // "not enough balance" means we don't have enough shares/USDC — retrying won't help
+                    if msg.contains("not enough balance") {
+                        warn!("Insufficient balance/allowance — not retrying");
+                        return Err(msg);
+                    }
                     warn!(attempt=attempt+1, error=%msg, "Order network error");
                     if attempt == 2 { return Err(msg); }
                     tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64)).await;
@@ -811,6 +816,35 @@ impl LiveWallet {
             }
         }
 
+        // Query actual on-chain share balance from CLOB to avoid "not enough balance" errors.
+        // The CLOB deducts fees from token balance on buy, so our tracked pos.shares may exceed
+        // what we actually hold. Always sell what we ACTUALLY have, not what we think we have.
+        let actual_shares = {
+            use polymarket_client_sdk::clob::types::AssetType;
+            let balance_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                .asset_type(AssetType::Conditional)
+                .token_id(token_id)
+                .build();
+            match self.clob.balance_allowance(balance_req).await {
+                Ok(b) => {
+                    let raw: f64 = b.balance.try_into().unwrap_or(0.0);
+                    if raw > 0.0 {
+                        info!(symbol=%pos.symbol, tracked=pos.shares, actual=raw, "Queried actual share balance from CLOB");
+                        raw
+                    } else {
+                        warn!(symbol=%pos.symbol, "CLOB returned 0 shares — using tracked shares with 3% haircut");
+                        pos.shares * 0.97
+                    }
+                }
+                Err(e) => {
+                    warn!(symbol=%pos.symbol, error=%e, "Failed to query share balance — using 3% haircut");
+                    pos.shares * 0.97
+                }
+            }
+        };
+        // Never try to sell more than we actually have
+        let sell_shares = actual_shares.min(pos.shares);
+
         let rounded = Self::round_to_tick(market_price, tick);
         let price = match Decimal::try_from(rounded) {
             Ok(p) => p,
@@ -833,7 +867,7 @@ impl LiveWallet {
                 return;
             }
         };
-        let size = match Decimal::try_from((pos.shares * 100.0).floor() / 100.0) {
+        let size = match Decimal::try_from((sell_shares * 100.0).floor() / 100.0) {
             Ok(s) => s,
             Err(e) => {
                 let pnl = -(pos.position_size + pos.buy_fee);
