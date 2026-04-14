@@ -801,6 +801,16 @@ impl PaperWallet {
         Ok(scale_level)
     }
 
+    /// Roll back a pending entry that failed to execute on the live wallet.
+    /// Removes the pending entry and restores the reserved balance.
+    pub fn rollback_pending_entry(&mut self, symbol: &str, direction: &str) {
+        if let Some(idx) = self.pending_entries.iter().position(|p| p.symbol == symbol && p.direction == direction) {
+            let entry = self.pending_entries.remove(idx);
+            self.balance += entry.position_size + entry.buy_fee;
+            info!(symbol=%symbol, direction=%direction, restored=entry.position_size + entry.buy_fee, "Rolled back paper entry (live wallet failed)");
+        }
+    }
+
     /// Call on every tick — promotes pending entries to open positions after execution delay
     pub fn flush_pending(&mut self) {
         let delay = if self.config.paper_trading {

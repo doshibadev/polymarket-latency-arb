@@ -1023,6 +1023,13 @@ impl ArbEngine {
                                     self.add_signal(&sym, &dir, spk, "EXECUTED", Some(format!("LIVE_LEVEL_{}", live_level)));
                                 }
                                 Err(e) => {
+                                    // Live wallet failed — roll back the paper wallet entry
+                                    // Otherwise paper wallet has an orphaned position that blocks
+                                    // all future entries with MAX_SCALE_LEVEL
+                                    self.wallet.rollback_pending_entry(&sym, &dir);
+                                    // Reset spike gate so next spike can trigger a fresh entry
+                                    let state = self.symbol_states.get_mut(symbol).unwrap();
+                                    state.last_spike_usd = 0.0;
                                     self.add_signal(&sym, &dir, spk, "REJECTED", Some(format!("LIVE:{}", e)));
                                 }
                             }

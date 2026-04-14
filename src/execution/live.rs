@@ -900,18 +900,17 @@ impl LiveWallet {
                 if fu > 0.0 { fu } else { pos.shares * market_price }
             },
             Err(e) => {
-                error!("Sell order failed: {} — recording loss for {} {}", e, pos.symbol, pos.direction);
-                0.0  // No revenue on failure
+                // Sell failed — put the position BACK so we can retry on the next tick.
+                // The shares are still on-chain, so recording a loss here would be wrong.
+                error!("Sell order failed: {} — putting position back for retry ({} {})", e, pos.symbol, pos.direction);
+                self.open_positions.push(pos);
+                return;
             }
         };
 
-        // sell_succeeded now holds the revenue amount (>0 = success, 0 = failure)
+        // If we reach here, the sell succeeded — safe to calculate PnL
         let gross_revenue = sell_succeeded;
-        let sell_fee = if gross_revenue > 0.0 {
-            pos.shares * self.config.crypto_fee_rate * pos.entry_price * (1.0 - pos.entry_price)
-        } else {
-            0.0
-        };
+        let sell_fee = pos.shares * self.config.crypto_fee_rate * pos.entry_price * (1.0 - pos.entry_price);
         let net_revenue = gross_revenue - sell_fee;
         let pnl = net_revenue - (pos.position_size + pos.buy_fee);
 
@@ -929,14 +928,14 @@ impl LiveWallet {
             question: String::new(),
             direction: pos.direction.clone(),
             entry_price: Some(pos.entry_price),
-            exit_price: Some(if gross_revenue > 0.0 { gross_revenue / pos.shares } else { 0.0 }),
+            exit_price: Some(gross_revenue / pos.shares),
             shares: pos.shares,
             cost: pos.position_size,
             pnl: Some(pnl),
             cumulative_pnl: Some(self.cumulative_pnl),
             balance_after: Some(self.balance),
             timestamp: chrono::Local::now().to_rfc3339(),
-            close_reason: Some(if gross_revenue > 0.0 { reason.to_string() } else { format!("{}_sell_failed", reason) }),
+            close_reason: Some(reason.to_string()),
         });
     }
 }
