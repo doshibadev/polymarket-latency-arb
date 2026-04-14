@@ -30,6 +30,7 @@ pub struct OpenPosition {
     #[serde(skip)]
     pub trend_reversed_since: Option<Instant>, // when trend_reversed first detected
     pub trailing_stop_activated: bool,      // true once share price gains activation_pct% from entry
+    pub on_chain_shares: Option<f64>,       // actual on-chain balance from sync_from_clob (live only)
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -999,6 +1000,7 @@ impl PaperWallet {
                 spike_faded_since: None,
                 trend_reversed_since: None,
                 trailing_stop_activated: false,
+                on_chain_shares: None,
             });
             info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened at ask price");
         }

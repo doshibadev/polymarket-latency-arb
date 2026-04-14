@@ -265,6 +265,7 @@ impl LiveWallet {
         let now = Instant::now();
         let mut stale_indices = Vec::new();
         let mut still_zero_keys = Vec::new();
+        let mut on_chain_updates: Vec<(usize, f64)> = Vec::new(); // (idx, shares) to apply after loop
 
         for (idx, pos) in self.open_positions.iter().enumerate() {
             // Skip positions younger than 30 seconds — CLOB cache may not have updated yet
@@ -313,10 +314,18 @@ impl LiveWallet {
                                 "Zero token balance detected — flagged, will confirm on next sync");
                         }
                     } else {
-                        // Balance is positive — clear any previous zero flag
+                        // Balance is positive — clear any previous zero flag and store on-chain shares
                         self.zero_balance_flags.remove(&key);
+                        on_chain_updates.push((idx, shares));
                     }
                 }
+            }
+        }
+
+        // Apply on-chain share counts to positions (collected during read-only loop above)
+        for (idx, shares) in on_chain_updates {
+            if idx < self.open_positions.len() {
+                self.open_positions[idx].on_chain_shares = Some(shares);
             }
         }
 
@@ -790,11 +799,58 @@ impl LiveWallet {
         let final_position_size = actual_usdc;
         // Compute actual fill price from FAK response (may differ from cached WebSocket price due to book-walking)
         let actual_entry_price = actual_usdc / actual_shares;
-        let final_buy_fee = actual_shares * self.config.crypto_fee_rate * actual_entry_price * (1.0 - actual_entry_price);
+
+        // Query ACTUAL on-chain share balance instead of estimating fee deduction.
+        // The CLOB deducts taker fee from conditional tokens on buys, so the FAK response's
+        // `taking_amount` is gross (before fee). We need the real on-chain amount.
+        let net_shares = {
+            use polymarket_client_sdk::clob::types::AssetType;
+            // Force CLOB to refresh its cached on-chain balance
+            let update_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                .asset_type(AssetType::Conditional)
+                .token_id(token_id)
+                .build();
+            let _ = self.clob.update_balance_allowance(update_req).await;
+            // Small wait for the cache to propagate
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // Query the actual balance
+            let query_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                .asset_type(AssetType::Conditional)
+                .token_id(token_id)
+                .build();
+            match self.clob.balance_allowance(query_req).await {
+                Ok(b) => {
+                    let raw: f64 = b.balance.try_into().unwrap_or(0.0);
+                    let on_chain = raw / 1_000_000.0;
+                    if on_chain > 0.001 {
+                        info!(symbol=%symbol, gross_shares=actual_shares, on_chain_shares=on_chain,
+                              "Using actual on-chain balance as net shares");
+                        on_chain
+                    } else {
+                        // Cache not updated yet — fall back to formula
+                        let fee_in_shares = actual_shares * self.config.crypto_fee_rate * (1.0 - actual_entry_price);
+                        let estimated = actual_shares - fee_in_shares;
+                        warn!(symbol=%symbol, gross_shares=actual_shares, on_chain_raw=raw,
+                              estimated_net=estimated, "On-chain balance not ready, using fee estimate");
+                        estimated
+                    }
+                }
+                Err(e) => {
+                    // Query failed — fall back to formula
+                    let fee_in_shares = actual_shares * self.config.crypto_fee_rate * (1.0 - actual_entry_price);
+                    let estimated = actual_shares - fee_in_shares;
+                    warn!(symbol=%symbol, error=%e, gross_shares=actual_shares,
+                          estimated_net=estimated, "Balance query failed, using fee estimate");
+                    estimated
+                }
+            }
+        };
+        // Fee already absorbed into fewer shares — don't double-count in USDC accounting
+        let final_buy_fee = 0.0;
 
         info!(symbol=%symbol, direction=%direction, cached_price=entry_price, fill_price=actual_entry_price,
-              requested_shares=rounded_shares, filled_shares=actual_shares, filled_usdc=actual_usdc,
-              order_id=%order_id, "Live BUY filled (FAK)");
+              requested_shares=rounded_shares, gross_shares=actual_shares, net_shares=net_shares,
+              filled_usdc=actual_usdc, order_id=%order_id, "Live BUY filled (FAK)");
 
         // Order successfully placed - remove from pending orders
         self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
@@ -818,7 +874,7 @@ impl LiveWallet {
             direction: direction.to_string(),
             entry_price: Some(actual_entry_price),
             exit_price: None,
-            shares: actual_shares,  // Use actual filled shares
+            shares: net_shares,  // Net shares after CLOB fee deduction
             cost: final_position_size,
             pnl: None,
             cumulative_pnl: Some(self.cumulative_pnl),
@@ -832,7 +888,7 @@ impl LiveWallet {
             direction: direction.to_string(),
             entry_price: actual_entry_price,
             avg_entry_price: actual_entry_price,
-            shares: actual_shares,  // Use actual filled shares
+            shares: net_shares,  // Net shares after CLOB fee deduction
             position_size: final_position_size,
             buy_fee: final_buy_fee,
             entry_spike: spike,
@@ -848,6 +904,7 @@ impl LiveWallet {
             spike_faded_since: None,
             trend_reversed_since: None,
             trailing_stop_activated: false,
+            on_chain_shares: Some(net_shares), // Set immediately from post-buy balance query
         });
 
         Ok(scale_level)
@@ -931,10 +988,10 @@ impl LiveWallet {
             }
         }
 
-        // Sell strategy: try with tracked shares first (fast path, no CLOB query).
-        // If CLOB rejects with "not enough balance", refresh and retry with actual on-chain amount.
-        // This avoids the 200ms+ latency of pre-sell balance queries and stale cache issues.
-        let sell_shares = (pos.shares * 100.0).floor() / 100.0; // Round to 2 decimals
+        // Sell strategy: use on_chain_shares if available (exact from sync_from_clob),
+        // otherwise fall back to pos.shares (net of fee from Fix 1).
+        let best_shares = pos.on_chain_shares.unwrap_or(pos.shares);
+        let sell_shares = (best_shares * 100.0).floor() / 100.0; // Round to 2 decimals
 
         let rounded = Self::round_to_tick(market_price, tick);
         let price = match Decimal::try_from(rounded) {
@@ -959,10 +1016,11 @@ impl LiveWallet {
             }
         };
 
-        // Try selling up to 5 times: first with tracked shares, then with CLOB-queried balance
-        // Covers the ~2-4s CLOB cache sync delay after a buy
+        // Try selling up to 5 times: handles "not enough balance" retries AND partial fills.
+        // On partial fill, retries selling the remainder if it's >= $1 (Polymarket minimum).
         let mut current_sell_shares = sell_shares;
-        let mut sell_result = None;
+        let mut total_filled_usdc = 0.0f64;
+        let mut total_filled_shares = 0.0f64;
 
         for sell_attempt in 0..5u32 {
             let size = match Decimal::try_from(current_sell_shares) {
@@ -978,19 +1036,37 @@ impl LiveWallet {
                 Ok((id, filled_shares, filled_usdc)) => {
                     let fs: f64 = filled_shares.try_into().unwrap_or(0.0);
                     let fu: f64 = filled_usdc.try_into().unwrap_or(0.0);
+                    total_filled_shares += fs;
+                    total_filled_usdc += fu;
+
+                    let remaining = current_sell_shares - fs;
+                    if remaining >= 0.01 && remaining * market_price >= 1.0 {
+                        // Partial fill — retry selling the remainder
+                        info!(symbol=%pos.symbol, reason=%reason, order_id=%id,
+                              filled=fs, remaining=remaining, attempt=sell_attempt+1,
+                              "Partial SELL fill, retrying remainder");
+                        current_sell_shares = (remaining * 100.0).floor() / 100.0;
+                        continue;
+                    }
+
+                    // Full fill or remainder too small to sell
+                    if remaining > 0.01 {
+                        warn!(symbol=%pos.symbol, abandoned_shares=remaining,
+                              value=remaining * market_price,
+                              "Remainder below $1 min — shares left on-chain");
+                    }
                     info!(symbol=%pos.symbol, reason=%reason, price=rounded, order_id=%id,
-                          filled_shares=fs, filled_usdc=fu, attempt=sell_attempt+1,
-                          "Live SELL filled (FAK)");
-                    sell_result = Some(if fu > 0.0 { fu } else { pos.shares * market_price });
+                          filled_shares=total_filled_shares, filled_usdc=total_filled_usdc,
+                          attempt=sell_attempt+1, "Live SELL complete (FAK)");
                     break;
                 }
                 Err(e) if e.contains("not enough balance") && sell_attempt < 4 => {
                     // CLOB says we don't have enough shares — refresh balance and retry
                     let wait_ms = match sell_attempt {
-                        0 => 300,   // Quick first retry
-                        1 => 700,   // Give CLOB more time
-                        2 => 1000,  // Even more time
-                        _ => 1500,  // Last chance
+                        0 => 300,
+                        1 => 700,
+                        2 => 1000,
+                        _ => 1500,
                     };
                     warn!(symbol=%pos.symbol, attempt=sell_attempt+1,
                           tried_shares=current_sell_shares, wait_ms=wait_ms,
@@ -1017,7 +1093,6 @@ impl LiveWallet {
                             info!(symbol=%pos.symbol, actual_shares=actual, selling=current_sell_shares,
                                   "Refreshed share balance, retrying sell");
                         }
-                        // If still 0, just try again with same shares — CLOB might sync between now and next attempt
                     }
                 }
                 Err(e) => {
@@ -1030,14 +1105,13 @@ impl LiveWallet {
             }
         }
 
-        let gross_revenue = match sell_result {
-            Some(rev) => rev,
-            None => {
-                // All 3 attempts failed — put position back
-                error!("All sell attempts failed — putting position back ({} {})", pos.symbol, pos.direction);
-                self.open_positions.push(pos);
-                return;
-            }
+        let gross_revenue = if total_filled_usdc > 0.0 {
+            total_filled_usdc
+        } else {
+            // No fills at all — put position back
+            error!("All sell attempts got zero fills — putting position back ({} {})", pos.symbol, pos.direction);
+            self.open_positions.push(pos);
+            return;
         };
 
         // If we reach here, the sell succeeded — safe to calculate PnL
