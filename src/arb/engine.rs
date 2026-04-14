@@ -1067,7 +1067,14 @@ impl ArbEngine {
         // Check cooldown - don't re-enter too quickly after a close
         let cooldown_ms = 3000; // 3 second cooldown after a position closes
         let cooldown_ok = state.last_close_time.map_or(true, |t| t.elapsed().as_millis() >= cooldown_ms);
-        
+
+        // Max 1 position at a time — don't open opposite direction while one is open
+        // Prevents opening UP while DOWN is held (or vice versa), which guarantees a loss on one side
+        let total_positions = self.wallet.open_positions.len() + self.wallet.pending_entries.len();
+        if total_positions > 0 {
+            return;
+        }
+
         // New spike or significantly larger spike for scaling in
         if abs_spike > state.last_spike_usd * 1.1 && cooldown_ok {
             // Get entry price BEFORE open_position (pending entry hasn't been promoted yet)

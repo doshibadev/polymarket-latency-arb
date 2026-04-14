@@ -1016,8 +1016,8 @@ impl LiveWallet {
             }
         };
 
-        // Try selling up to 5 times: handles "not enough balance" retries AND partial fills.
-        // On partial fill, retries selling the remainder if it's >= $1 (Polymarket minimum).
+        // Try selling up to 5 times: handles "not enough balance" retries, partial fills,
+        // AND transient CLOB errors (500s). On partial fill, retries the remainder.
         let mut current_sell_shares = sell_shares;
         let mut total_filled_usdc = 0.0f64;
         let mut total_filled_shares = 0.0f64;
@@ -1095,9 +1095,17 @@ impl LiveWallet {
                         }
                     }
                 }
+                Err(e) if sell_attempt < 4 => {
+                    // Transient error (500, network, etc.) — retry in the outer loop
+                    // post_with_retry already tried 3 times internally; give it another shot
+                    // with a fresh post_with_retry cycle after a short wait
+                    warn!(symbol=%pos.symbol, attempt=sell_attempt+1, error=%e,
+                          "Sell failed (transient) — retrying in outer loop");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
                 Err(e) => {
-                    // Other error or final attempt — put position back for orphan retry
-                    error!("Sell order failed: {} — putting position back for retry ({} {})",
+                    // Final attempt exhausted — put position back for orphan retry
+                    error!("Sell order failed after all attempts: {} — putting position back ({} {})",
                            e, pos.symbol, pos.direction);
                     self.open_positions.push(pos);
                     return;

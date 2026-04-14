@@ -485,11 +485,17 @@ impl PaperWallet {
                 if end > now_secs { Some(end - now_secs) } else { None }
             });
             
+            // Max price exit ALWAYS fires, even in hold mode — take the guaranteed profit
+            if current_price >= 0.995 {
+                to_close.push((idx, "max_price"));
+                continue;
+            }
+
             // HOLD MODE: share price > threshold AND < 30s remaining
             // In hold mode, we're likely to win but need to watch BTC closely
-            let in_hold_mode = current_price > self.config.hold_min_share_price 
+            let in_hold_mode = current_price > self.config.hold_min_share_price
                 && time_remaining.map_or(false, |t| t <= 30);
-            
+
             if in_hold_mode {
                 // In hold mode, only exit if BTC gets too close to price_to_beat
                 // This is our edge: we see BTC moving 1.5-2s before Chainlink updates
@@ -500,15 +506,30 @@ impl PaperWallet {
                         } else {
                             ptb - current_btc  // For DOWN: we win if BTC < ptb
                         };
-                        
+
                         // Exit if margin drops below safety threshold
                         if margin < self.config.hold_safety_margin {
                             to_close.push((idx, "hold_safety_exit"));
                             continue;
-                        } else {
-                            // Safe margin, skip all other exits
-                            continue;
                         }
+
+                        // Also check trend_reversed in hold mode — don't hold through a massive BTC reversal
+                        if pos.entry_btc > 0.0 {
+                            let reversal_threshold = (pos.entry_spike.abs() * (self.config.trend_reversal_pct / 100.0))
+                                .max(self.config.trend_reversal_threshold);
+                            let trend_reversed = if pos.direction == "UP" {
+                                current_btc < (pos.entry_btc - reversal_threshold)
+                            } else {
+                                current_btc > (pos.entry_btc + reversal_threshold)
+                            };
+                            if trend_reversed {
+                                to_close.push((idx, "trend_reversed"));
+                                continue;
+                            }
+                        }
+
+                        // Safe margin, no reversal — keep holding
+                        continue;
                     }
                 }
                 // If we can't check margin, skip other exits anyway (hold mode)
