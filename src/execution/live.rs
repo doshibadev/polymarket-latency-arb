@@ -800,20 +800,23 @@ impl LiveWallet {
         // Compute actual fill price from FAK response (may differ from cached WebSocket price due to book-walking)
         let actual_entry_price = actual_usdc / actual_shares;
 
-        // Query ACTUAL on-chain share balance instead of estimating fee deduction.
-        // The CLOB deducts taker fee from conditional tokens on buys, so the FAK response's
-        // `taking_amount` is gross (before fee). We need the real on-chain amount.
+        // CLOB deducts taker fee from conditional tokens on buys (not from USDC).
+        // Polymarket docs: "Buy orders: fees are collected in shares"
+        // The FAK response's `taking_amount` is gross (before fee). Calculate net shares.
+        let fee_in_shares = actual_shares * self.config.crypto_fee_rate * (1.0 - actual_entry_price);
+        let estimated_net = actual_shares - fee_in_shares;
+
+        // Try to get ACTUAL on-chain balance to use instead of the estimate.
+        // Only accept it if it's within 5% of our estimate (rejects stale dust from old trades).
         let net_shares = {
             use polymarket_client_sdk::clob::types::AssetType;
-            // Force CLOB to refresh its cached on-chain balance
             let update_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
                 .asset_type(AssetType::Conditional)
                 .token_id(token_id)
                 .build();
             let _ = self.clob.update_balance_allowance(update_req).await;
-            // Small wait for the cache to propagate
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            // Query the actual balance
+
             let query_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
                 .asset_type(AssetType::Conditional)
                 .token_id(token_id)
@@ -822,29 +825,22 @@ impl LiveWallet {
                 Ok(b) => {
                     let raw: f64 = b.balance.try_into().unwrap_or(0.0);
                     let on_chain = raw / 1_000_000.0;
-                    if on_chain > 0.001 {
-                        info!(symbol=%symbol, gross_shares=actual_shares, on_chain_shares=on_chain,
-                              "Using actual on-chain balance as net shares");
+                    // Sanity check: on-chain must be within 5% of our fee estimate
+                    // This rejects stale dust from previous trades
+                    if on_chain > estimated_net * 0.95 && on_chain < estimated_net * 1.05 {
+                        info!(symbol=%symbol, estimated=estimated_net, on_chain=on_chain,
+                              "Using verified on-chain balance as net shares");
                         on_chain
                     } else {
-                        // Cache not updated yet — fall back to formula
-                        let fee_in_shares = actual_shares * self.config.crypto_fee_rate * (1.0 - actual_entry_price);
-                        let estimated = actual_shares - fee_in_shares;
-                        warn!(symbol=%symbol, gross_shares=actual_shares, on_chain_raw=raw,
-                              estimated_net=estimated, "On-chain balance not ready, using fee estimate");
-                        estimated
+                        info!(symbol=%symbol, estimated=estimated_net, on_chain=on_chain,
+                              "On-chain balance doesn't match estimate, using fee formula");
+                        estimated_net
                     }
                 }
-                Err(e) => {
-                    // Query failed — fall back to formula
-                    let fee_in_shares = actual_shares * self.config.crypto_fee_rate * (1.0 - actual_entry_price);
-                    let estimated = actual_shares - fee_in_shares;
-                    warn!(symbol=%symbol, error=%e, gross_shares=actual_shares,
-                          estimated_net=estimated, "Balance query failed, using fee estimate");
-                    estimated
-                }
+                Err(_) => estimated_net,
             }
         };
+
         // Fee already absorbed into fewer shares — don't double-count in USDC accounting
         let final_buy_fee = 0.0;
 
@@ -904,7 +900,7 @@ impl LiveWallet {
             spike_faded_since: None,
             trend_reversed_since: None,
             trailing_stop_activated: false,
-            on_chain_shares: Some(net_shares), // Set immediately from post-buy balance query
+            on_chain_shares: None, // Set later by sync_from_clob with actual on-chain balance
         });
 
         Ok(scale_level)
@@ -1095,10 +1091,15 @@ impl LiveWallet {
                         }
                     }
                 }
+                Err(e) if e.contains("no orders found to match") => {
+                    // Empty book — retrying won't help, push back for later
+                    warn!(symbol=%pos.symbol, "Sell failed (empty book) — no liquidity to sell into");
+                    self.open_positions.push(pos);
+                    return;
+                }
                 Err(e) if sell_attempt < 4 => {
                     // Transient error (500, network, etc.) — retry in the outer loop
                     // post_with_retry already tried 3 times internally; give it another shot
-                    // with a fresh post_with_retry cycle after a short wait
                     warn!(symbol=%pos.symbol, attempt=sell_attempt+1, error=%e,
                           "Sell failed (transient) — retrying in outer loop");
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
