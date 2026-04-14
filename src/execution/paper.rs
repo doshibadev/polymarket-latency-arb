@@ -633,10 +633,15 @@ impl PaperWallet {
                 false
             };
 
+            // Max price exit: if share price hits 0.995, take the free money
+            let max_price_hit = current_price >= 0.995;
+
             let near_end = held_ms > 295000;
 
             // Determine exit reason (priority order)
-            let reason = if trend_reversed {
+            let reason = if max_price_hit {
+                Some("max_price")
+            } else if trend_reversed {
                 Some("trend_reversed")
             } else if trailing_stop_hit {
                 Some("trailing_stop")
@@ -651,7 +656,7 @@ impl PaperWallet {
             };
 
             if let Some(r) = reason {
-                if pos.hold_to_resolution && r != "trend_reversed" {
+                if pos.hold_to_resolution && r != "trend_reversed" && r != "max_price" {
                     continue;
                 }
                 to_close.push((idx, r));

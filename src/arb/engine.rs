@@ -813,6 +813,7 @@ impl ArbEngine {
                     let reason_str = reason.as_deref().unwrap_or("exit");
                     let r: &'static str = match reason_str {
                         "trailing_stop" => "trailing_stop",
+                        "max_price" => "max_price",
                         "trend_reversed" => "trend_reversed",
                         "spike_faded" => "spike_faded",
                         "stop_loss" => "stop_loss",

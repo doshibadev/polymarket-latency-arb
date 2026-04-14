@@ -404,6 +404,18 @@ impl LiveWallet {
             cache.down_bid = bid;
             cache.down_ask = ask;
         }
+
+        // Keep highest_price in sync on live positions (mirrors paper.rs behavior)
+        let mid_price = (bid + ask) / 2.0;
+        for pos in &mut self.open_positions {
+            if pos.symbol == symbol && pos.direction == direction {
+                if direction == "UP" {
+                    if mid_price > pos.highest_price { pos.highest_price = mid_price; }
+                } else {
+                    if mid_price < pos.highest_price { pos.highest_price = mid_price; }
+                }
+            }
+        }
     }
 
     /// Get bid/ask from cache (matches paper.rs)
