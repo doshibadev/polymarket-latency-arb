@@ -825,6 +825,8 @@
         let myChart = null;
         let spikeChart = null;
         let startingBalance = 27.0;
+        let settingsModalOpen = false;
+        let settingsDirty = false;
         const spikeHistory = { labels: [], data: [] };
         const MAX_SPIKE_POINTS = 120;
         let wsMessageCount = 0; // Throttle chart updates
@@ -911,6 +913,8 @@
 
         const openSettings = async () => {
             const isLive = document.getElementById('btn-live').classList.contains('active-live');
+            settingsModalOpen = true;
+            settingsDirty = false;
             switchSettingsTab('entry');
             // Show/hide simulation-only fields
             document.querySelectorAll('.sim-only').forEach(el => {
@@ -957,7 +961,17 @@
             } catch(e) {}
             document.getElementById('settings-modal').style.display = 'flex';
         };
-        const closeSettings = () => { document.getElementById('settings-modal').style.display = 'none'; };
+        const closeSettings = () => {
+            settingsModalOpen = false;
+            settingsDirty = false;
+            document.getElementById('settings-modal').style.display = 'none';
+        };
+
+        document.addEventListener('input', (event) => {
+            if (event.target && event.target.closest && event.target.closest('#settings-modal')) {
+                settingsDirty = true;
+            }
+        });
 
         const saveSettings = async () => {
             const btn = document.querySelector('.save-btn');
@@ -1010,10 +1024,12 @@
                 if (res.ok) {
                     btn.style.background = 'var(--color-up)';
                     btn.innerText = 'SAVED ✓';
+                    settingsDirty = false;
                     setTimeout(closeSettings, 800);
                 } else {
+                    const text = await res.text();
                     btn.style.background = 'var(--color-down)';
-                    btn.innerText = 'ERROR';
+                    btn.innerText = text ? 'ERROR: ' + text.slice(0, 24) : 'ERROR';
                 }
             } catch (e) {
                 btn.style.background = 'var(--color-down)';
@@ -1093,6 +1109,9 @@
             }
 
             if (sim.config) {
+                if (settingsModalOpen || settingsDirty) {
+                    // Do not let live WebSocket config updates overwrite a draft in the modal.
+                } else {
                 const c = sim.config;
                 setInputValue('set-threshold', (c.threshold_bps / 100).toFixed(0));
                 setInputValue('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
@@ -1126,6 +1145,7 @@
                 setInputValue('set-trend-max-magnitude-usd', c.trend_max_magnitude_usd);
                 setInputValue('set-ptb-neutral-zone-usd', c.ptb_neutral_zone_usd);
                 setInputValue('set-ptb-max-counter-distance-usd', c.ptb_max_counter_distance_usd);
+                }
             }
 
             document.getElementById('v-portfolio').innerText = formatMoney(totalVal);

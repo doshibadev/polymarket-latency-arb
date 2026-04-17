@@ -385,6 +385,12 @@ impl ArbEngine {
                                                 cumulative_pnl: None, balance_after: None,
                                                 timestamp: chrono::Local::now().to_rfc3339(),
                                                 close_reason: Some("manual".to_string()),
+                                                btc_at_entry: Some(pos.entry_btc), price_to_beat_at_entry: None,
+                                                ptb_margin_at_entry: None, seconds_to_expiry_at_entry: None,
+                                                spread_at_entry: None, round_trip_loss_pct_at_entry: None,
+                                                signal_score: None,
+                                                ptb_margin_at_exit: None, exit_mode: Some("manual".to_string()),
+                                                favorable_ptb_at_exit: None,
                                             });
                                         }
                                         info!(symbol=%sym, direction=%dir, "Position manually closed (live mode)");
@@ -418,6 +424,16 @@ impl ArbEngine {
                                             balance_after: None,
                                             timestamp: chrono::Local::now().to_rfc3339(),
                                             close_reason: Some("manual".to_string()),
+                                            btc_at_entry: Some(pos.entry_btc),
+                                            price_to_beat_at_entry: None,
+                                            ptb_margin_at_entry: None,
+                                            seconds_to_expiry_at_entry: None,
+                                            spread_at_entry: None,
+                                            round_trip_loss_pct_at_entry: None,
+                                            signal_score: None,
+                                            ptb_margin_at_exit: None,
+                                            exit_mode: Some("manual".to_string()),
+                                            favorable_ptb_at_exit: None,
                                         });
                                         info!(symbol=%pos.symbol, pnl=pnl, "Position manually closed");
                                     }
@@ -565,6 +581,16 @@ impl ArbEngine {
                                 balance_after: None,
                                 timestamp: chrono::Local::now().to_rfc3339(),
                                 close_reason: Some("early_exit_losing".to_string()),
+                                btc_at_entry: Some(pos.entry_btc),
+                                price_to_beat_at_entry: None,
+                                ptb_margin_at_entry: None,
+                                seconds_to_expiry_at_entry: None,
+                                spread_at_entry: None,
+                                round_trip_loss_pct_at_entry: None,
+                                signal_score: None,
+                                ptb_margin_at_exit: None,
+                                exit_mode: Some("forced".to_string()),
+                                favorable_ptb_at_exit: None,
                             });
                             info!(symbol=%pos.symbol, pnl=pnl, "Early exit for losing position before market end");
                         }
@@ -633,6 +659,16 @@ impl ArbEngine {
                                 balance_after: None,
                                 timestamp: chrono::Local::now().to_rfc3339(),
                                 close_reason: Some("market_end".to_string()),
+                                btc_at_entry: Some(pos.entry_btc),
+                                price_to_beat_at_entry: None,
+                                ptb_margin_at_entry: None,
+                                seconds_to_expiry_at_entry: None,
+                                spread_at_entry: None,
+                                round_trip_loss_pct_at_entry: None,
+                                signal_score: None,
+                                ptb_margin_at_exit: None,
+                                exit_mode: Some("forced".to_string()),
+                                favorable_ptb_at_exit: None,
                             });
                             info!(symbol=%pos.symbol, pnl=pnl, "Position force-closed at market end");
                         }
@@ -1123,6 +1159,24 @@ impl ArbEngine {
 
         // New spike or significantly larger spike for scaling in
         if abs_spike > state.last_spike_usd * 1.1 && cooldown_ok {
+            let same_market_direction_losses = self.wallet.trade_history.iter()
+                .filter(|t| t.r#type == "exit"
+                    && t.question == state.question
+                    && t.direction == direction
+                    && t.pnl.unwrap_or(0.0) <= 0.0)
+                .count();
+            if same_market_direction_losses >= 2 && abs_spike < threshold_usd * 1.5 {
+                let state = self.symbol_states.get_mut(symbol).unwrap();
+                let reason = "MARKET_DIRECTION_COOLDOWN".to_string();
+                let should_log = state.last_rejection.as_ref()
+                    .map_or(true, |(r, t)| r != &reason || t.elapsed().as_secs() >= 5);
+                if should_log {
+                    state.last_rejection = Some((reason.clone(), Instant::now()));
+                    self.add_signal(symbol, direction, adjusted_spike, "REJECTED", Some(reason));
+                }
+                return;
+            }
+
             // Get entry price BEFORE open_position (pending entry hasn't been promoted yet)
             let entry_price = self.wallet.get_share_price(symbol, direction);
             

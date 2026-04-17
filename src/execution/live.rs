@@ -347,6 +347,12 @@ impl LiveWallet {
                 pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
                 balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some("external_close".to_string()),
+                btc_at_entry: Some(pos.entry_btc), price_to_beat_at_entry: None,
+                ptb_margin_at_entry: None, seconds_to_expiry_at_entry: None,
+                spread_at_entry: None, round_trip_loss_pct_at_entry: None,
+                signal_score: None,
+                ptb_margin_at_exit: None, exit_mode: Some("forced".to_string()),
+                favorable_ptb_at_exit: None,
             });
             warn!(symbol=%pos.symbol, direction=%pos.direction, "Position removed — confirmed no shares on-chain (external close/resolution)");
         }
@@ -877,6 +883,16 @@ impl LiveWallet {
             balance_after: Some(self.balance),
             timestamp: chrono::Local::now().to_rfc3339(),
             close_reason: None,
+            btc_at_entry: Some(current_btc),
+            price_to_beat_at_entry: None,
+            ptb_margin_at_entry: None,
+            seconds_to_expiry_at_entry: None,
+            spread_at_entry: None,
+            round_trip_loss_pct_at_entry: None,
+            signal_score: None,
+            ptb_margin_at_exit: None,
+            exit_mode: None,
+            favorable_ptb_at_exit: None,
         });
 
         self.open_positions.push(OpenPosition {
@@ -929,6 +945,12 @@ impl LiveWallet {
                     pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
                     balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
                     close_reason: Some(format!("{}_no_token", reason)),
+                    btc_at_entry: Some(pos.entry_btc), price_to_beat_at_entry: None,
+                    ptb_margin_at_entry: None, seconds_to_expiry_at_entry: None,
+                    spread_at_entry: None, round_trip_loss_pct_at_entry: None,
+                    signal_score: None,
+                    ptb_margin_at_exit: None, exit_mode: Some("forced".to_string()),
+                    favorable_ptb_at_exit: None,
                 });
                 error!("No token ID for {} {} — recorded loss", pos.symbol, pos.direction);
                 return;
@@ -968,6 +990,12 @@ impl LiveWallet {
                 pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
                 balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some(format!("{}_unsellable", reason)),
+                btc_at_entry: Some(pos.entry_btc), price_to_beat_at_entry: None,
+                ptb_margin_at_entry: None, seconds_to_expiry_at_entry: None,
+                spread_at_entry: None, round_trip_loss_pct_at_entry: None,
+                signal_score: None,
+                ptb_margin_at_exit: None, exit_mode: Some("forced".to_string()),
+                favorable_ptb_at_exit: None,
             });
             warn!("Position unsellable: {} {} — bid={:.4}, value=${:.2}", pos.symbol, pos.direction, bid, pos.shares * bid);
             return;
@@ -1006,6 +1034,12 @@ impl LiveWallet {
                     pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
                     balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
                     close_reason: Some(format!("{}_price_error", reason)),
+                    btc_at_entry: Some(pos.entry_btc), price_to_beat_at_entry: None,
+                    ptb_margin_at_entry: None, seconds_to_expiry_at_entry: None,
+                    spread_at_entry: None, round_trip_loss_pct_at_entry: None,
+                    signal_score: None,
+                    ptb_margin_at_exit: None, exit_mode: Some("forced".to_string()),
+                    favorable_ptb_at_exit: None,
                 });
                 error!("Invalid sell price: {}", e);
                 return;
@@ -1150,6 +1184,16 @@ impl LiveWallet {
             balance_after: Some(self.balance),
             timestamp: chrono::Local::now().to_rfc3339(),
             close_reason: Some(reason.to_string()),
+            btc_at_entry: Some(pos.entry_btc),
+            price_to_beat_at_entry: None,
+            ptb_margin_at_entry: None,
+            seconds_to_expiry_at_entry: None,
+            spread_at_entry: None,
+            round_trip_loss_pct_at_entry: None,
+            signal_score: None,
+            ptb_margin_at_exit: None,
+            exit_mode: Some("scalp".to_string()),
+            favorable_ptb_at_exit: None,
         });
     }
 }
