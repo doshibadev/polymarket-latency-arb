@@ -303,7 +303,11 @@ async fn ws_slow_handler(
     ws.on_upgrade(|socket| handle_socket(socket, state, Some("slow")))
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<ServerState>, kind_filter: Option<&'static str>) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<ServerState>,
+    kind_filter: Option<&'static str>,
+) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.tx.subscribe();
 

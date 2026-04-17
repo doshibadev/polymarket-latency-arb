@@ -98,7 +98,11 @@ enum StrategyDirection {
 
 impl StrategyDirection {
     fn from_spike(spike: f64) -> Self {
-        if spike > 0.0 { Self::Up } else { Self::Down }
+        if spike > 0.0 {
+            Self::Up
+        } else {
+            Self::Down
+        }
     }
 
     fn as_str(self) -> &'static str {
@@ -409,10 +413,7 @@ impl ArbEngine {
             .filter_map(|t| t.pnl)
             .sum();
 
-        let wallet_address = self
-            .live_state
-            .as_ref()
-            .map(|lw| lw.wallet_address.clone());
+        let wallet_address = self.live_state.as_ref().map(|lw| lw.wallet_address.clone());
 
         let mut markets = HashMap::new();
         for (symbol, state) in &self.symbol_states {
@@ -473,7 +474,9 @@ impl ArbEngine {
             "is_live": self.live_execution.is_some()
         });
 
-        let _ = self.dashboard_tx.try_send(DashboardMessage::Fast(fast_state));
+        let _ = self
+            .dashboard_tx
+            .try_send(DashboardMessage::Fast(fast_state));
 
         if slow_cache_updated {
             let slow_state = json!({
@@ -482,7 +485,9 @@ impl ArbEngine {
                 "config": self.slow_snapshot_cache.config.clone(),
                 "wallet_address": wallet_address,
             });
-            let _ = self.dashboard_tx.try_send(DashboardMessage::Slow(slow_state));
+            let _ = self
+                .dashboard_tx
+                .try_send(DashboardMessage::Slow(slow_state));
         }
     }
 
@@ -519,7 +524,11 @@ impl ArbEngine {
         let (trade_history_ref, starting_balance, is_live) = if let Some(lw) = &self.live_state {
             (&lw.trade_history, lw.starting_balance, true)
         } else {
-            (&self.wallet.trade_history, self.wallet.starting_balance, false)
+            (
+                &self.wallet.trade_history,
+                self.wallet.starting_balance,
+                false,
+            )
         };
 
         self.slow_snapshot_cache.trades = json!(trade_history_ref);
@@ -1101,7 +1110,10 @@ impl ArbEngine {
 
     async fn handle_price_update(&mut self, update: PriceUpdate) -> bool {
         {
-            let state = self.symbol_states.entry(update.symbol.to_string()).or_default();
+            let state = self
+                .symbol_states
+                .entry(update.symbol.to_string())
+                .or_default();
             if update.source == PriceSource::Binance {
                 state.last_binance = Some((update.price, update.timestamp));
                 let now = Instant::now();
@@ -1173,7 +1185,11 @@ impl ArbEngine {
                 if !state.price_to_beat_set {
                     state.price_to_beat = Some(update.price);
                     state.price_to_beat_set = true;
-                    info!(symbol=update.symbol, price_to_beat=update.price, "Price to beat set from first Chainlink tick");
+                    info!(
+                        symbol = update.symbol,
+                        price_to_beat = update.price,
+                        "Price to beat set from first Chainlink tick"
+                    );
                     // Update wallet with market metadata for hold mode
                     self.wallet.set_market_metadata(
                         update.symbol,
@@ -1347,7 +1363,8 @@ impl ArbEngine {
                 price,
                 reason: r,
                 latency_trace,
-            }).await;
+            })
+            .await;
         }
     }
 
@@ -1378,15 +1395,18 @@ impl ArbEngine {
         if self.live_execution.is_some() {
             self.send_live_command(LiveCommand::ClearTokens {
                 symbol: market.symbol.clone(),
-            }).await;
+            })
+            .await;
             self.send_live_command(LiveCommand::ClearPriceCache {
                 symbol: market.symbol.clone(),
-            }).await;
+            })
+            .await;
             self.send_live_command(LiveCommand::RegisterTokens {
                 up_token_id: market.up_token_id.clone(),
                 down_token_id: market.down_token_id.clone(),
                 symbol: market.symbol.clone(),
-            }).await;
+            })
+            .await;
         }
         self.wallet.set_market_info(&market.symbol, market.question);
         self.wallet.reset_prices(&market.symbol);
@@ -1724,7 +1744,8 @@ impl ArbEngine {
                             in_hold_mode,
                             current_btc: btc,
                             latency_trace,
-                        }).await;
+                        })
+                        .await;
                     } else {
                         self.add_signal(
                             symbol,
@@ -1758,7 +1779,7 @@ impl ArbEngine {
 
     async fn send_live_command(&self, mut command: LiveCommand) {
         if let LiveCommand::OpenPosition { latency_trace, .. }
-            | LiveCommand::ClosePosition { latency_trace, .. } = &mut command
+        | LiveCommand::ClosePosition { latency_trace, .. } = &mut command
         {
             latency_trace.intent_sent_at = Instant::now();
         }
@@ -1811,13 +1832,12 @@ impl ArbEngine {
                         self.wallet.rollback_pending_entry(&symbol, &direction);
                         if let Some(state) = self.symbol_states.get_mut(&symbol) {
                             let live_reason = format!("LIVE:{}", err);
-                            let should_log = state
-                                .last_rejection
-                                .as_ref()
-                                .map_or(true, |(r, t)| r != &live_reason || t.elapsed().as_secs() >= 3);
+                            let should_log =
+                                state.last_rejection.as_ref().map_or(true, |(r, t)| {
+                                    r != &live_reason || t.elapsed().as_secs() >= 3
+                                });
                             if should_log {
-                                state.last_rejection =
-                                    Some((live_reason.clone(), Instant::now()));
+                                state.last_rejection = Some((live_reason.clone(), Instant::now()));
                                 self.add_signal(
                                     &symbol,
                                     match direction.as_str() {
@@ -1867,10 +1887,9 @@ impl ArbEngine {
         });
 
         for paper_pos in &mut self.wallet.open_positions {
-            if let Some(live_pos) = live_positions
-                .iter()
-                .find(|live_pos| live_pos.symbol == paper_pos.symbol && live_pos.direction == paper_pos.direction)
-            {
+            if let Some(live_pos) = live_positions.iter().find(|live_pos| {
+                live_pos.symbol == paper_pos.symbol && live_pos.direction == paper_pos.direction
+            }) {
                 paper_pos.shares = live_pos.shares;
                 paper_pos.on_chain_shares = live_pos.on_chain_shares;
             }
@@ -1903,9 +1922,7 @@ impl ArbEngine {
             submit_ms: submit_finished_at
                 .duration_since(submit_started_at)
                 .as_millis() as u64,
-            apply_ms: applied_at
-                .duration_since(submit_finished_at)
-                .as_millis() as u64,
+            apply_ms: applied_at.duration_since(submit_finished_at).as_millis() as u64,
         };
 
         let operation = match kind {

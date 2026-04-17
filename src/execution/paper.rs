@@ -648,9 +648,7 @@ impl PaperWallet {
             Err(err) => warn!("Failed to load paper trade history: {err}"),
         }
 
-        match sqlx::query(
-            "SELECT t, v FROM paper_equity_history ORDER BY id DESC LIMIT 1000",
-        )
+        match sqlx::query("SELECT t, v FROM paper_equity_history ORDER BY id DESC LIMIT 1000")
             .fetch_all(&db)
             .await
         {
@@ -699,7 +697,12 @@ impl PaperWallet {
             total_volume: self.total_volume,
         };
         let new_trades = self.trade_history[self.saved_trade_count..].to_vec();
-        let new_history = self.history.iter().skip(self.saved_history_count).cloned().collect();
+        let new_history = self
+            .history
+            .iter()
+            .skip(self.saved_history_count)
+            .cloned()
+            .collect();
 
         if let Some(writer) = &self.db_writer {
             match writer.try_send(DbWriteCommand::Save {
@@ -1040,15 +1043,13 @@ impl PaperWallet {
     }
 
     fn get_book(&self, symbol: &str, direction: &str) -> Option<(&[BookLevel], &[BookLevel])> {
-        self.symbol_states
-            .get(symbol)
-            .map(|state| {
-                if direction == "UP" {
-                    (state.up_bids.as_slice(), state.up_asks.as_slice())
-                } else {
-                    (state.down_bids.as_slice(), state.down_asks.as_slice())
-                }
-            })
+        self.symbol_states.get(symbol).map(|state| {
+            if direction == "UP" {
+                (state.up_bids.as_slice(), state.up_asks.as_slice())
+            } else {
+                (state.down_bids.as_slice(), state.down_asks.as_slice())
+            }
+        })
     }
 
     pub fn estimate_fak_buy(
