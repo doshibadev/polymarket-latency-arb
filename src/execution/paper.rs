@@ -808,7 +808,7 @@ impl PaperWallet {
         closed
     }
 
-    pub fn open_position(&mut self, symbol: &str, direction: &str, spike: f64, threshold_usd: f64, allow_scaling: bool, current_btc: f64) -> std::result::Result<u32, String> {
+    pub fn open_position(&mut self, symbol: &str, direction: &str, spike: f64, _threshold_usd: f64, allow_scaling: bool, current_btc: f64) -> std::result::Result<u32, String> {
         let existing: Vec<_> = self.open_positions.iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
             .collect();
@@ -848,9 +848,6 @@ impl PaperWallet {
 
         // Reserve balance immediately so concurrent entries don't over-allocate
         self.balance -= position_size + buy_fee;
-
-        let spike_bonus = (spike.abs() - threshold_usd) * self.config.spike_scaling_factor;
-        let _profit_target = entry_price * (1.0 + self.config.profit_target_pct + spike_bonus);
 
         self.pending_entries.push(PendingEntry {
             symbol: symbol.to_string(),

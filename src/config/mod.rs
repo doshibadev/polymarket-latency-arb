@@ -9,14 +9,10 @@ pub struct AppConfig {
     pub paper_trading: bool,
     pub crypto_fee_rate: f64,
     pub max_entry_price: f64,
-    pub profit_target_pct: f64,
     pub trailing_stop_pct: f64,
     pub spike_faded_pct: f64,
     pub spike_faded_ms: u64,       // ms the reversal must persist before exiting
     pub min_hold_ms: u64,          // minimum hold time before any exit (except extreme reversal)
-    pub max_spread_bps: u64,
-    pub spike_scaling_factor: f64,
-    pub ema_alpha: f64,
     pub execution_delay_ms: u64,
     pub spike_sustain_ms: u64,       // ms to wait before entering on spike detection
     pub hold_margin_per_second: f64, // required $ margin per second remaining to hold to resolution
@@ -28,7 +24,6 @@ pub struct AppConfig {
     pub max_daily_loss: f64,
     pub max_exposure_per_market: f64,
     pub max_drawdown_pct: f64,
-    pub slippage_bps: u64,           // simulated slippage in basis points for paper trading
     pub trend_reversal_pct: f64,      // % of spike that must reverse to trigger trend_reversed exit
     pub stop_loss_pct: f64,           // % drop from entry price to trigger stop-loss exit (0 = disabled)
     pub hold_safety_margin: f64,      // $ margin from price_to_beat to exit in hold mode (e.g., 20 = exit if within $20)
@@ -56,14 +51,10 @@ impl AppConfig {
             paper_trading: env::var("PAPER_TRADING").ok().and_then(|v| v.parse().ok()).unwrap_or(true),
             crypto_fee_rate: env::var("CRYPTO_FEE_RATE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.072),
             max_entry_price: env::var("MAX_ENTRY_PRICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.80),
-            profit_target_pct: env::var("PROFIT_TARGET_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             trailing_stop_pct: env::var("TRAILING_STOP_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0),
             spike_faded_pct: env::var("SPIKE_FADED_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0),
             spike_faded_ms: env::var("SPIKE_FADED_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200),
             min_hold_ms: env::var("MIN_HOLD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500),
-            max_spread_bps: env::var("MAX_SPREAD_BPS").ok().and_then(|v| v.parse().ok()).unwrap_or(100),
-            spike_scaling_factor: env::var("SPIKE_SCALING_FACTOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0001),
-            ema_alpha: env::var("EMA_ALPHA").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1),
             execution_delay_ms: env::var("EXECUTION_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(300),
             spike_sustain_ms: env::var("SPIKE_SUSTAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
             hold_margin_per_second: env::var("HOLD_MARGIN_PER_SECOND").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5),
@@ -75,7 +66,6 @@ impl AppConfig {
             max_daily_loss: env::var("MAX_DAILY_LOSS").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0),
             max_exposure_per_market: env::var("MAX_EXPOSURE_PER_MARKET").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0),
             max_drawdown_pct: env::var("MAX_DRAWDOWN_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.30),
-            slippage_bps: env::var("SLIPPAGE_BPS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
             trend_reversal_pct: env::var("TREND_REVERSAL_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0),
             stop_loss_pct: env::var("STOP_LOSS_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0),
             hold_safety_margin: env::var("HOLD_SAFETY_MARGIN").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0),
