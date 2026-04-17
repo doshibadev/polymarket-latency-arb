@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 use crate::config::AppConfig;
 use crate::execution::actor::LiveWalletSnapshot;
 use crate::execution::paper::{OpenPosition, TradeRecord};
+use crate::polymarket::MarketData;
 
 // Polygon mainnet contract addresses (from Polymarket docs + reference bot)
 const USDC: Address = address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
@@ -46,6 +47,90 @@ sol! {
 type K256Signer = LocalSigner<k256::ecdsa::SigningKey>;
 type AuthClient = Client<Authenticated<Normal>>;
 type RedeemClient = CtfClient<DynProvider>;
+
+#[derive(Clone, Copy)]
+enum WalletKind {
+    Eoa,
+    Gnosis,
+}
+
+impl WalletKind {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "eoa" => Ok(Self::Eoa),
+            "gnosis" => Ok(Self::Gnosis),
+            other => Err(format!(
+                "Invalid WALLET_TYPE={other}. Expected `eoa` or `gnosis`."
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Eoa => "eoa",
+            Self::Gnosis => "gnosis",
+        }
+    }
+}
+
+pub struct LivePreflightCheck {
+    pub name: &'static str,
+    pub detail: String,
+}
+
+pub struct LivePreflightReport {
+    pub wallet_address: String,
+    pub wallet_type: String,
+    pub usdc_balance: f64,
+    pub checks: Vec<LivePreflightCheck>,
+}
+
+impl LivePreflightReport {
+    fn log_success(&self) {
+        info!(
+            wallet_address = %self.wallet_address,
+            wallet_type = %self.wallet_type,
+            usdc_balance = self.usdc_balance,
+            checks = self.checks.len(),
+            "Live startup preflight passed"
+        );
+        for check in &self.checks {
+            info!(check = check.name, detail = %check.detail, "Preflight check passed");
+        }
+    }
+}
+
+fn validate_markets(markets: &[MarketData]) -> Result<(), String> {
+    if markets.is_empty() {
+        return Err("No active markets found for live trading startup".to_string());
+    }
+
+    for market in markets {
+        if market.symbol.trim().is_empty() {
+            return Err("Live market preflight failed: empty symbol".to_string());
+        }
+        if market.condition_id.trim().is_empty() {
+            return Err(format!(
+                "Live market preflight failed: missing condition_id for {}",
+                market.symbol
+            ));
+        }
+        if market.up_token_id.trim().is_empty() || market.down_token_id.trim().is_empty() {
+            return Err(format!(
+                "Live market preflight failed: missing token ids for {}",
+                market.symbol
+            ));
+        }
+        if market.window_end_ts == 0 {
+            return Err(format!(
+                "Live market preflight failed: invalid window_end_ts for {}",
+                market.symbol
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 #[derive(Clone, Copy)]
 enum RetryMode {
@@ -196,6 +281,7 @@ pub struct LiveWallet {
     price_cache: HashMap<String, SymbolPriceCache>, // Cache WebSocket prices (matches paper.rs)
     zero_balance_flags: HashMap<String, Instant>, // "symbol:direction" -> first zero-balance detection time
     redeem_client: Option<RedeemClient>,
+    wallet_type: WalletKind,
 }
 
 impl LiveWallet {
@@ -206,17 +292,24 @@ impl LiveWallet {
         let signer = K256Signer::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
         let wallet_address = format!("{:?}", signer.address());
-        info!(eoa_address = %wallet_address, wallet_type = %std::env::var("WALLET_TYPE").unwrap_or("gnosis".into()), "Live wallet");
+        let wallet_type = WalletKind::parse(
+            &std::env::var("WALLET_TYPE").unwrap_or_else(|_| "gnosis".to_string()),
+        )
+        .map_err(|err| err.to_string())?;
+        info!(
+            eoa_address = %wallet_address,
+            wallet_type = wallet_type.as_str(),
+            "Live wallet"
+        );
 
         // Authenticate — use GnosisSafe for browser wallet (polymarket.com account)
         // or Eoa for standalone EOA wallet. Set WALLET_TYPE=eoa in .env for EOA.
         let clob_config = Config::builder().use_server_time(true).build();
-        let wallet_type = std::env::var("WALLET_TYPE").unwrap_or_else(|_| "gnosis".to_string());
         let clob = {
             use polymarket_client_sdk::clob::types::SignatureType;
             let builder = Client::new("https://clob.polymarket.com", clob_config)?
                 .authentication_builder(&signer);
-            if wallet_type.to_lowercase() == "eoa" {
+            if matches!(wallet_type, WalletKind::Eoa) {
                 builder
                     .signature_type(SignatureType::Eoa)
                     .authenticate()
@@ -279,7 +372,81 @@ impl LiveWallet {
             price_cache: HashMap::new(),
             zero_balance_flags: HashMap::new(),
             redeem_client,
+            wallet_type,
         })
+    }
+
+    pub async fn run_startup_preflight(
+        &mut self,
+        initial_markets: &[MarketData],
+    ) -> Result<LivePreflightReport, Box<dyn std::error::Error + Send + Sync>> {
+        validate_markets(initial_markets).map_err(|err| err.to_string())?;
+
+        let mut checks = vec![LivePreflightCheck {
+            name: "market_metadata",
+            detail: format!("{} active market(s) ready", initial_markets.len()),
+        }];
+
+        self.clob
+            .api_keys()
+            .await
+            .map_err(|err| format!("Live preflight failed: API credentials invalid: {err}"))?;
+        checks.push(LivePreflightCheck {
+            name: "api_credentials",
+            detail: "CLOB API credentials validated".to_string(),
+        });
+
+        let redeem_client = connect_redeem_client(&self.signer)
+            .await
+            .map_err(|err| format!("Live preflight failed: Polygon RPC unavailable: {err}"))?;
+        self.redeem_client = Some(redeem_client);
+        checks.push(LivePreflightCheck {
+            name: "polygon_rpc",
+            detail: format!("RPC reachable via {}", rpc_url()),
+        });
+
+        self.ensure_approvals()
+            .await
+            .map_err(|err| format!("Live preflight failed: approvals not ready: {err}"))?;
+        checks.push(LivePreflightCheck {
+            name: "approvals",
+            detail: "USDC + CTF approvals confirmed".to_string(),
+        });
+
+        self.clob
+            .update_balance_allowance(Default::default())
+            .await
+            .map_err(|err| {
+                format!("Live preflight failed: could not refresh USDC balance: {err}")
+            })?;
+        let balance = self
+            .clob
+            .balance_allowance(Default::default())
+            .await
+            .map_err(|err| format!("Live preflight failed: could not fetch USDC balance: {err}"))?;
+        let raw: f64 = balance.balance.try_into().unwrap_or(0.0);
+        let usdc_balance = raw / 1_000_000.0;
+        if usdc_balance < 1.0 {
+            return Err(format!(
+                "Live preflight failed: wallet has ${usdc_balance:.2} USDC, need at least $1.00 to place live orders"
+            )
+            .into());
+        }
+        self.balance = usdc_balance;
+        self.starting_balance = usdc_balance;
+        checks.push(LivePreflightCheck {
+            name: "usdc_balance",
+            detail: format!("wallet balance ${usdc_balance:.2}"),
+        });
+
+        let report = LivePreflightReport {
+            wallet_address: self.wallet_address.clone(),
+            wallet_type: self.wallet_type.as_str().to_string(),
+            usdc_balance,
+            checks,
+        };
+        report.log_success();
+        Ok(report)
     }
 
     pub async fn ensure_approvals(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1520,5 +1687,43 @@ impl LiveWallet {
             entry_mode: pos.entry_mode.clone(),
             exit_suppressed_count: Some(pos.exit_suppressed_count),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_markets, WalletKind};
+    use crate::polymarket::MarketData;
+
+    fn sample_market() -> MarketData {
+        MarketData {
+            symbol: "BTC".to_string(),
+            condition_id: "cond".to_string(),
+            question: "BTC up or down?".to_string(),
+            up_price: 0.51,
+            down_price: 0.49,
+            up_token_id: "up".to_string(),
+            down_token_id: "down".to_string(),
+            window_end_ts: 123,
+        }
+    }
+
+    #[test]
+    fn wallet_kind_parse_rejects_invalid_values() {
+        assert!(matches!(WalletKind::parse("eoa"), Ok(WalletKind::Eoa)));
+        assert!(matches!(
+            WalletKind::parse("gnosis"),
+            Ok(WalletKind::Gnosis)
+        ));
+        assert!(WalletKind::parse("bad").is_err());
+    }
+
+    #[test]
+    fn validate_markets_rejects_missing_live_metadata() {
+        let mut market = sample_market();
+        market.up_token_id.clear();
+        assert!(validate_markets(&[market]).is_err());
+        assert!(validate_markets(&[]).is_err());
+        assert!(validate_markets(&[sample_market()]).is_ok());
     }
 }
