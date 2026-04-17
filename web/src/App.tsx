@@ -556,7 +556,64 @@ function RuntimeStrip({
   );
 }
 
-function MarketScanner({ markets }: { markets: Record<string, MarketSnapshot> }) {
+function MarketControls({
+  symbols,
+  selectedSymbol,
+  markets,
+  busy,
+  onSelect,
+  onToggle,
+}: {
+  symbols: string[];
+  selectedSymbol: string;
+  markets: Record<string, MarketSnapshot>;
+  busy: boolean;
+  onSelect: (symbol: string) => void;
+  onToggle: (symbol: string, enabled: boolean) => void;
+}) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+      {symbols.map((symbol) => {
+        const enabled = markets[symbol]?.enabled ?? true;
+        const selected = selectedSymbol === symbol;
+        return (
+          <div key={symbol} style={{ display: "flex", gap: 6 }}>
+            <button
+              className={`top-tab ${selected ? "top-tab-active" : ""}`}
+              style={{ minWidth: 64, border: "1px solid var(--border-dim)", background: selected ? "#111827" : "var(--bg-accent)" }}
+              onClick={() => onSelect(symbol)}
+            >
+              {symbol}
+            </button>
+            <button
+              className="settings-btn"
+              style={{
+                padding: "0 10px",
+                minWidth: 78,
+                borderColor: enabled ? "var(--color-up)" : "var(--border-dim)",
+                color: enabled ? "var(--color-up)" : "var(--text-dim)",
+              }}
+              onClick={() => onToggle(symbol, !enabled)}
+              disabled={busy}
+            >
+              {enabled ? "ON" : "OFF"}
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MarketScanner({
+  markets,
+  selectedSymbol,
+  onSelect,
+}: {
+  markets: Record<string, MarketSnapshot>;
+  selectedSymbol: string;
+  onSelect: (symbol: string) => void;
+}) {
   const rows = useMemo(
     () =>
       Object.entries(markets)
@@ -577,13 +634,25 @@ function MarketScanner({ markets }: { markets: Record<string, MarketSnapshot> })
           </div>
           <div className="table-body">
             {rows.map(({ symbol, market }) => (
-              <div className="table-row markets-grid" key={symbol} title={market.question}>
+              <button
+                type="button"
+                className="table-row markets-grid"
+                key={symbol}
+                title={market.question}
+                onClick={() => onSelect(symbol)}
+                style={{
+                  width: "100%",
+                  textAlign: "left",
+                  background: selectedSymbol === symbol ? "rgba(59, 130, 246, 0.08)" : "transparent",
+                  border: 0,
+                }}
+              >
                 <span className="table-strong">{symbol}</span>
                 <span className="val-up">{market.up_price.toFixed(4)}</span>
                 <span className="val-down">{market.down_price.toFixed(4)}</span>
                 <span className={(market.spike || 0) >= 0 ? "val-up" : "val-down"}>{formatSigned(market.spike || 0)}</span>
                 <span>{formatTimer(market.end_ts)}</span>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -677,8 +746,8 @@ function TradeTable({
             {slice.map((trade, index) => {
               const pnl = trade.pnl ?? 0;
               const pnlPct =
-                trade.entry_price && trade.exit_price
-                  ? (((trade.exit_price - trade.entry_price) / trade.entry_price) * 100 * (trade.direction === "DOWN" ? -1 : 1))
+                trade.cost > 0
+                  ? (pnl / trade.cost) * 100
                   : 0;
               return kind === "all" ? (
                 <div className="table-row trades-grid" key={`${trade.timestamp}-${trade.symbol}-${start + index}`}>
@@ -840,6 +909,15 @@ export function App() {
     }
   }
 
+  async function toggleMarket(symbol: string, enabled: boolean) {
+    setBusyAction(`toggle-${symbol}`);
+    try {
+      await sendCommand({ _type: "toggle_market", symbol, enabled });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function handleSaveSettings() {
     setBusyAction("save");
     setSaveState("idle");
@@ -951,21 +1029,16 @@ export function App() {
           {activeTab === "trade" ? (
             <div className="workspace-grid workspace-grid-trade">
               <div className="panel fixed-panel">
-                <div className="panel-header">
-                  <div className="panel-title">Active Market</div>
-                  <div className="top-tabs" style={{ flex: "0 0 auto", minWidth: 0, justifyContent: "flex-end" }}>
-                    {marketSymbols.map((symbol) => (
-                      <button
-                        key={symbol}
-                        className={`top-tab ${displayMarketSymbol === symbol ? "top-tab-active" : ""}`}
-                        onClick={() => setSelectedMarketSymbol(symbol)}
-                      >
-                        {symbol}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <div className="panel-header"><div className="panel-title">Active Market</div></div>
                 <div className="market-summary">
+                  <MarketControls
+                    symbols={marketSymbols}
+                    selectedSymbol={displayMarketSymbol}
+                    markets={snapshot.markets}
+                    busy={busyAction !== null}
+                    onSelect={setSelectedMarketSymbol}
+                    onToggle={(symbol, enabled) => void toggleMarket(symbol, enabled)}
+                  />
                   <div className="m-question">{(market?.question || "FETCHING MARKET DATA...").toUpperCase()}</div>
                   <div className="m-timer">{formatTimer(market?.end_ts)}</div>
                   <div className="market-summary-grid">
@@ -1019,23 +1092,22 @@ export function App() {
 
           {activeTab === "markets" ? (
             <div className="workspace-grid workspace-grid-two">
-              <MarketScanner markets={snapshot.markets} />
+              <MarketScanner
+                markets={snapshot.markets}
+                selectedSymbol={displayMarketSymbol}
+                onSelect={setSelectedMarketSymbol}
+              />
               <div className="panel fixed-panel">
-                <div className="panel-header">
-                  <div className="panel-title">Active Market Detail</div>
-                  <div className="top-tabs" style={{ flex: "0 0 auto", minWidth: 0, justifyContent: "flex-end" }}>
-                    {marketSymbols.map((symbol) => (
-                      <button
-                        key={symbol}
-                        className={`top-tab ${displayMarketSymbol === symbol ? "top-tab-active" : ""}`}
-                        onClick={() => setSelectedMarketSymbol(symbol)}
-                      >
-                        {symbol}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <div className="panel-header"><div className="panel-title">Active Market Detail</div></div>
                 <div className="market-summary market-summary-spacious">
+                  <MarketControls
+                    symbols={marketSymbols}
+                    selectedSymbol={displayMarketSymbol}
+                    markets={snapshot.markets}
+                    busy={busyAction !== null}
+                    onSelect={setSelectedMarketSymbol}
+                    onToggle={(symbol, enabled) => void toggleMarket(symbol, enabled)}
+                  />
                   <div className="m-question">{(market?.question || "FETCHING MARKET DATA...").toUpperCase()}</div>
                   <div className="market-summary-grid">
                     <div className="market-mini"><span className="p-label">ENDS IN</span><span className="p-val p-gold">{formatTimer(market?.end_ts)}</span></div>

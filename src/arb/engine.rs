@@ -148,6 +148,7 @@ impl SignalStatus {
 
 #[derive(Default)]
 struct SymbolState {
+    pub enabled: bool,
     pub last_binance: Option<(f64, Instant)>,
     pub last_chainlink: Option<(f64, Instant)>,
     pub last_spike_usd: f64,
@@ -572,7 +573,8 @@ impl ArbEngine {
                     "spike": spike,
                     "ema_offset": 0.0,
                     "price_to_beat": state.price_to_beat,
-                    "end_ts": state.market_end_ts
+                    "end_ts": state.market_end_ts,
+                    "enabled": state.enabled
                 }),
             );
         }
@@ -874,6 +876,15 @@ impl ArbEngine {
                                 // Update chart history
                                 let _bal = self.current_balance(); let _nmv = self.current_net_market_value(); self.update_history(_bal + _nmv);
                                 self.broadcast_state();
+                            }
+                        }
+                        Some("toggle_market") => {
+                            let symbol = cmd.get("symbol").and_then(|v| v.as_str());
+                            let enabled = cmd.get("enabled").and_then(|v| v.as_bool());
+                            if let (Some(symbol), Some(enabled)) = (symbol, enabled) {
+                                let state = self.symbol_states.entry(symbol.to_string()).or_default();
+                                state.enabled = enabled;
+                                info!(symbol, enabled, "Market toggled from dashboard");
                             }
                         }
                         _ => {
@@ -1376,6 +1387,9 @@ impl ArbEngine {
 
         {
             let state = self.symbol_states.entry(market.symbol.clone()).or_default();
+            if state.question.is_empty() && !state.enabled {
+                state.enabled = true;
+            }
             state.market_end_ts = Some(market.window_end_ts);
             state.condition_id = Some(market.condition_id.clone());
             state.question = market.question.clone();
@@ -1428,6 +1442,12 @@ impl ArbEngine {
 
         // Need to re-fetch state to modify it
         let state = self.symbol_states.get_mut(symbol).unwrap();
+
+        if !state.enabled {
+            state.last_spike_usd = 0.0;
+            state.spike_confirmed_since = None;
+            return;
+        }
 
         // Block spike detection for 3 seconds after market transition
         // Prevents buying stale tokens from the old market window

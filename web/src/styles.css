@@ -353,7 +353,7 @@ select {
 
 .workspace-grid-activity {
   grid-template-columns: minmax(560px, 1fr) minmax(460px, 0.86fr) minmax(420px, 0.78fr);
-  align-items: stretch;
+  align-items: start;
 }
 
 .workspace-grid-portfolio {
@@ -783,7 +783,14 @@ select {
 }
 
 .signal-shell {
-  min-height: 640px;
+  height: 640px;
+  max-height: 640px;
+}
+
+.exec-panel,
+.settled-panel {
+  height: 640px;
+  max-height: 640px;
 }
 
 .terminal-panel-full {

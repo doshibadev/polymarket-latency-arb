@@ -49,6 +49,7 @@ export type MarketSnapshot = {
   chainlink: number;
   spike: number;
   ema_offset: number;
+  enabled: boolean;
   price_to_beat?: number | null;
   end_ts?: number | null;
 };
@@ -131,7 +132,8 @@ export type CommandPayload =
   | { _type: "start" }
   | { _type: "stop" }
   | { _type: "reset" }
-  | { _type: "close_position"; index: number };
+  | { _type: "close_position"; index: number }
+  | { _type: "toggle_market"; symbol: string; enabled: boolean };
 
 export type ConfigField =
   | keyof Pick<
