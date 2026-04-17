@@ -289,15 +289,56 @@
         .modal-content {
             background: var(--bg-card);
             border: 1px solid var(--border-bright);
-            width: 520px;
+            width: 760px;
+            max-width: calc(100vw - 32px);
+            max-height: calc(100vh - 32px);
             border-radius: 8px;
             box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .settings-tabs {
+            display: flex;
+            gap: 4px;
+            padding: 10px 12px 0;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-dim);
+            overflow-x: auto;
+            flex-shrink: 0;
+        }
+        .settings-tab {
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--text-dim);
+            padding: 8px 12px;
+            border-radius: 4px 4px 0 0;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .settings-tab.active {
+            background: var(--bg-accent);
+            border-color: var(--border-dim);
+            border-bottom-color: var(--bg-accent);
+            color: #fff;
         }
         .settings-grid {
-            display: grid;
+            display: block;
+            padding: 20px;
+            overflow-y: auto;
+            min-height: 0;
+        }
+        .settings-pane {
+            display: none;
             grid-template-columns: 1fr 1fr;
             gap: 16px;
-            padding: 20px;
+        }
+        .settings-pane.active {
+            display: grid;
         }
         .setting-group {
             display: flex;
@@ -343,8 +384,8 @@
         }
         .setting-input:focus { border-color: var(--color-neutral); }
         .save-btn {
-            grid-column: 1 / -1;
-            margin-top: 10px;
+            width: 100%;
+            margin-top: 20px;
             background: var(--color-neutral);
             color: #fff;
             border: none;
@@ -355,6 +396,13 @@
             font-weight: 700;
             cursor: pointer;
             text-transform: uppercase;
+        }
+        @media (max-width: 640px) {
+            .settings-pane { grid-template-columns: 1fr; }
+            .modal-content {
+                max-width: calc(100vw - 16px);
+                max-height: calc(100vh - 16px);
+            }
         }
         .spike-mini-chart { height: 50px; margin-top: 8px; position: relative; }
         .spike-mini-chart canvas { width: 100% !important; height: 50px !important; }
@@ -395,7 +443,15 @@
                 <div class="panel-title">Bot Configuration</div>
                 <div style="cursor:pointer; color:var(--text-dim);" onclick="closeSettings()">✕</div>
             </div>
+            <div class="settings-tabs" role="tablist" aria-label="Settings categories">
+                <button class="settings-tab active" type="button" role="tab" data-settings-tab="entry" onclick="switchSettingsTab('entry')">Entry</button>
+                <button class="settings-tab" type="button" role="tab" data-settings-tab="exit" onclick="switchSettingsTab('exit')">Exit</button>
+                <button class="settings-tab" type="button" role="tab" data-settings-tab="hold" onclick="switchSettingsTab('hold')">Hold</button>
+                <button class="settings-tab" type="button" role="tab" data-settings-tab="risk" onclick="switchSettingsTab('risk')">Risk</button>
+                <button class="settings-tab" type="button" role="tab" data-settings-tab="trend" onclick="switchSettingsTab('trend')">Trend</button>
+            </div>
             <div class="settings-grid">
+                <div class="settings-pane active" data-settings-tab-panel="entry">
                 <div class="setting-section">Entry</div>
                 <div class="setting-group">
                     <label class="setting-label">Spike Threshold ($)</label>
@@ -445,6 +501,8 @@
                     <label class="setting-label">Min Price Distance</label>
                     <input type="number" id="set-min-price-distance" class="setting-input" step="0.01" placeholder="e.g. 0.05">
                 </div>
+                </div>
+                <div class="settings-pane" data-settings-tab-panel="exit">
                 <div class="setting-section">Exit</div>
                 <div class="setting-group">
                     <label class="setting-label">Trailing Stop (%)</label>
@@ -462,6 +520,8 @@
                     <label class="setting-label">Early Exit Loss (%)</label>
                     <input type="number" id="set-early-exit-loss-pct" class="setting-input" step="0.1" placeholder="e.g. 20">
                 </div>
+                </div>
+                <div class="settings-pane" data-settings-tab-panel="hold">
                 <div class="setting-section">Hold Mode</div>
                 <div class="setting-group">
                     <label class="setting-label">Hold Min Share Price</label>
@@ -483,6 +543,8 @@
                     <label class="setting-label">Hold Max Crossings</label>
                     <input type="number" id="set-hold-max-crossings" class="setting-input" placeholder="e.g. 2">
                 </div>
+                </div>
+                <div class="settings-pane" data-settings-tab-panel="risk">
                 <div class="setting-section">Risk</div>
                 <div class="setting-group">
                     <label class="setting-label">Max Orders/Min</label>
@@ -504,6 +566,8 @@
                     <label class="setting-label">Crypto Fee Rate</label>
                     <input type="number" id="set-crypto-fee-rate" class="setting-input" step="0.001" placeholder="e.g. 0.072">
                 </div>
+                </div>
+                <div class="settings-pane" data-settings-tab-panel="trend">
                 <div class="setting-section">Trend Filter</div>
                 <div class="setting-group setting-check">
                     <input type="checkbox" id="set-trend-filter-enabled">
@@ -528,6 +592,7 @@
                 <div class="setting-group">
                     <label class="setting-label">PTB Max Counter Distance ($)</label>
                     <input type="number" id="set-ptb-max-counter-distance-usd" class="setting-input" step="1" placeholder="e.g. 200">
+                </div>
                 </div>
                 <button class="save-btn" onclick="saveSettings()">Save & Apply Changes</button>
             </div>
@@ -748,6 +813,15 @@
             // To switch modes, change PAPER_TRADING in .env and restart the bot
         };
 
+        const switchSettingsTab = (tabName) => {
+            document.querySelectorAll('.settings-tab').forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.settingsTab === tabName);
+            });
+            document.querySelectorAll('.settings-pane').forEach(panel => {
+                panel.classList.toggle('active', panel.dataset.settingsTabPanel === tabName);
+            });
+        };
+
         let myChart = null;
         let spikeChart = null;
         let startingBalance = 27.0;
@@ -837,6 +911,7 @@
 
         const openSettings = async () => {
             const isLive = document.getElementById('btn-live').classList.contains('active-live');
+            switchSettingsTab('entry');
             // Show/hide simulation-only fields
             document.querySelectorAll('.sim-only').forEach(el => {
                 el.style.display = isLive ? 'none' : '';
