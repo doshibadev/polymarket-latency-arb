@@ -13,6 +13,9 @@ use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::ctf::Client as CtfClient;
 use polymarket_client_sdk::types::{address, Address, Decimal, U256};
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
+use sqlx::{Pool, Sqlite};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
@@ -98,6 +101,53 @@ impl LivePreflightReport {
             info!(check = check.name, detail = %check.detail, "Preflight check passed");
         }
     }
+}
+
+#[derive(Clone)]
+struct LiveWalletStateSnapshot {
+    balance: f64,
+    starting_balance: f64,
+    trade_count: u64,
+    wins: u64,
+    losses: u64,
+    total_fees_paid: f64,
+    total_volume: f64,
+    cumulative_pnl: f64,
+    daily_pnl: f64,
+    wallet_address: String,
+    wallet_type: String,
+}
+
+#[derive(Clone)]
+struct PersistedLivePosition {
+    symbol: String,
+    direction: String,
+    entry_price: f64,
+    avg_entry_price: f64,
+    shares: f64,
+    position_size: f64,
+    buy_fee: f64,
+    entry_spike: f64,
+    highest_price: f64,
+    scale_level: u32,
+    hold_to_resolution: bool,
+    peak_spike: f64,
+    entry_btc: f64,
+    peak_btc: f64,
+    trough_btc: f64,
+    trailing_stop_activated: bool,
+    on_chain_shares: Option<f64>,
+    ptb_tier_at_entry: Option<String>,
+    entry_mode: Option<String>,
+    exit_suppressed_count: u32,
+}
+
+enum LiveDbWriteCommand {
+    Save {
+        wallet: LiveWalletStateSnapshot,
+        trades: Vec<TradeRecord>,
+        positions: Vec<PersistedLivePosition>,
+    },
 }
 
 fn validate_markets(markets: &[MarketData]) -> Result<(), String> {
@@ -282,9 +332,14 @@ pub struct LiveWallet {
     zero_balance_flags: HashMap<String, Instant>, // "symbol:direction" -> first zero-balance detection time
     redeem_client: Option<RedeemClient>,
     wallet_type: WalletKind,
+    db: Option<Pool<Sqlite>>,
+    db_writer: Option<mpsc::Sender<LiveDbWriteCommand>>,
+    saved_trade_count: usize,
 }
 
 impl LiveWallet {
+    const DB_URL: &'static str = "sqlite://lattice-live.db";
+
     pub async fn new(config: AppConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let private_key =
             std::env::var(PRIVATE_KEY_VAR).map_err(|_| "POLYMARKET_PRIVATE_KEY not set in .env")?;
@@ -373,7 +428,383 @@ impl LiveWallet {
             zero_balance_flags: HashMap::new(),
             redeem_client,
             wallet_type,
+            db: None,
+            db_writer: None,
+            saved_trade_count: 0,
         })
+    }
+
+    async fn db(&mut self) -> std::result::Result<Pool<Sqlite>, sqlx::Error> {
+        if let Some(db) = &self.db {
+            return Ok(db.clone());
+        }
+
+        let options = SqliteConnectOptions::from_str(Self::DB_URL)?
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let db = SqlitePool::connect_with(options).await?;
+        Self::migrate(&db).await?;
+        self.db = Some(db.clone());
+        self.ensure_db_writer(&db);
+        Ok(db)
+    }
+
+    fn ensure_db_writer(&mut self, db: &Pool<Sqlite>) {
+        if self.db_writer.is_some() {
+            return;
+        }
+
+        let (tx, mut rx) = mpsc::channel(32);
+        let db = db.clone();
+        tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    LiveDbWriteCommand::Save {
+                        wallet,
+                        trades,
+                        positions,
+                    } => {
+                        let mut tx = match db.begin().await {
+                            Ok(tx) => tx,
+                            Err(err) => {
+                                warn!("Failed to start live wallet save transaction: {err}");
+                                continue;
+                            }
+                        };
+
+                        let save_result = async {
+                            sqlx::query(
+                                r#"
+                                INSERT INTO live_wallet_state (
+                                    id, balance, starting_balance, trade_count, wins, losses,
+                                    total_fees_paid, total_volume, cumulative_pnl, daily_pnl,
+                                    wallet_address, wallet_type, updated_at
+                                )
+                                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ON CONFLICT(id) DO UPDATE SET
+                                    balance = excluded.balance,
+                                    starting_balance = excluded.starting_balance,
+                                    trade_count = excluded.trade_count,
+                                    wins = excluded.wins,
+                                    losses = excluded.losses,
+                                    total_fees_paid = excluded.total_fees_paid,
+                                    total_volume = excluded.total_volume,
+                                    cumulative_pnl = excluded.cumulative_pnl,
+                                    daily_pnl = excluded.daily_pnl,
+                                    wallet_address = excluded.wallet_address,
+                                    wallet_type = excluded.wallet_type,
+                                    updated_at = excluded.updated_at
+                                "#,
+                            )
+                            .bind(wallet.balance)
+                            .bind(wallet.starting_balance)
+                            .bind(wallet.trade_count as i64)
+                            .bind(wallet.wins as i64)
+                            .bind(wallet.losses as i64)
+                            .bind(wallet.total_fees_paid)
+                            .bind(wallet.total_volume)
+                            .bind(wallet.cumulative_pnl)
+                            .bind(wallet.daily_pnl)
+                            .bind(&wallet.wallet_address)
+                            .bind(&wallet.wallet_type)
+                            .bind(chrono::Utc::now().to_rfc3339())
+                            .execute(&mut *tx)
+                            .await?;
+
+                            for trade in &trades {
+                                sqlx::query(
+                                    r#"
+                                    INSERT INTO live_trades (
+                                        symbol, type, question, direction, entry_price, exit_price, shares, cost,
+                                        pnl, cumulative_pnl, balance_after, timestamp, close_reason, btc_at_entry,
+                                        price_to_beat_at_entry, ptb_margin_at_entry, seconds_to_expiry_at_entry,
+                                        spread_at_entry, round_trip_loss_pct_at_entry, signal_score,
+                                        ptb_margin_at_exit, exit_mode, favorable_ptb_at_exit, ptb_tier_at_entry,
+                                        ptb_tier_at_exit, entry_mode, exit_suppressed_count
+                                    )
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    "#,
+                                )
+                                .bind(&trade.symbol)
+                                .bind(&trade.r#type)
+                                .bind(&trade.question)
+                                .bind(&trade.direction)
+                                .bind(trade.entry_price)
+                                .bind(trade.exit_price)
+                                .bind(trade.shares)
+                                .bind(trade.cost)
+                                .bind(trade.pnl)
+                                .bind(trade.cumulative_pnl)
+                                .bind(trade.balance_after)
+                                .bind(&trade.timestamp)
+                                .bind(&trade.close_reason)
+                                .bind(trade.btc_at_entry)
+                                .bind(trade.price_to_beat_at_entry)
+                                .bind(trade.ptb_margin_at_entry)
+                                .bind(trade.seconds_to_expiry_at_entry.map(|value| value as i64))
+                                .bind(trade.spread_at_entry)
+                                .bind(trade.round_trip_loss_pct_at_entry)
+                                .bind(trade.signal_score)
+                                .bind(trade.ptb_margin_at_exit)
+                                .bind(&trade.exit_mode)
+                                .bind(trade.favorable_ptb_at_exit.map(i64::from))
+                                .bind(&trade.ptb_tier_at_entry)
+                                .bind(&trade.ptb_tier_at_exit)
+                                .bind(&trade.entry_mode)
+                                .bind(trade.exit_suppressed_count.map(|value| value as i64))
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+
+                            sqlx::query("DELETE FROM live_open_positions")
+                                .execute(&mut *tx)
+                                .await?;
+
+                            for position in &positions {
+                                sqlx::query(
+                                    r#"
+                                    INSERT INTO live_open_positions (
+                                        symbol, direction, entry_price, avg_entry_price, shares, position_size,
+                                        buy_fee, entry_spike, highest_price, scale_level, hold_to_resolution,
+                                        peak_spike, entry_btc, peak_btc, trough_btc, trailing_stop_activated,
+                                        on_chain_shares, ptb_tier_at_entry, entry_mode, exit_suppressed_count,
+                                        updated_at
+                                    )
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    "#,
+                                )
+                                .bind(&position.symbol)
+                                .bind(&position.direction)
+                                .bind(position.entry_price)
+                                .bind(position.avg_entry_price)
+                                .bind(position.shares)
+                                .bind(position.position_size)
+                                .bind(position.buy_fee)
+                                .bind(position.entry_spike)
+                                .bind(position.highest_price)
+                                .bind(position.scale_level as i64)
+                                .bind(position.hold_to_resolution)
+                                .bind(position.peak_spike)
+                                .bind(position.entry_btc)
+                                .bind(position.peak_btc)
+                                .bind(position.trough_btc)
+                                .bind(position.trailing_stop_activated)
+                                .bind(position.on_chain_shares)
+                                .bind(&position.ptb_tier_at_entry)
+                                .bind(&position.entry_mode)
+                                .bind(position.exit_suppressed_count as i64)
+                                .bind(chrono::Utc::now().to_rfc3339())
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+
+                            std::result::Result::<(), sqlx::Error>::Ok(())
+                        }
+                        .await;
+
+                        match save_result {
+                            Ok(()) => {
+                                if let Err(err) = tx.commit().await {
+                                    warn!("Failed to commit live wallet state: {err}");
+                                }
+                            }
+                            Err(err) => {
+                                warn!("Failed to save live wallet state: {err}");
+                                let _ = tx.rollback().await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        self.db_writer = Some(tx);
+    }
+
+    async fn migrate(db: &Pool<Sqlite>) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS live_wallet_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                balance REAL NOT NULL,
+                starting_balance REAL NOT NULL,
+                trade_count INTEGER NOT NULL,
+                wins INTEGER NOT NULL,
+                losses INTEGER NOT NULL,
+                total_fees_paid REAL NOT NULL,
+                total_volume REAL NOT NULL,
+                cumulative_pnl REAL NOT NULL,
+                daily_pnl REAL NOT NULL,
+                wallet_address TEXT NOT NULL,
+                wallet_type TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(db)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS live_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                type TEXT NOT NULL,
+                question TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                entry_price REAL,
+                exit_price REAL,
+                shares REAL NOT NULL,
+                cost REAL NOT NULL,
+                pnl REAL,
+                cumulative_pnl REAL,
+                balance_after REAL,
+                timestamp TEXT NOT NULL,
+                close_reason TEXT,
+                btc_at_entry REAL,
+                price_to_beat_at_entry REAL,
+                ptb_margin_at_entry REAL,
+                seconds_to_expiry_at_entry INTEGER,
+                spread_at_entry REAL,
+                round_trip_loss_pct_at_entry REAL,
+                signal_score REAL,
+                ptb_margin_at_exit REAL,
+                exit_mode TEXT,
+                favorable_ptb_at_exit INTEGER,
+                ptb_tier_at_entry TEXT,
+                ptb_tier_at_exit TEXT,
+                entry_mode TEXT,
+                exit_suppressed_count INTEGER
+            )
+            "#,
+        )
+        .execute(db)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS live_open_positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                avg_entry_price REAL NOT NULL,
+                shares REAL NOT NULL,
+                position_size REAL NOT NULL,
+                buy_fee REAL NOT NULL,
+                entry_spike REAL NOT NULL,
+                highest_price REAL NOT NULL,
+                scale_level INTEGER NOT NULL,
+                hold_to_resolution INTEGER NOT NULL,
+                peak_spike REAL NOT NULL,
+                entry_btc REAL NOT NULL,
+                peak_btc REAL NOT NULL,
+                trough_btc REAL NOT NULL,
+                trailing_stop_activated INTEGER NOT NULL,
+                on_chain_shares REAL,
+                ptb_tier_at_entry TEXT,
+                entry_mode TEXT,
+                exit_suppressed_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(db)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_live_trades_timestamp ON live_trades(timestamp)",
+        )
+        .execute(db)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_live_open_positions_symbol_direction ON live_open_positions(symbol, direction)",
+        )
+        .execute(db)
+        .await?;
+
+        Ok(())
+    }
+
+    fn wallet_state_snapshot(&self) -> LiveWalletStateSnapshot {
+        LiveWalletStateSnapshot {
+            balance: self.balance,
+            starting_balance: self.starting_balance,
+            trade_count: self.trade_count,
+            wins: self.wins,
+            losses: self.losses,
+            total_fees_paid: self.total_fees_paid,
+            total_volume: self.total_volume,
+            cumulative_pnl: self.cumulative_pnl,
+            daily_pnl: self.daily_pnl,
+            wallet_address: self.wallet_address.clone(),
+            wallet_type: self.wallet_type.as_str().to_string(),
+        }
+    }
+
+    fn persisted_open_positions(&self) -> Vec<PersistedLivePosition> {
+        self.open_positions
+            .iter()
+            .map(|position| PersistedLivePosition {
+                symbol: position.symbol.clone(),
+                direction: position.direction.clone(),
+                entry_price: position.entry_price,
+                avg_entry_price: position.avg_entry_price,
+                shares: position.shares,
+                position_size: position.position_size,
+                buy_fee: position.buy_fee,
+                entry_spike: position.entry_spike,
+                highest_price: position.highest_price,
+                scale_level: position.scale_level,
+                hold_to_resolution: position.hold_to_resolution,
+                peak_spike: position.peak_spike,
+                entry_btc: position.entry_btc,
+                peak_btc: position.peak_btc,
+                trough_btc: position.trough_btc,
+                trailing_stop_activated: position.trailing_stop_activated,
+                on_chain_shares: position.on_chain_shares,
+                ptb_tier_at_entry: position.ptb_tier_at_entry.clone(),
+                entry_mode: position.entry_mode.clone(),
+                exit_suppressed_count: position.exit_suppressed_count,
+            })
+            .collect()
+    }
+
+    pub async fn save_state(&mut self) {
+        match self.db().await {
+            Ok(_) => {}
+            Err(err) => {
+                warn!("Failed to open live wallet database for save: {err}");
+                return;
+            }
+        }
+
+        let wallet = self.wallet_state_snapshot();
+        let new_trades = self.trade_history[self.saved_trade_count..].to_vec();
+        let positions = self.persisted_open_positions();
+
+        if let Some(writer) = &self.db_writer {
+            match writer.try_send(LiveDbWriteCommand::Save {
+                wallet,
+                trades: new_trades.clone(),
+                positions,
+            }) {
+                Ok(()) => {
+                    self.saved_trade_count = self.trade_history.len();
+                }
+                Err(mpsc::error::TrySendError::Full(_)) if new_trades.is_empty() => {
+                    warn!("Live DB writer backed up, skipped snapshot-only save");
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!("Live DB writer backed up, retaining unsaved live trades for retry");
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    warn!("Failed to queue live wallet save: DB writer closed");
+                }
+            }
+        }
     }
 
     pub async fn run_startup_preflight(

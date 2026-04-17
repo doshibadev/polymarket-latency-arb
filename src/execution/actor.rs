@@ -138,6 +138,7 @@ pub fn spawn_live_execution(
     let delayed_cmd_tx = cmd_tx.clone();
 
     tokio::spawn(async move {
+        wallet.save_state().await;
         let _ = event_tx.send(LiveEvent::Snapshot(wallet.snapshot())).await;
 
         while let Some(command) = cmd_rx.recv().await {
@@ -215,6 +216,7 @@ pub fn spawn_live_execution(
                         });
                     }
 
+                    wallet.save_state().await;
                     let snapshot = wallet.snapshot();
                     if event_tx
                         .send(LiveEvent::OpenPositionResult {
@@ -249,6 +251,7 @@ pub fn spawn_live_execution(
                     }
                     latency_trace.submit_finished_at = Some(Instant::now());
 
+                    wallet.save_state().await;
                     if event_tx
                         .send(LiveEvent::ClosePositionResult {
                             symbol,
@@ -265,6 +268,7 @@ pub fn spawn_live_execution(
                 }
                 LiveCommand::SyncFromClob => {
                     wallet.sync_from_clob().await;
+                    wallet.save_state().await;
                     if event_tx
                         .send(LiveEvent::Snapshot(wallet.snapshot()))
                         .await
@@ -275,6 +279,7 @@ pub fn spawn_live_execution(
                 }
                 LiveCommand::RedeemResolved { condition_id } => {
                     wallet.redeem_resolved_positions(&condition_id).await;
+                    wallet.save_state().await;
                     if event_tx
                         .send(LiveEvent::Snapshot(wallet.snapshot()))
                         .await
@@ -285,6 +290,7 @@ pub fn spawn_live_execution(
                 }
                 LiveCommand::VerifyPositionBalance { symbol, direction } => {
                     wallet.verify_position_balance(&symbol, &direction).await;
+                    wallet.save_state().await;
                     if event_tx
                         .send(LiveEvent::Snapshot(wallet.snapshot()))
                         .await
