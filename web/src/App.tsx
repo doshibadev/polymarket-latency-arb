@@ -28,6 +28,7 @@ type SettingsField = {
 };
 
 type ChartMode = "line" | "candle";
+type WorkspaceTab = "trade" | "markets" | "positions" | "activity" | "portfolio";
 
 type EquityRow = {
   x: number;
@@ -720,6 +721,7 @@ export function App() {
   const [clock, setClock] = useState(Date.now());
   const [spikeSeries, setSpikeSeries] = useState<number[]>([]);
   const [chartMode, setChartMode] = useState<ChartMode>("line");
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("trade");
   const positionEntryTimesRef = useRef<number[]>([]);
 
   const market = useMemo(() => activeMarket(snapshot.markets), [snapshot.markets]);
@@ -868,8 +870,29 @@ export function App() {
         <header className="main-header">
           <div className="logo">
             <div className="logo-diamond" />
-            <h1>LATTICE TERMINAL</h1>
+            <div>
+              <h1>LATTICE TERMINAL</h1>
+            </div>
           </div>
+
+          <nav className="top-tabs" aria-label="Workspace">
+            {[
+              ["trade", "Trade"],
+              ["markets", "Markets"],
+              ["positions", "Positions"],
+              ["activity", "Activity"],
+              ["portfolio", "Portfolio"],
+            ].map(([key, label]) => (
+              <button
+                key={key}
+                className={`top-tab ${activeTab === key ? "top-tab-active" : ""}`}
+                onClick={() => setActiveTab(key as WorkspaceTab)}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+
           <div className="header-actions">
             <div className="wallet-address" style={{ display: snapshot.is_live && snapshot.wallet_address ? "block" : "none" }}>
               {snapshot.wallet_address ? `${snapshot.wallet_address.slice(0, 6)}...${snapshot.wallet_address.slice(-4)}` : ""}
@@ -901,112 +924,150 @@ export function App() {
           <div className="metric-mini"><div className="m-label">Wallet Balance</div><div className="m-value">{formatMoney(snapshot.balance || 0)}</div><div className="metric-sub">Start {formatMoney(snapshot.starting_balance || 0)}</div></div>
           <div className="metric-mini"><div className="m-label">Total PnL</div><div className={`m-value ${totalPnL >= 0 ? "val-up" : "val-down"}`}>{formatMoneySigned(totalPnL)}</div></div>
           <div className="metric-mini"><div className="m-label">Daily PnL</div><div className={`m-value ${snapshot.daily_pnl >= 0 ? "val-up" : "val-down"}`}>{formatMoneySigned(snapshot.daily_pnl || 0)}</div></div>
-          <div className="metric-mini"><div className="m-label">Cumulative PnL</div><div className={`m-value ${snapshot.cumulative_pnl >= 0 ? "val-up" : "val-down"}`}>{formatMoneySigned(snapshot.cumulative_pnl || 0)}</div></div>
-          <div className="metric-mini"><div className="m-label">Realized PnL</div><div className={`m-value ${realized >= 0 ? "val-up" : "val-down"}`}>{formatMoneySigned(realized)}</div></div>
           <div className="metric-mini"><div className="m-label">Unrealized PnL</div><div className={`m-value ${unrealized >= 0 ? "val-up" : "val-down"}`}>{formatMoneySigned(unrealized)}</div></div>
           <div className="metric-mini"><div className="m-label">Win Rate</div><div className="m-value">{winRate}%</div><div className="metric-sub">{wins + losses} trades</div></div>
-          <div className="metric-mini"><div className="m-label">Total Volume</div><div className="m-value">{formatMoney(snapshot.total_volume || 0)}</div></div>
-          <div className="metric-mini"><div className="m-label">Total Fees</div><div className="m-value">{formatMoney(snapshot.total_fees || 0)}</div></div>
         </div>
 
-        <div className="left-side">
-          <div className="panel fixed-panel">
-            <div className="panel-header"><div className="panel-title">Active Market</div></div>
-            <div className="market-summary">
-              <div className="m-question">{(market?.question || "FETCHING MARKET DATA...").toUpperCase()}</div>
-              <div className="m-timer">{formatTimer(market?.end_ts)}</div>
-              <div className="market-summary-grid">
-                <div className="market-mini"><span className="p-label">BINANCE BTC</span><span className="p-val">{formatMoney(market?.binance || 0)}</span></div>
-                <div className="market-mini"><span className="p-label">CHAINLINK BTC</span><span className="p-val">{formatMoney(market?.chainlink || 0)}</span></div>
-                <div className="market-mini"><span className="p-label">ORACLE BASIS</span><span className={`p-val ${marketBasis >= 0 ? "val-up" : "val-down"}`}>{formatMoneySigned(marketBasis)}</span></div>
-                <div className="market-mini"><span className="p-label">PTB GAP</span><span className={`p-val ${marketPtbGap != null && marketPtbGap >= 0 ? "val-up" : "val-down"}`}>{marketPtbGap == null ? "—" : formatMoneySigned(marketPtbGap)}</span></div>
-              </div>
-              <div className="price-line"><span className="p-label">PRICE TO BEAT</span><span className="p-val p-gold">{market?.price_to_beat != null ? formatMoney(market.price_to_beat) : "—"}</span></div>
-              <div className="price-line"><span className="p-label">POLY UP</span><span className="p-val val-up">{(market?.up_price || 0).toFixed(4)}</span></div>
-              <div className="price-line"><span className="p-label">POLY DOWN</span><span className="p-val val-down">{(market?.down_price || 0).toFixed(4)}</span></div>
-              <div className="market-opportunity">
-                <div className="market-opportunity-head">Decision Context</div>
-                <div className="market-opportunity-line"><span>Spike</span><strong className={market && market.spike >= 0 ? "val-up" : "val-down"}>{formatSigned(market?.spike || 0)}</strong></div>
-                <div className="market-opportunity-line"><span>PTB Distance</span><strong className={marketPtbGap != null && marketPtbGap >= 0 ? "val-up" : "val-down"}>{marketPtbGap == null ? "—" : formatMoneySigned(marketPtbGap)}</strong></div>
-                <div className="market-opportunity-line"><span>Outcome Bias</span><strong>{(market?.up_price || 0) >= (market?.down_price || 0) ? "UP LEAN" : "DOWN LEAN"}</strong></div>
-              </div>
-              <div className="spike-block">
-                <div className="spike-meta"><span>SPIKE DELTA</span><span>{(market?.spike || 0).toFixed(2)}</span></div>
-                <div className="spike-viz">
-                  <div className="spike-center" />
-                  <div
-                    className="spike-fill"
-                    style={{
-                      width: `${spikeMagnitude}%`,
-                      left: (market?.spike || 0) >= 0 ? "50%" : `${50 - spikeMagnitude}%`,
-                      background: (market?.spike || 0) >= 0 ? "var(--color-up)" : "var(--color-down)",
-                    }}
-                  />
-                  <div className="threshold-marker" style={{ left: `${50 + thresholdPct}%` }} />
-                  <div className="threshold-marker" style={{ left: `${50 - thresholdPct}%` }} />
-                </div>
-                <div className="spike-mini-chart"><SpikeChart values={spikeSeries} /></div>
-              </div>
-            </div>
-          </div>
-
-          <MarketScanner markets={snapshot.markets} />
-
-          <OpenPositionsTable
-            positions={openPositions}
-            busyAction={busyAction}
-            clock={clock}
-            entryTimes={positionEntryTimesRef.current}
-            onClosePosition={(index) => void closePosition(index)}
-          />
-
-          <div className="panel fixed-panel">
-            <div className="panel-header"><div className="panel-title">Trade Stats</div></div>
-            <div className="stats-grid">
-              <div className="stat-cell"><div className="stat-label">Avg Win</div><div className="stat-value val-up">{avgWin != null ? formatMoneySigned(avgWin) : "—"}</div></div>
-              <div className="stat-cell"><div className="stat-label">Avg Loss</div><div className="stat-value val-down">{avgLoss != null ? formatMoneySigned(avgLoss) : "—"}</div></div>
-              <div className="stat-cell"><div className="stat-label">Profit Factor</div><div className={`stat-value ${profitFactor !== "—" && profitFactor !== "∞" && Number(profitFactor) >= 1 ? "val-up" : ""}`}>{profitFactor}</div></div>
-              <div className="stat-cell"><div className="stat-label">Avg Hold</div><div className="stat-value">—</div></div>
-            </div>
-            <div className="pnl-summary">
-              <div className="pnl-label-row"><span>REALIZED</span><span>UNREALIZED</span></div>
-              <div className="pnl-bar">
-                <div className="pnl-bar-realized" style={{ width: `${(realizedAbs / pnlTotalAbs) * 100}%` }} />
-                <div className="pnl-bar-unrealized" style={{ width: `${(unrealizedAbs / pnlTotalAbs) * 100}%` }} />
-              </div>
-              <div className="pnl-value-row"><span className="val-up">{formatMoneySigned(realized)}</span><span className="pnl-unrealized-label">{formatMoneySigned(unrealized)}</span></div>
-              <div className="fee-drag-line">Fee drag: <span className="fee-drag-val">{feeDrag}%</span></div>
-            </div>
-          </div>
-        </div>
-
-        <div className="center-side">
-          <div className="panel chart-shell">
-            <PerformanceChart history={snapshot.history} chartMode={chartMode} onModeChange={setChartMode} startingBalance={snapshot.starting_balance || 0} />
-            <div className="panel-header signal-header"><div className="panel-title">Signal Terminal</div></div>
-            <div className="terminal-panel">
-              <div className="term-line term-header"><span>Time</span><span>Sym</span><span>Side</span><span>Spike</span><span>Status</span><span>Reason</span></div>
-              <div id="signal-log">
-                {signals.map((signal, index) => (
-                  <div className="term-line" key={`${signal.t}-${signal.s}-${index}`}>
-                    <span className="term-time">{signal.t}</span>
-                    <span>{signal.s}</span>
-                    <span className={signal.d === "UP" ? "val-up" : "val-down"}>{signal.d}</span>
-                    <span className="sig-val">{signal.v.toFixed(2)}</span>
-                    <span className={signal.st === "EXECUTED" ? "st-exec" : "st-rej"}>{signal.st}</span>
-                    <span className="term-reason">{signal.r || ""}</span>
+        <main className="workspace-shell">
+          {activeTab === "trade" ? (
+            <div className="workspace-grid workspace-grid-trade">
+              <div className="panel fixed-panel">
+                <div className="panel-header"><div className="panel-title">Active Market</div></div>
+                <div className="market-summary">
+                  <div className="m-question">{(market?.question || "FETCHING MARKET DATA...").toUpperCase()}</div>
+                  <div className="m-timer">{formatTimer(market?.end_ts)}</div>
+                  <div className="market-summary-grid">
+                    <div className="market-mini"><span className="p-label">BINANCE BTC</span><span className="p-val">{formatMoney(market?.binance || 0)}</span></div>
+                    <div className="market-mini"><span className="p-label">CHAINLINK BTC</span><span className="p-val">{formatMoney(market?.chainlink || 0)}</span></div>
+                    <div className="market-mini"><span className="p-label">ORACLE BASIS</span><span className={`p-val ${marketBasis >= 0 ? "val-up" : "val-down"}`}>{formatMoneySigned(marketBasis)}</span></div>
+                    <div className="market-mini"><span className="p-label">PTB GAP</span><span className={`p-val ${marketPtbGap != null && marketPtbGap >= 0 ? "val-up" : "val-down"}`}>{marketPtbGap == null ? "—" : formatMoneySigned(marketPtbGap)}</span></div>
                   </div>
-                ))}
-                {signals.length === 0 ? <div className="term-line empty-term">No signals</div> : null}
+                  <div className="price-line"><span className="p-label">PRICE TO BEAT</span><span className="p-val p-gold">{market?.price_to_beat != null ? formatMoney(market.price_to_beat) : "—"}</span></div>
+                  <div className="price-line"><span className="p-label">POLY UP</span><span className="p-val val-up">{(market?.up_price || 0).toFixed(4)}</span></div>
+                  <div className="price-line"><span className="p-label">POLY DOWN</span><span className="p-val val-down">{(market?.down_price || 0).toFixed(4)}</span></div>
+                  <div className="market-opportunity">
+                    <div className="market-opportunity-head">Decision Context</div>
+                    <div className="market-opportunity-line"><span>Spike</span><strong className={market && market.spike >= 0 ? "val-up" : "val-down"}>{formatSigned(market?.spike || 0)}</strong></div>
+                    <div className="market-opportunity-line"><span>PTB Distance</span><strong className={marketPtbGap != null && marketPtbGap >= 0 ? "val-up" : "val-down"}>{marketPtbGap == null ? "—" : formatMoneySigned(marketPtbGap)}</strong></div>
+                    <div className="market-opportunity-line"><span>Outcome Bias</span><strong>{(market?.up_price || 0) >= (market?.down_price || 0) ? "UP LEAN" : "DOWN LEAN"}</strong></div>
+                  </div>
+                  <div className="spike-block">
+                    <div className="spike-meta"><span>SPIKE DELTA</span><span>{(market?.spike || 0).toFixed(2)}</span></div>
+                    <div className="spike-viz">
+                      <div className="spike-center" />
+                      <div
+                        className="spike-fill"
+                        style={{
+                          width: `${spikeMagnitude}%`,
+                          left: (market?.spike || 0) >= 0 ? "50%" : `${50 - spikeMagnitude}%`,
+                          background: (market?.spike || 0) >= 0 ? "var(--color-up)" : "var(--color-down)",
+                        }}
+                      />
+                      <div className="threshold-marker" style={{ left: `${50 + thresholdPct}%` }} />
+                      <div className="threshold-marker" style={{ left: `${50 - thresholdPct}%` }} />
+                    </div>
+                    <div className="spike-mini-chart"><SpikeChart values={spikeSeries} /></div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="panel chart-shell">
+                <PerformanceChart history={snapshot.history} chartMode={chartMode} onModeChange={setChartMode} startingBalance={snapshot.starting_balance || 0} />
+              </div>
+
+              <OpenPositionsTable
+                positions={openPositions}
+                busyAction={busyAction}
+                clock={clock}
+                entryTimes={positionEntryTimesRef.current}
+                onClosePosition={(index) => void closePosition(index)}
+              />
+            </div>
+          ) : null}
+
+          {activeTab === "markets" ? (
+            <div className="workspace-grid workspace-grid-two">
+              <MarketScanner markets={snapshot.markets} />
+              <div className="panel fixed-panel">
+                <div className="panel-header"><div className="panel-title">Active Market Detail</div></div>
+                <div className="market-summary market-summary-spacious">
+                  <div className="m-question">{(market?.question || "FETCHING MARKET DATA...").toUpperCase()}</div>
+                  <div className="market-summary-grid">
+                    <div className="market-mini"><span className="p-label">ENDS IN</span><span className="p-val p-gold">{formatTimer(market?.end_ts)}</span></div>
+                    <div className="market-mini"><span className="p-label">SPIKE DELTA</span><span className={`p-val ${market && market.spike >= 0 ? "val-up" : "val-down"}`}>{formatSigned(market?.spike || 0)}</span></div>
+                    <div className="market-mini"><span className="p-label">UP MID</span><span className="p-val val-up">{(market?.up_price || 0).toFixed(4)}</span></div>
+                    <div className="market-mini"><span className="p-label">DOWN MID</span><span className="p-val val-down">{(market?.down_price || 0).toFixed(4)}</span></div>
+                    <div className="market-mini"><span className="p-label">BINANCE</span><span className="p-val">{formatMoney(market?.binance || 0)}</span></div>
+                    <div className="market-mini"><span className="p-label">CHAINLINK</span><span className="p-val">{formatMoney(market?.chainlink || 0)}</span></div>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-        </div>
+          ) : null}
 
-        <div className="right-side">
-          <TradeTable title="Execution Log" trades={recentTrades} kind="all" />
-          <TradeTable title="Recent Settled" trades={settledTrades} kind="settled" pageSize={10} />
-        </div>
+          {activeTab === "positions" ? (
+            <div className="workspace-grid workspace-grid-two">
+              <OpenPositionsTable
+                positions={openPositions}
+                busyAction={busyAction}
+                clock={clock}
+                entryTimes={positionEntryTimesRef.current}
+                onClosePosition={(index) => void closePosition(index)}
+              />
+              <div className="panel fixed-panel">
+                <div className="panel-header"><div className="panel-title">Trade Stats</div></div>
+                <div className="stats-grid">
+                  <div className="stat-cell"><div className="stat-label">Avg Win</div><div className="stat-value val-up">{avgWin != null ? formatMoneySigned(avgWin) : "—"}</div></div>
+                  <div className="stat-cell"><div className="stat-label">Avg Loss</div><div className="stat-value val-down">{avgLoss != null ? formatMoneySigned(avgLoss) : "—"}</div></div>
+                  <div className="stat-cell"><div className="stat-label">Profit Factor</div><div className={`stat-value ${profitFactor !== "—" && profitFactor !== "∞" && Number(profitFactor) >= 1 ? "val-up" : ""}`}>{profitFactor}</div></div>
+                  <div className="stat-cell"><div className="stat-label">Fee Drag</div><div className="stat-value">{feeDrag}%</div></div>
+                </div>
+                <div className="pnl-summary">
+                  <div className="pnl-label-row"><span>REALIZED</span><span>UNREALIZED</span></div>
+                  <div className="pnl-bar">
+                    <div className="pnl-bar-realized" style={{ width: `${(realizedAbs / pnlTotalAbs) * 100}%` }} />
+                    <div className="pnl-bar-unrealized" style={{ width: `${(unrealizedAbs / pnlTotalAbs) * 100}%` }} />
+                  </div>
+                  <div className="pnl-value-row"><span className="val-up">{formatMoneySigned(realized)}</span><span className="pnl-unrealized-label">{formatMoneySigned(unrealized)}</span></div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {activeTab === "activity" ? (
+            <div className="workspace-grid workspace-grid-activity">
+              <div className="panel signal-shell">
+                <div className="panel-header"><div className="panel-title">Signal Terminal</div><div className="panel-count">{signals.length}</div></div>
+                <div className="terminal-panel terminal-panel-full">
+                  <div className="term-line term-header"><span>Time</span><span>Sym</span><span>Side</span><span>Spike</span><span>Status</span><span>Reason</span></div>
+                  <div id="signal-log">
+                    {signals.map((signal, index) => (
+                      <div className="term-line" key={`${signal.t}-${signal.s}-${index}`}>
+                        <span className="term-time">{signal.t}</span>
+                        <span>{signal.s}</span>
+                        <span className={signal.d === "UP" ? "val-up" : "val-down"}>{signal.d}</span>
+                        <span className="sig-val">{signal.v.toFixed(2)}</span>
+                        <span className={signal.st === "EXECUTED" ? "st-exec" : "st-rej"}>{signal.st}</span>
+                        <span className="term-reason">{signal.r || ""}</span>
+                      </div>
+                    ))}
+                    {signals.length === 0 ? <div className="term-line empty-term">No signals</div> : null}
+                  </div>
+                </div>
+              </div>
+              <TradeTable title="Execution Log" trades={recentTrades} kind="all" />
+              <TradeTable title="Recent Settled" trades={settledTrades} kind="settled" pageSize={10} />
+            </div>
+          ) : null}
+
+          {activeTab === "portfolio" ? (
+            <div className="workspace-grid workspace-grid-portfolio">
+              <div className="panel chart-shell chart-shell-portfolio">
+                <PerformanceChart history={snapshot.history} chartMode={chartMode} onModeChange={setChartMode} startingBalance={snapshot.starting_balance || 0} />
+              </div>
+            </div>
+          ) : null}
+        </main>
       </div>
     </>
   );
