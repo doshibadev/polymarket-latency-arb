@@ -217,7 +217,9 @@ pub fn spawn_live_execution(
                         });
                     }
 
-                    wallet.save_state().await;
+                    if let Err(err) = wallet.save_state_durable().await {
+                        warn!(error = %err, "Live open state not durably persisted before event");
+                    }
                     let snapshot = wallet.snapshot();
                     if event_tx
                         .send(LiveEvent::OpenPositionResult {
@@ -255,7 +257,9 @@ pub fn spawn_live_execution(
                     }
                     latency_trace.submit_finished_at = Some(Instant::now());
 
-                    wallet.save_state().await;
+                    if let Err(err) = wallet.save_state_durable().await {
+                        warn!(error = %err, "Live close state not durably persisted before event");
+                    }
                     if event_tx
                         .send(LiveEvent::ClosePositionResult {
                             position_id,

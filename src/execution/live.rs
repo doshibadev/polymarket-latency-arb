@@ -15,15 +15,13 @@ use polymarket_client_sdk::types::{address, Address, Decimal, U256};
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
 use sqlx::{Pool, Row, Sqlite};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 use crate::execution::actor::LiveWalletSnapshot;
-use crate::execution::model::{OpenPosition, PendingEntry, TradeRecord};
-use crate::execution::shared::{
-    share_mid_price, sync_position_price_state, update_btc_extrema,
-};
+use crate::execution::model::{next_position_id, OpenPosition, PendingEntry, TradeRecord};
+use crate::execution::shared::{share_mid_price, sync_position_price_state, update_btc_extrema};
 use crate::polymarket::{BookLevel, MarketData};
 
 // Polygon mainnet contract addresses (from Polymarket docs + reference bot)
@@ -147,11 +145,55 @@ struct PersistedLivePosition {
     entry_time: String,
 }
 
+#[derive(Clone)]
+struct ExternalLivePosition {
+    symbol: String,
+    direction: String,
+    shares: f64,
+    market_price: f64,
+}
+
+pub struct LiveReconciliationReport {
+    pub db_positions: usize,
+    pub onchain_positions: usize,
+    pub open_orders: usize,
+    pub usdc_balance: f64,
+    pub recovered_positions: usize,
+    pub mismatches: Vec<String>,
+}
+
+impl LiveReconciliationReport {
+    fn log(&self) {
+        info!(
+            db_positions = self.db_positions,
+            onchain_positions = self.onchain_positions,
+            open_orders = self.open_orders,
+            usdc_balance = self.usdc_balance,
+            recovered_positions = self.recovered_positions,
+            mismatch_count = self.mismatches.len(),
+            "Live startup reconciliation report"
+        );
+        for mismatch in &self.mismatches {
+            warn!(detail = %mismatch, "Live reconciliation mismatch");
+        }
+    }
+
+    fn has_unsafe_mismatch(&self) -> bool {
+        !self.mismatches.is_empty()
+    }
+}
+
+struct StartupReconciliationOutcome {
+    positions: Vec<OpenPosition>,
+    report: LiveReconciliationReport,
+}
+
 enum LiveDbWriteCommand {
     Save {
         wallet: LiveWalletStateSnapshot,
         trades: Vec<TradeRecord>,
         positions: Vec<PersistedLivePosition>,
+        ack: Option<oneshot::Sender<std::result::Result<(), String>>>,
     },
 }
 
@@ -592,11 +634,17 @@ impl LiveWallet {
                         wallet,
                         trades,
                         positions,
+                        ack,
                     } => {
                         let mut tx = match db.begin().await {
                             Ok(tx) => tx,
                             Err(err) => {
                                 warn!("Failed to start live wallet save transaction: {err}");
+                                if let Some(ack) = ack {
+                                    let _ = ack.send(Err(format!(
+                                        "Failed to start live wallet save transaction: {err}"
+                                    )));
+                                }
                                 continue;
                             }
                         };
@@ -738,11 +786,23 @@ impl LiveWallet {
                             Ok(()) => {
                                 if let Err(err) = tx.commit().await {
                                     warn!("Failed to commit live wallet state: {err}");
+                                    if let Some(ack) = ack {
+                                        let _ = ack.send(Err(format!(
+                                            "Failed to commit live wallet state: {err}"
+                                        )));
+                                    }
+                                } else if let Some(ack) = ack {
+                                    let _ = ack.send(Ok(()));
                                 }
                             }
                             Err(err) => {
                                 warn!("Failed to save live wallet state: {err}");
                                 let _ = tx.rollback().await;
+                                if let Some(ack) = ack {
+                                    let _ = ack.send(Err(format!(
+                                        "Failed to save live wallet state: {err}"
+                                    )));
+                                }
                             }
                         }
                     }
@@ -952,6 +1012,218 @@ impl LiveWallet {
             .unwrap_or_else(Instant::now)
     }
 
+    fn market_price_for(markets: &[MarketData], symbol: &str, direction: &str) -> Option<f64> {
+        markets
+            .iter()
+            .find(|market| market.symbol == symbol)
+            .map(|market| {
+                if direction == "UP" {
+                    market.up_price
+                } else {
+                    market.down_price
+                }
+            })
+    }
+
+    fn rebuild_external_position(
+        trade_history: &[TradeRecord],
+        external: &ExternalLivePosition,
+        markets: &[MarketData],
+    ) -> OpenPosition {
+        let latest_entry = trade_history.iter().rev().find(|trade| {
+            trade.r#type == "entry"
+                && trade.symbol == external.symbol
+                && trade.direction == external.direction
+        });
+        let entry_price = latest_entry
+            .and_then(|trade| trade.entry_price)
+            .unwrap_or_else(|| {
+                Self::market_price_for(markets, &external.symbol, &external.direction)
+                    .unwrap_or(external.market_price)
+            });
+        let position_size = latest_entry
+            .map(|trade| trade.cost)
+            .unwrap_or(external.shares * entry_price);
+        let position_id = latest_entry
+            .and_then(|trade| trade.position_id.clone())
+            .unwrap_or_else(|| next_position_id(&external.symbol, &external.direction));
+        let entry_btc = latest_entry
+            .and_then(|trade| trade.btc_at_entry)
+            .unwrap_or(0.0);
+        let entry_mode = latest_entry.and_then(|trade| trade.entry_mode.clone());
+        let ptb_tier_at_entry = latest_entry.and_then(|trade| trade.ptb_tier_at_entry.clone());
+
+        OpenPosition {
+            position_id,
+            symbol: external.symbol.clone(),
+            direction: external.direction.clone(),
+            entry_price,
+            avg_entry_price: entry_price,
+            shares: external.shares,
+            position_size,
+            buy_fee: 0.0,
+            entry_spike: 0.0,
+            entry_time: Instant::now(),
+            highest_price: entry_price.max(external.market_price),
+            scale_level: 1,
+            hold_to_resolution: false,
+            peak_spike: 0.0,
+            entry_btc,
+            peak_btc: entry_btc,
+            trough_btc: entry_btc,
+            spike_faded_since: None,
+            trend_reversed_since: None,
+            trailing_stop_activated: false,
+            on_chain_shares: Some(external.shares),
+            ptb_tier_at_entry,
+            entry_mode,
+            exit_suppressed_count: 0,
+            last_suppressed_exit_signal: None,
+        }
+    }
+
+    fn reconcile_startup_positions(
+        local_positions: &[OpenPosition],
+        external_positions: &[ExternalLivePosition],
+        trade_history: &[TradeRecord],
+        markets: &[MarketData],
+        open_orders: usize,
+        usdc_balance: f64,
+    ) -> StartupReconciliationOutcome {
+        let mut positions = Vec::new();
+        let mut mismatches = Vec::new();
+        let mut matched_external = vec![false; external_positions.len()];
+
+        for local in local_positions {
+            if let Some((idx, external)) =
+                external_positions
+                    .iter()
+                    .enumerate()
+                    .find(|(idx, external)| {
+                        !matched_external[*idx]
+                            && external.symbol == local.symbol
+                            && external.direction == local.direction
+                    })
+            {
+                matched_external[idx] = true;
+                let mut updated = local.clone();
+                updated.shares = external.shares;
+                updated.on_chain_shares = Some(external.shares);
+                positions.push(updated);
+            } else {
+                mismatches.push(format!(
+                    "Local DB position {} {} ({}) missing on-chain balance",
+                    local.symbol, local.direction, local.position_id
+                ));
+            }
+        }
+
+        let mut recovered_positions = 0usize;
+        for (idx, external) in external_positions.iter().enumerate() {
+            if matched_external[idx] {
+                continue;
+            }
+            recovered_positions += 1;
+            mismatches.push(format!(
+                "On-chain position {} {} with {:.4} shares missing from local DB",
+                external.symbol, external.direction, external.shares
+            ));
+            positions.push(Self::rebuild_external_position(
+                trade_history,
+                external,
+                markets,
+            ));
+        }
+
+        StartupReconciliationOutcome {
+            positions,
+            report: LiveReconciliationReport {
+                db_positions: local_positions.len(),
+                onchain_positions: external_positions.len(),
+                open_orders,
+                usdc_balance,
+                recovered_positions,
+                mismatches,
+            },
+        }
+    }
+
+    async fn fetch_usdc_balance(&self) -> f64 {
+        let _ = self.clob.update_balance_allowance(Default::default()).await;
+        self.clob
+            .balance_allowance(Default::default())
+            .await
+            .ok()
+            .and_then(|balance| f64::try_from(balance.balance).ok())
+            .map(|raw| raw / 1_000_000.0)
+            .unwrap_or(self.balance)
+    }
+
+    async fn fetch_open_order_count(&self) -> usize {
+        use polymarket_client_sdk::clob::types::request::OrdersRequest;
+        use polymarket_client_sdk::clob::types::OrderStatusType;
+
+        self.clob
+            .orders(&OrdersRequest::default(), None)
+            .await
+            .map(|orders| {
+                orders
+                    .data
+                    .iter()
+                    .filter(|order| {
+                        matches!(
+                            order.status,
+                            OrderStatusType::Live | OrderStatusType::Matched
+                        )
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    async fn fetch_external_positions(&self, markets: &[MarketData]) -> Vec<ExternalLivePosition> {
+        use polymarket_client_sdk::clob::types::AssetType;
+
+        let mut positions = Vec::new();
+        for market in markets {
+            let checks = [
+                ("UP", market.up_token_id.as_str(), market.up_price),
+                ("DOWN", market.down_token_id.as_str(), market.down_price),
+            ];
+            for (direction, token_id_str, market_price) in checks {
+                let Ok(token_id) = U256::from_str(token_id_str) else {
+                    continue;
+                };
+                let update_req =
+                    polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                        .asset_type(AssetType::Conditional)
+                        .token_id(token_id)
+                        .build();
+                let _ = self.clob.update_balance_allowance(update_req).await;
+
+                let query_req =
+                    polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                        .asset_type(AssetType::Conditional)
+                        .token_id(token_id)
+                        .build();
+                let Ok(balance) = self.clob.balance_allowance(query_req).await else {
+                    continue;
+                };
+                let raw: f64 = balance.balance.try_into().unwrap_or(0.0);
+                let shares = raw / 1_000_000.0;
+                if shares > 0.001 {
+                    positions.push(ExternalLivePosition {
+                        symbol: market.symbol.clone(),
+                        direction: direction.to_string(),
+                        shares,
+                        market_price,
+                    });
+                }
+            }
+        }
+        positions
+    }
+
     pub async fn load_state(&mut self) {
         let db = match self.db().await {
             Ok(db) => db,
@@ -1123,6 +1395,7 @@ impl LiveWallet {
                 wallet,
                 trades: new_trades.clone(),
                 positions,
+                ack: None,
             }) {
                 Ok(()) => {
                     self.saved_trade_count = self.trade_history.len();
@@ -1137,6 +1410,44 @@ impl LiveWallet {
                     warn!("Failed to queue live wallet save: DB writer closed");
                 }
             }
+        }
+    }
+
+    pub async fn save_state_durable(&mut self) -> std::result::Result<(), String> {
+        match self.db().await {
+            Ok(_) => {}
+            Err(err) => {
+                let msg = format!("Failed to open live wallet database for durable save: {err}");
+                warn!("{msg}");
+                return Err(msg);
+            }
+        }
+
+        let wallet = self.wallet_state_snapshot();
+        let new_trades = self.trade_history[self.saved_trade_count..].to_vec();
+        let positions = self.persisted_open_positions();
+
+        if let Some(writer) = &self.db_writer {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            writer
+                .send(LiveDbWriteCommand::Save {
+                    wallet,
+                    trades: new_trades,
+                    positions,
+                    ack: Some(ack_tx),
+                })
+                .await
+                .map_err(|_| "Live DB writer closed before durable save".to_string())?;
+            match ack_rx.await {
+                Ok(Ok(())) => {
+                    self.saved_trade_count = self.trade_history.len();
+                    Ok(())
+                }
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err("Live DB writer dropped durable save ack".to_string()),
+            }
+        } else {
+            Err("Live DB writer unavailable for durable save".to_string())
         }
     }
 
@@ -1228,18 +1539,40 @@ impl LiveWallet {
             self.register_tokens(&market.up_token_id, &market.down_token_id, &market.symbol);
         }
 
-        if self.open_positions.is_empty() && self.trade_history.is_empty() {
-            return Ok(());
+        let local_positions = self.open_positions.clone();
+        let usdc_balance = self.fetch_usdc_balance().await;
+        self.balance = usdc_balance;
+        if self.starting_balance <= 0.0 {
+            self.starting_balance = usdc_balance;
+        }
+        let open_orders = self.fetch_open_order_count().await;
+        let external_positions = self.fetch_external_positions(initial_markets).await;
+        let outcome = Self::reconcile_startup_positions(
+            &local_positions,
+            &external_positions,
+            &self.trade_history,
+            initial_markets,
+            open_orders,
+            usdc_balance,
+        );
+        outcome.report.log();
+        self.open_positions = outcome.positions;
+        self.save_state_durable()
+            .await
+            .map_err(|err| format!("Failed live startup reconciliation save: {err}"))?;
+
+        if outcome.report.has_unsafe_mismatch() {
+            return Err(format!(
+                "Live startup blocked by reconciliation mismatches: {}",
+                outcome.report.mismatches.join(" | ")
+            )
+            .into());
         }
 
-        info!(
-            trades = self.trade_history.len(),
-            open_positions = self.open_positions.len(),
-            "Recovering persisted live wallet state before actor startup"
-        );
-
         self.sync_from_clob().await;
-        self.save_state().await;
+        self.save_state_durable()
+            .await
+            .map_err(|err| format!("Failed live startup post-sync save: {err}"))?;
         Ok(())
     }
 
@@ -2441,12 +2774,14 @@ impl LiveWallet {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_live_submit_against_quote, validate_markets, LiveQuoteSnapshot, LiveSubmitSide,
-        WalletKind,
+        validate_live_submit_against_quote, validate_markets, ExternalLivePosition,
+        LiveQuoteSnapshot, LiveSubmitSide, LiveWallet, WalletKind,
     };
     use crate::config::AppConfig;
+    use crate::execution::model::{OpenPosition, TradeRecord};
     use crate::polymarket::BookLevel;
     use crate::polymarket::MarketData;
+    use std::time::Instant;
 
     fn sample_market() -> MarketData {
         MarketData {
@@ -2484,6 +2819,69 @@ mod tests {
                 size: 100.0,
             }],
             age_ms: 100,
+        }
+    }
+
+    fn local_position(symbol: &str, direction: &str, position_id: &str) -> OpenPosition {
+        OpenPosition {
+            position_id: position_id.to_string(),
+            symbol: symbol.to_string(),
+            direction: direction.to_string(),
+            entry_price: 0.51,
+            avg_entry_price: 0.51,
+            shares: 10.0,
+            position_size: 5.1,
+            buy_fee: 0.0,
+            entry_spike: 12.0,
+            entry_time: Instant::now(),
+            highest_price: 0.51,
+            scale_level: 1,
+            hold_to_resolution: false,
+            peak_spike: 12.0,
+            entry_btc: 100000.0,
+            peak_btc: 100000.0,
+            trough_btc: 100000.0,
+            spike_faded_since: None,
+            trend_reversed_since: None,
+            trailing_stop_activated: false,
+            on_chain_shares: None,
+            ptb_tier_at_entry: None,
+            entry_mode: Some("scalp".to_string()),
+            exit_suppressed_count: 0,
+            last_suppressed_exit_signal: None,
+        }
+    }
+
+    fn entry_trade(symbol: &str, direction: &str, position_id: &str) -> TradeRecord {
+        TradeRecord {
+            position_id: Some(position_id.to_string()),
+            symbol: symbol.to_string(),
+            r#type: "entry".to_string(),
+            question: String::new(),
+            direction: direction.to_string(),
+            entry_price: Some(0.49),
+            exit_price: None,
+            shares: 8.0,
+            cost: 3.92,
+            pnl: None,
+            cumulative_pnl: None,
+            balance_after: None,
+            timestamp: "2026-04-17T00:00:00Z".to_string(),
+            close_reason: None,
+            btc_at_entry: Some(99999.0),
+            price_to_beat_at_entry: None,
+            ptb_margin_at_entry: None,
+            seconds_to_expiry_at_entry: None,
+            spread_at_entry: None,
+            round_trip_loss_pct_at_entry: None,
+            signal_score: None,
+            ptb_margin_at_exit: None,
+            exit_mode: None,
+            favorable_ptb_at_exit: None,
+            ptb_tier_at_entry: Some("neutral".to_string()),
+            ptb_tier_at_exit: None,
+            entry_mode: Some("scalp".to_string()),
+            exit_suppressed_count: Some(0),
         }
     }
 
@@ -2604,5 +3002,47 @@ mod tests {
             0.0,
         )
         .expect("valid live quote should pass");
+    }
+
+    #[test]
+    fn startup_reconciliation_flags_missing_onchain_local_position() {
+        let outcome = LiveWallet::reconcile_startup_positions(
+            &[local_position("BTC", "UP", "p1")],
+            &[],
+            &[],
+            &[sample_market()],
+            0,
+            12.0,
+        );
+
+        assert!(outcome.report.has_unsafe_mismatch());
+        assert_eq!(outcome.positions.len(), 0);
+        assert_eq!(outcome.report.db_positions, 1);
+        assert_eq!(outcome.report.onchain_positions, 0);
+    }
+
+    #[test]
+    fn startup_reconciliation_recovers_external_position_from_trade_history() {
+        let outcome = LiveWallet::reconcile_startup_positions(
+            &[],
+            &[ExternalLivePosition {
+                symbol: "BTC".to_string(),
+                direction: "UP".to_string(),
+                shares: 8.5,
+                market_price: 0.53,
+            }],
+            &[entry_trade("BTC", "UP", "hist-pos")],
+            &[sample_market()],
+            1,
+            15.0,
+        );
+
+        assert!(outcome.report.has_unsafe_mismatch());
+        assert_eq!(outcome.report.recovered_positions, 1);
+        assert_eq!(outcome.positions.len(), 1);
+        assert_eq!(outcome.positions[0].position_id, "hist-pos");
+        assert_eq!(outcome.positions[0].entry_price, 0.49);
+        assert_eq!(outcome.positions[0].shares, 8.5);
+        assert_eq!(outcome.positions[0].on_chain_shares, Some(8.5));
     }
 }
