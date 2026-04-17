@@ -7,6 +7,9 @@ paper_wallet_state.json
 lattice.db
 lattice.db-shm
 lattice.db-wal
+lattice-live.db
+lattice-live.db-shm
+lattice-live.db-wal
 web/node_modules
 web/dist
 web/*.tsbuildinfo

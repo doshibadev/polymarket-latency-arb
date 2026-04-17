@@ -57,6 +57,7 @@ Important operational constraints:
 - `PAPER_TRADING=false` enables real execution.
 - `POLYMARKET_PRIVATE_KEY` must never be committed.
 - Paper state is stored locally in `lattice.db` using SQLite.
+- Live state is stored separately in `lattice-live.db` using SQLite.
 - Dashboard settings write to `.env`.
 - The bot currently targets BTC 5-minute Up/Down markets.
 
@@ -338,6 +339,7 @@ Current test coverage is small and focused on config/server invariants. Paper tr
 
 - `.env` contains secrets and runtime config. Do not commit it.
 - `lattice.db`, `lattice.db-shm`, and `lattice.db-wal` are local paper state. Do not commit them.
+- `lattice-live.db`, `lattice-live.db-shm`, and `lattice-live.db-wal` are local live state. Do not commit them.
 - `web/dist` is generated frontend output. Do not commit it.
 - `target` is Rust build output. Do not commit it.
 
