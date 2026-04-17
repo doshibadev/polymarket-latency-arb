@@ -1,9 +1,23 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static POSITION_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_position_id(symbol: &str, direction: &str) -> String {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let seq = POSITION_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{symbol}-{direction}-{ts}-{seq}")
+}
 
 /// Position model shared by paper simulation and live execution.
 #[derive(Clone, Serialize)]
 pub struct OpenPosition {
+    pub position_id: String,
     pub symbol: String,
     pub direction: String,
     pub entry_price: f64,
@@ -36,6 +50,8 @@ pub struct OpenPosition {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TradeRecord {
+    #[serde(default)]
+    pub position_id: Option<String>,
     pub symbol: String,
     pub r#type: String,
     pub question: String,
@@ -82,6 +98,7 @@ pub struct TradeRecord {
 /// Entry plan produced once by shared strategy logic and consumed by either executor.
 #[derive(Clone)]
 pub struct PendingEntry {
+    pub position_id: String,
     pub symbol: String,
     pub direction: String,
     pub spike: f64,

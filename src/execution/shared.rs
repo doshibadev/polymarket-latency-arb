@@ -97,6 +97,7 @@ mod tests {
 
     fn position(symbol: &str, direction: &str) -> OpenPosition {
         OpenPosition {
+            position_id: format!("{symbol}-{direction}-test"),
             symbol: symbol.to_string(),
             direction: direction.to_string(),
             entry_price: 0.50,

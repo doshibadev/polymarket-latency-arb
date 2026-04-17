@@ -69,6 +69,7 @@ pub enum LiveCommand {
         latency_trace: LatencyTrace,
     },
     ClosePosition {
+        position_id: String,
         symbol: String,
         direction: String,
         price: f64,
@@ -80,6 +81,7 @@ pub enum LiveCommand {
         condition_id: String,
     },
     VerifyPositionBalance {
+        position_id: String,
         symbol: String,
         direction: String,
     },
@@ -88,6 +90,7 @@ pub enum LiveCommand {
 pub enum LiveEvent {
     Snapshot(LiveWalletSnapshot),
     OpenPositionResult {
+        position_id: String,
         symbol: String,
         direction: String,
         spike: f64,
@@ -97,6 +100,7 @@ pub enum LiveEvent {
         latency_trace: LatencyTrace,
     },
     ClosePositionResult {
+        position_id: String,
         symbol: String,
         direction: String,
         reason: &'static str,
@@ -172,6 +176,7 @@ pub fn spawn_live_execution(
                 } => {
                     let symbol = plan.symbol.clone();
                     let direction = plan.direction.clone();
+                    let position_id = plan.position_id.clone();
                     let spike = plan.spike;
                     let submitted_at = plan.submitted_at;
                     latency_trace.actor_received_at = Some(Instant::now());
@@ -188,12 +193,14 @@ pub fn spawn_live_execution(
 
                     if result.is_ok() {
                         let verify_tx = delayed_cmd_tx.clone();
+                        let verify_position_id = plan.position_id.clone();
                         let verify_symbol = symbol.clone();
                         let verify_direction = direction.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                             let _ = verify_tx
                                 .send(LiveCommand::VerifyPositionBalance {
+                                    position_id: verify_position_id,
                                     symbol: verify_symbol,
                                     direction: verify_direction,
                                 })
@@ -205,6 +212,7 @@ pub fn spawn_live_execution(
                     let snapshot = wallet.snapshot();
                     if event_tx
                         .send(LiveEvent::OpenPositionResult {
+                            position_id,
                             symbol,
                             direction,
                             spike,
@@ -220,6 +228,7 @@ pub fn spawn_live_execution(
                     }
                 }
                 LiveCommand::ClosePosition {
+                    position_id,
                     symbol,
                     direction,
                     price,
@@ -231,7 +240,7 @@ pub fn spawn_live_execution(
                     if let Some(idx) = wallet
                         .open_positions
                         .iter()
-                        .position(|pos| pos.symbol == symbol && pos.direction == direction)
+                        .position(|pos| pos.position_id == position_id)
                     {
                         wallet.close_position_at(idx, price, reason).await;
                     }
@@ -240,6 +249,7 @@ pub fn spawn_live_execution(
                     wallet.save_state().await;
                     if event_tx
                         .send(LiveEvent::ClosePositionResult {
+                            position_id,
                             symbol,
                             direction,
                             reason,
@@ -274,8 +284,14 @@ pub fn spawn_live_execution(
                         break;
                     }
                 }
-                LiveCommand::VerifyPositionBalance { symbol, direction } => {
-                    wallet.verify_position_balance(&symbol, &direction).await;
+                LiveCommand::VerifyPositionBalance {
+                    position_id,
+                    symbol,
+                    direction,
+                } => {
+                    wallet
+                        .verify_position_balance(&position_id, &symbol, &direction)
+                        .await;
                     wallet.save_state().await;
                     if event_tx
                         .send(LiveEvent::Snapshot(wallet.snapshot()))

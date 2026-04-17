@@ -244,16 +244,17 @@ impl PaperWallet {
                                 sqlx::query(
                                     r#"
                                     INSERT INTO paper_trades (
-                                        symbol, type, question, direction, entry_price, exit_price, shares, cost,
+                                        position_id, symbol, type, question, direction, entry_price, exit_price, shares, cost,
                                         pnl, cumulative_pnl, balance_after, timestamp, close_reason, btc_at_entry,
                                         price_to_beat_at_entry, ptb_margin_at_entry, seconds_to_expiry_at_entry,
                                         spread_at_entry, round_trip_loss_pct_at_entry, signal_score,
                                         ptb_margin_at_exit, exit_mode, favorable_ptb_at_exit, ptb_tier_at_entry,
                                         ptb_tier_at_exit, entry_mode, exit_suppressed_count
                                     )
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                     "#,
                                 )
+                                .bind(&trade.position_id)
                                 .bind(&trade.symbol)
                                 .bind(&trade.r#type)
                                 .bind(&trade.question)
@@ -355,6 +356,7 @@ impl PaperWallet {
             r#"
             CREATE TABLE IF NOT EXISTS paper_trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id TEXT,
                 symbol TEXT NOT NULL,
                 type TEXT NOT NULL,
                 question TEXT NOT NULL,
@@ -388,6 +390,10 @@ impl PaperWallet {
         .execute(db)
         .await?;
 
+        let _ = sqlx::query("ALTER TABLE paper_trades ADD COLUMN position_id TEXT")
+            .execute(db)
+            .await;
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS paper_equity_history (
@@ -417,6 +423,7 @@ impl PaperWallet {
 
     fn trade_from_row(row: &SqliteRow) -> TradeRecord {
         TradeRecord {
+            position_id: row.try_get("position_id").ok(),
             symbol: row.get("symbol"),
             r#type: row.get("type"),
             question: row.get("question"),
@@ -918,6 +925,7 @@ impl PaperWallet {
             "forced"
         };
         let trade = TradeRecord {
+            position_id: Some(pos.position_id.clone()),
             symbol: pos.symbol.clone(),
             r#type: "exit".to_string(),
             question: String::new(),
@@ -954,14 +962,14 @@ impl PaperWallet {
 
     fn collect_exit_decisions(
         &mut self,
-        excluded_positions: &HashSet<(String, String)>,
+        excluded_positions: &HashSet<String>,
     ) -> Vec<(usize, &'static str)> {
         let mut to_close = Vec::new();
         let mut suppressed_exits: Vec<(usize, String, String, f64, &'static str)> = Vec::new();
         let now_secs = now_unix_secs();
 
         for (idx, pos) in self.open_positions.iter().enumerate() {
-            if excluded_positions.contains(&(pos.symbol.clone(), pos.direction.clone())) {
+            if excluded_positions.contains(&pos.position_id) {
                 continue;
             }
 
@@ -1048,13 +1056,14 @@ impl PaperWallet {
 
     pub fn planned_exit_intents(
         &mut self,
-        excluded_positions: &HashSet<(String, String)>,
+        excluded_positions: &HashSet<String>,
     ) -> Vec<PlannedExit> {
         self.collect_exit_decisions(excluded_positions)
             .into_iter()
             .filter_map(|(idx, reason)| {
                 let pos = self.open_positions.get(idx)?;
                 Some(PlannedExit {
+                    position_id: pos.position_id.clone(),
                     symbol: pos.symbol.clone(),
                     direction: pos.direction.clone(),
                     price: self.get_share_price(&pos.symbol, &pos.direction),
@@ -1165,6 +1174,7 @@ impl PaperWallet {
             self.total_fees_paid += closed_buy_fee + sell_fee;
             self.total_volume += closed_cost + gross_revenue;
             self.trade_history.push(TradeRecord {
+                position_id: Some(pos.position_id.clone()),
                 symbol: pos.symbol.clone(),
                 r#type: "exit".to_string(),
                 question: state.question,
@@ -1299,12 +1309,34 @@ impl PaperWallet {
         }
     }
 
+    pub fn rollback_pending_entry_id_at(
+        &mut self,
+        position_id: &str,
+        symbol: &str,
+        direction: &str,
+        submitted_at: Instant,
+    ) {
+        if let Some(idx) = self.pending_entries.iter().position(|p| {
+            p.position_id == position_id
+                && p.symbol == symbol
+                && p.direction == direction
+                && p.submitted_at == submitted_at
+        }) {
+            let entry = self.pending_entries.remove(idx);
+            self.balance += entry.position_size + entry.buy_fee;
+            info!(position_id=%position_id, symbol=%symbol, direction=%direction, restored=entry.position_size + entry.buy_fee, "Rolled back exact pending paper entry");
+        } else {
+            self.rollback_pending_entry_at(symbol, direction, submitted_at);
+        }
+    }
+
     /// Sync a pending paper entry to match the live wallet's actual fill.
     /// This ensures paper and live positions are identical so exit decisions apply correctly.
     /// Called after live wallet fills an order — adjusts the pending entry's price, shares,
     /// position_size, and fees to match the real fill.
     pub fn sync_pending_to_live_fill(
         &mut self,
+        position_id: &str,
         symbol: &str,
         direction: &str,
         submitted_at: Instant,
@@ -1314,7 +1346,10 @@ impl PaperWallet {
         live_buy_fee: f64,
     ) {
         if let Some(entry) = self.pending_entries.iter_mut().find(|p| {
-            p.symbol == symbol && p.direction == direction && p.submitted_at == submitted_at
+            p.position_id == position_id
+                && p.symbol == symbol
+                && p.direction == direction
+                && p.submitted_at == submitted_at
         }) {
             let old_reserved = entry.position_size + entry.buy_fee;
             let new_reserved = live_position_size + live_buy_fee;
@@ -1335,7 +1370,7 @@ impl PaperWallet {
             entry.buy_fee = live_buy_fee;
             entry.live_synced = true;
         } else {
-            warn!(symbol=%symbol, direction=%direction, "Pending paper entry missing for exact live fill sync");
+            warn!(position_id=%position_id, symbol=%symbol, direction=%direction, "Pending paper entry missing for exact live fill sync");
         }
     }
 
@@ -1444,6 +1479,7 @@ impl PaperWallet {
             };
 
             self.trade_history.push(TradeRecord {
+                position_id: Some(p.position_id.clone()),
                 symbol: p.symbol.clone(),
                 r#type: "entry".to_string(),
                 question: state.question.clone(),
@@ -1486,6 +1522,7 @@ impl PaperWallet {
             };
 
             self.open_positions.push(OpenPosition {
+                position_id: p.position_id,
                 symbol: p.symbol,
                 direction: p.direction,
                 entry_price: fill_price,
@@ -1534,6 +1571,7 @@ mod tests {
 
     fn pending_entry(submitted_at: Instant) -> PendingEntry {
         PendingEntry {
+            position_id: format!("test-position-{}", submitted_at.elapsed().as_nanos()),
             symbol: "BTC-1".to_string(),
             direction: "UP".to_string(),
             spike: 10.0,
@@ -1566,6 +1604,7 @@ mod tests {
         wallet.pending_entries = vec![
             pending_entry(first_submitted_at),
             PendingEntry {
+                position_id: "test-position-2".to_string(),
                 symbol: "BTC-1".to_string(),
                 direction: "UP".to_string(),
                 spike: 12.0,
@@ -1588,7 +1627,16 @@ mod tests {
             },
         ];
 
-        wallet.sync_pending_to_live_fill("BTC-1", "UP", second_submitted_at, 0.51, 11.0, 5.61, 0.0);
+        wallet.sync_pending_to_live_fill(
+            "test-position-2",
+            "BTC-1",
+            "UP",
+            second_submitted_at,
+            0.51,
+            11.0,
+            5.61,
+            0.0,
+        );
 
         assert_eq!(wallet.pending_entries[0].entry_price, 0.40);
         assert!(!wallet.pending_entries[0].live_synced);
@@ -1620,6 +1668,7 @@ mod tests {
         let mut wallet = PaperWallet::new(test_config(false));
         wallet.pending_entries = vec![pending_entry(Instant::now() - Duration::from_secs(60))];
         wallet.sync_pending_to_live_fill(
+            &wallet.pending_entries[0].position_id.clone(),
             "BTC-1",
             "UP",
             wallet.pending_entries[0].submitted_at,

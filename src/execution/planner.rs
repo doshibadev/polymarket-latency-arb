@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::config::AppConfig;
-use crate::execution::model::PendingEntry;
+use crate::execution::model::{next_position_id, PendingEntry};
 use crate::polymarket::BookLevel;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -191,6 +191,7 @@ pub fn build_entry_plan(input: EntryPlanInput<'_>) -> Result<PendingEntry, Strin
     let entry_context = entry_context_score(&input, position_size)?;
 
     Ok(PendingEntry {
+        position_id: next_position_id(input.symbol, input.direction),
         symbol: input.symbol.to_string(),
         direction: input.direction.to_string(),
         spike: input.spike,

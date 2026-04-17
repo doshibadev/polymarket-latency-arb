@@ -25,6 +25,7 @@ pub struct HoldEvaluationInput<'a> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlannedExit {
+    pub position_id: String,
     pub symbol: String,
     pub direction: String,
     pub price: f64,
@@ -354,6 +355,7 @@ mod tests {
 
     fn position(direction: &str) -> OpenPosition {
         OpenPosition {
+            position_id: format!("test-{direction}"),
             symbol: "BTC".to_string(),
             direction: direction.to_string(),
             entry_price: 0.5,

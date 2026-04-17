@@ -124,6 +124,7 @@ struct LiveWalletStateSnapshot {
 
 #[derive(Clone)]
 struct PersistedLivePosition {
+    position_id: String,
     symbol: String,
     direction: String,
     entry_price: f64,
@@ -522,16 +523,17 @@ impl LiveWallet {
                                 sqlx::query(
                                     r#"
                                     INSERT INTO live_trades (
-                                        symbol, type, question, direction, entry_price, exit_price, shares, cost,
+                                        position_id, symbol, type, question, direction, entry_price, exit_price, shares, cost,
                                         pnl, cumulative_pnl, balance_after, timestamp, close_reason, btc_at_entry,
                                         price_to_beat_at_entry, ptb_margin_at_entry, seconds_to_expiry_at_entry,
                                         spread_at_entry, round_trip_loss_pct_at_entry, signal_score,
                                         ptb_margin_at_exit, exit_mode, favorable_ptb_at_exit, ptb_tier_at_entry,
                                         ptb_tier_at_exit, entry_mode, exit_suppressed_count
                                     )
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                     "#,
                                 )
+                                .bind(&trade.position_id)
                                 .bind(&trade.symbol)
                                 .bind(&trade.r#type)
                                 .bind(&trade.question)
@@ -571,15 +573,16 @@ impl LiveWallet {
                                 sqlx::query(
                                     r#"
                                     INSERT INTO live_open_positions (
-                                        symbol, direction, entry_price, avg_entry_price, shares, position_size,
+                                        position_id, symbol, direction, entry_price, avg_entry_price, shares, position_size,
                                         buy_fee, entry_spike, highest_price, scale_level, hold_to_resolution,
                                         peak_spike, entry_btc, peak_btc, trough_btc, trailing_stop_activated,
                                         on_chain_shares, ptb_tier_at_entry, entry_mode, exit_suppressed_count,
                                         entry_time, updated_at
                                     )
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                     "#,
                                 )
+                                .bind(&position.position_id)
                                 .bind(&position.symbol)
                                 .bind(&position.direction)
                                 .bind(position.entry_price)
@@ -655,6 +658,7 @@ impl LiveWallet {
             r#"
             CREATE TABLE IF NOT EXISTS live_trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id TEXT,
                 symbol TEXT NOT NULL,
                 type TEXT NOT NULL,
                 question TEXT NOT NULL,
@@ -692,6 +696,7 @@ impl LiveWallet {
             r#"
             CREATE TABLE IF NOT EXISTS live_open_positions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 direction TEXT NOT NULL,
                 entry_price REAL NOT NULL,
@@ -723,6 +728,17 @@ impl LiveWallet {
         let _ = sqlx::query("ALTER TABLE live_open_positions ADD COLUMN entry_time TEXT")
             .execute(db)
             .await;
+        let _ = sqlx::query("ALTER TABLE live_open_positions ADD COLUMN position_id TEXT")
+            .execute(db)
+            .await;
+        let _ = sqlx::query("ALTER TABLE live_trades ADD COLUMN position_id TEXT")
+            .execute(db)
+            .await;
+        let _ = sqlx::query(
+            "UPDATE live_open_positions SET position_id = symbol || ':' || direction || ':' || id WHERE position_id IS NULL OR position_id = ''",
+        )
+        .execute(db)
+        .await;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_live_trades_timestamp ON live_trades(timestamp)",
@@ -732,6 +748,11 @@ impl LiveWallet {
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_live_open_positions_symbol_direction ON live_open_positions(symbol, direction)",
+        )
+        .execute(db)
+        .await?;
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_live_open_positions_position_id ON live_open_positions(position_id)",
         )
         .execute(db)
         .await?;
@@ -759,6 +780,7 @@ impl LiveWallet {
         self.open_positions
             .iter()
             .map(|position| PersistedLivePosition {
+                position_id: position.position_id.clone(),
                 symbol: position.symbol.clone(),
                 direction: position.direction.clone(),
                 entry_price: position.entry_price,
@@ -859,6 +881,7 @@ impl LiveWallet {
                 self.trade_history = rows
                     .iter()
                     .map(|row| TradeRecord {
+                        position_id: row.try_get("position_id").ok(),
                         symbol: row.get("symbol"),
                         r#type: row.get("type"),
                         question: row.get("question"),
@@ -901,7 +924,7 @@ impl LiveWallet {
 
         match sqlx::query(
             r#"
-            SELECT symbol, direction, entry_price, avg_entry_price, shares, position_size, buy_fee,
+            SELECT position_id, symbol, direction, entry_price, avg_entry_price, shares, position_size, buy_fee,
                    entry_spike, highest_price, scale_level, hold_to_resolution, peak_spike,
                    entry_btc, peak_btc, trough_btc, trailing_stop_activated, on_chain_shares,
                    ptb_tier_at_entry, entry_mode, exit_suppressed_count, entry_time, updated_at
@@ -919,6 +942,7 @@ impl LiveWallet {
                         let entry_time: Option<String> = row.get("entry_time");
                         let updated_at: Option<String> = row.get("updated_at");
                         OpenPosition {
+                            position_id: row.get("position_id"),
                             symbol: row.get("symbol"),
                             direction: row.get("direction"),
                             entry_price: row.get("entry_price"),
@@ -1174,11 +1198,12 @@ impl LiveWallet {
                 continue;
             }
 
-            let key = format!("{}:{}", pos.symbol, pos.direction);
-            if self.pending_order_ids.contains_key(&key) {
+            let pending_order_key = format!("{}:{}", pos.symbol, pos.direction);
+            if self.pending_order_ids.contains_key(&pending_order_key) {
                 continue;
             } // Handled by order check above
 
+            let key = pos.position_id.clone();
             if let Some(token_id) = self.get_token_id(&pos.symbol, &pos.direction) {
                 // Force CLOB to refresh its cached on-chain balance before querying
                 let update_req =
@@ -1239,7 +1264,7 @@ impl LiveWallet {
         // Remove confirmed stale positions
         for idx in stale_indices.into_iter().rev() {
             let pos = self.open_positions.remove(idx);
-            let key = format!("{}:{}", pos.symbol, pos.direction);
+            let key = pos.position_id.clone();
             self.zero_balance_flags.remove(&key);
             let pnl = -(pos.position_size + pos.buy_fee); // Assume total loss (don't know sell price)
             self.cumulative_pnl += pnl;
@@ -1248,6 +1273,7 @@ impl LiveWallet {
             self.losses += 1;
             self.total_fees_paid += pos.buy_fee;
             self.trade_history.push(TradeRecord {
+                position_id: Some(pos.position_id.clone()),
                 symbol: pos.symbol.clone(),
                 r#type: "exit".to_string(),
                 question: String::new(),
@@ -1280,11 +1306,8 @@ impl LiveWallet {
         }
 
         // Clean up zero_balance_flags for positions that no longer exist
-        self.zero_balance_flags.retain(|key, _| {
-            self.open_positions
-                .iter()
-                .any(|p| format!("{}:{}", p.symbol, p.direction) == *key)
-        });
+        self.zero_balance_flags
+            .retain(|key, _| self.open_positions.iter().any(|p| p.position_id == *key));
     }
 
     /// Auto-redeem winning tokens after market resolution (on-chain tx, costs gas)
@@ -1412,7 +1435,12 @@ impl LiveWallet {
         update_btc_extrema(&mut self.open_positions, symbol, current_btc);
     }
 
-    pub async fn verify_position_balance(&mut self, symbol: &str, direction: &str) {
+    pub async fn verify_position_balance(
+        &mut self,
+        position_id: &str,
+        symbol: &str,
+        direction: &str,
+    ) {
         use polymarket_client_sdk::clob::types::AssetType;
 
         let Some(token_id) = self.get_token_id(symbol, direction) else {
@@ -1446,7 +1474,7 @@ impl LiveWallet {
             .open_positions
             .iter_mut()
             .rev()
-            .find(|pos| pos.symbol == symbol && pos.direction == direction)
+            .find(|pos| pos.position_id == position_id)
         {
             let estimated = pos.shares;
             if on_chain > estimated * 0.95 && on_chain < estimated * 1.05 {
@@ -1455,6 +1483,7 @@ impl LiveWallet {
 
                 if let Some(trade) = self.trade_history.iter_mut().rev().find(|trade| {
                     trade.r#type == "entry"
+                        && trade.position_id.as_deref() == Some(position_id)
                         && trade.symbol == symbol
                         && trade.direction == direction
                         && trade.exit_price.is_none()
@@ -1762,6 +1791,7 @@ impl LiveWallet {
         self.balance -= final_position_size + final_buy_fee;
 
         self.trade_history.push(TradeRecord {
+            position_id: Some(plan.position_id.clone()),
             symbol: symbol.to_string(),
             r#type: "entry".to_string(),
             question: String::new(),
@@ -1792,6 +1822,7 @@ impl LiveWallet {
         });
 
         self.open_positions.push(OpenPosition {
+            position_id: plan.position_id.clone(),
             symbol: symbol.to_string(),
             direction: direction.to_string(),
             entry_price: actual_entry_price,
@@ -1841,6 +1872,7 @@ impl LiveWallet {
                 self.losses += 1;
                 self.total_fees_paid += pos.buy_fee;
                 self.trade_history.push(TradeRecord {
+                    position_id: Some(pos.position_id.clone()),
                     symbol: pos.symbol.clone(),
                     r#type: "exit".to_string(),
                     question: String::new(),
@@ -1904,6 +1936,7 @@ impl LiveWallet {
             self.losses += 1;
             self.total_fees_paid += pos.buy_fee;
             self.trade_history.push(TradeRecord {
+                position_id: Some(pos.position_id.clone()),
                 symbol: pos.symbol.clone(),
                 r#type: "exit".to_string(),
                 question: String::new(),
@@ -1969,6 +2002,7 @@ impl LiveWallet {
                 self.trade_count += 1;
                 self.losses += 1;
                 self.trade_history.push(TradeRecord {
+                    position_id: Some(pos.position_id.clone()),
                     symbol: pos.symbol.clone(),
                     r#type: "exit".to_string(),
                     question: String::new(),
@@ -2148,6 +2182,7 @@ impl LiveWallet {
         self.total_volume += pos.position_size + gross_revenue;
 
         self.trade_history.push(TradeRecord {
+            position_id: Some(pos.position_id.clone()),
             symbol: pos.symbol.clone(),
             r#type: "exit".to_string(),
             question: String::new(),

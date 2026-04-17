@@ -1,4 +1,5 @@
 export type Position = {
+  position_id: string;
   symbol: string;
   cost: number;
   entry_price: number;
@@ -12,6 +13,7 @@ export type Position = {
 };
 
 export type Trade = {
+  position_id?: string | null;
   symbol: string;
   type: string;
   question: string;
@@ -132,7 +134,7 @@ export type CommandPayload =
   | { _type: "start" }
   | { _type: "stop" }
   | { _type: "reset" }
-  | { _type: "close_position"; index: number }
+  | { _type: "close_position"; index: number; position_id?: string }
   | { _type: "toggle_market"; symbol: string; enabled: boolean };
 
 export type ConfigField =

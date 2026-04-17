@@ -91,6 +91,7 @@ enum DashboardMessage {
 }
 
 struct LiveCloseIntent {
+    position_id: String,
     symbol: String,
     direction: String,
     price: f64,
@@ -195,7 +196,7 @@ pub struct ArbEngine {
     running: bool,
     started_at: Option<Instant>,
     last_clob_sync: Option<Instant>,
-    pending_live_closes: HashSet<(String, String)>,
+    pending_live_closes: HashSet<String>,
 }
 
 impl ArbEngine {
@@ -293,9 +294,8 @@ impl ArbEngine {
             .sum()
     }
 
-    fn is_live_close_pending(&self, symbol: &str, direction: &str) -> bool {
-        self.pending_live_closes
-            .contains(&(symbol.to_string(), direction.to_string()))
+    fn is_live_close_pending(&self, position_id: &str) -> bool {
+        self.pending_live_closes.contains(position_id)
     }
 
     fn trade_reason_to_live_reason(reason: Option<&str>) -> &'static str {
@@ -316,6 +316,7 @@ impl ArbEngine {
 
     async fn request_live_close(
         &mut self,
+        position_id: String,
         symbol: String,
         direction: String,
         price: f64,
@@ -325,14 +326,14 @@ impl ArbEngine {
             return false;
         }
 
-        let key = (symbol.clone(), direction.clone());
-        if !self.pending_live_closes.insert(key.clone()) {
+        if !self.pending_live_closes.insert(position_id.clone()) {
             return false;
         }
 
         let latency_trace = self.close_latency_trace(&symbol, &direction);
         let sent = self
             .send_live_command(LiveCommand::ClosePosition {
+                position_id: position_id.clone(),
                 symbol,
                 direction,
                 price,
@@ -341,7 +342,7 @@ impl ArbEngine {
             })
             .await;
         if !sent {
-            self.pending_live_closes.remove(&key);
+            self.pending_live_closes.remove(&position_id);
         }
         sent
     }
@@ -351,6 +352,7 @@ impl ArbEngine {
             .planned_exit_intents(&self.pending_live_closes)
             .into_iter()
             .map(|intent| LiveCloseIntent {
+                position_id: intent.position_id,
                 symbol: intent.symbol,
                 direction: intent.direction,
                 price: intent.price,
@@ -488,6 +490,7 @@ impl ArbEngine {
             _net_market_value += current_value;
 
             positions.push(json!({
+                "position_id": pos.position_id,
                 "symbol": pos.symbol,
                 "cost": pos.position_size + pos.buy_fee,
                 "entry_price": pos.entry_price,
@@ -775,8 +778,11 @@ impl ArbEngine {
                             info!("Paper wallet reset");
                         }
                         Some("close_position") => {
-                            if let Some(idx) = cmd.get("index").and_then(|v| v.as_u64()) {
-                                let idx = idx as usize;
+                            if cmd.get("index").and_then(|v| v.as_u64()).is_some()
+                                || cmd.get("position_id").and_then(|v| v.as_str()).is_some()
+                            {
+                                let idx = cmd.get("index").and_then(|v| v.as_u64()).map(|idx| idx as usize);
+                                let requested_position_id = cmd.get("position_id").and_then(|v| v.as_str());
 
                                 if self.is_live_mode() {
                                     // LIVE MODE: operate directly on live wallet
@@ -785,24 +791,40 @@ impl ArbEngine {
                                         .as_ref()
                                         .map(|lw| lw.open_positions.clone())
                                         .unwrap_or_default();
-                                    if idx < live_positions.len() {
-                                        let sym = live_positions[idx].symbol.clone();
-                                        let dir = live_positions[idx].direction.clone();
+                                    let selected = requested_position_id
+                                        .and_then(|position_id| {
+                                            live_positions
+                                                .iter()
+                                                .find(|pos| pos.position_id == position_id)
+                                        })
+                                        .or_else(|| idx.and_then(|idx| live_positions.get(idx)));
+                                    if let Some(pos) = selected {
+                                        let position_id = pos.position_id.clone();
+                                        let sym = pos.symbol.clone();
+                                        let dir = pos.direction.clone();
                                         let price = self.wallet.get_share_price(&sym, &dir);
                                         if self
-                                            .request_live_close(sym.clone(), dir.clone(), price, "manual")
+                                            .request_live_close(
+                                                position_id,
+                                                sym.clone(),
+                                                dir.clone(),
+                                                price,
+                                                "manual",
+                                            )
                                             .await
                                         {
                                             info!(symbol=%sym, direction=%dir, "Manual live close requested");
                                         }
                                     } else {
-                                        warn!(idx=idx, live_len=live_positions.len(), "Close button: index out of bounds for live wallet");
+                                        warn!(?requested_position_id, ?idx, live_len=live_positions.len(), "Close command: position not found in live wallet");
                                     }
                                 } else {
+                                    if let Some(idx) = idx {
                                     if idx < self.wallet.open_positions.len() {
                                         let pos = &self.wallet.open_positions[idx];
                                         let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
                                         self.wallet.close_position_at_price(idx, current_price, "manual");
+                                    }
                                     }
                                 }
                                 // Update chart history
@@ -840,16 +862,17 @@ impl ArbEngine {
                     // This happens when paper closes successfully but the live sell fails and pushes the position back
                     // Throttled to every 5 seconds to avoid hammering the API on repeated failures
                     if let Some(lw) = &self.live_state {
-                        let orphaned: Vec<(String, String, f64)> = lw.open_positions.iter()
+                        let orphaned: Vec<(String, String, String, f64)> = lw.open_positions.iter()
                             .filter(|lp| {
                                 // Orphan = no matching paper position AND no matching pending entry
                                 // AND position is older than 5 seconds (avoid racing with fresh entries)
-                                !self.wallet.open_positions.iter().any(|pp| pp.symbol == lp.symbol && pp.direction == lp.direction)
-                                && !self.wallet.pending_entries.iter().any(|pe| pe.symbol == lp.symbol && pe.direction == lp.direction)
+                                !self.wallet.open_positions.iter().any(|pp| pp.position_id == lp.position_id)
+                                && !self.wallet.pending_entries.iter().any(|pe| pe.position_id == lp.position_id)
                                 && lp.entry_time.elapsed().as_secs() >= 5
                             })
                             .map(|lp| {
                                 (
+                                    lp.position_id.clone(),
                                     lp.symbol.clone(),
                                     lp.direction.clone(),
                                     self.wallet.get_share_price(&lp.symbol, &lp.direction),
@@ -858,9 +881,9 @@ impl ArbEngine {
                             .collect();
                         // Only retry if we're on the 5-second sync boundary (same cadence as sync_from_clob)
                         if !orphaned.is_empty() && self.last_clob_sync.map_or(true, |t| t.elapsed().as_millis() < 500) {
-                            for (sym, dir, price) in orphaned.into_iter().rev() {
+                            for (position_id, sym, dir, price) in orphaned.into_iter().rev() {
                                 info!(symbol=%sym, direction=%dir, "Retrying sell for orphaned live position");
-                                self.request_live_close(sym, dir, price, "orphan_retry").await;
+                                self.request_live_close(position_id, sym, dir, price, "orphan_retry").await;
                             }
                         }
                     }
@@ -888,9 +911,9 @@ impl ArbEngine {
                     for symbol in &early_exit_needed {
                         if self.is_live_mode() {
                             if let Some(lw) = &self.live_state {
-                                let live_to_close: Vec<(String, String, f64)> = lw.open_positions.iter()
+                                let live_to_close: Vec<(String, String, String, f64)> = lw.open_positions.iter()
                                     .filter(|pos| pos.symbol == *symbol)
-                                    .filter(|pos| !self.is_live_close_pending(&pos.symbol, &pos.direction))
+                                    .filter(|pos| !self.is_live_close_pending(&pos.position_id))
                                     .filter_map(|pos| {
                                         let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
                                         if current_price > self.config.hold_min_share_price {
@@ -898,11 +921,11 @@ impl ArbEngine {
                                         }
                                         let loss_pct = (pos.entry_price - current_price) / pos.entry_price;
                                         (loss_pct > self.config.early_exit_loss_pct)
-                                            .then_some((pos.symbol.clone(), pos.direction.clone(), current_price))
+                                            .then_some((pos.position_id.clone(), pos.symbol.clone(), pos.direction.clone(), current_price))
                                     })
                                     .collect();
-                                for (symbol, direction, price) in live_to_close.into_iter().rev() {
-                                    self.request_live_close(symbol, direction, price, "early_exit_losing").await;
+                                for (position_id, symbol, direction, price) in live_to_close.into_iter().rev() {
+                                    self.request_live_close(position_id, symbol, direction, price, "early_exit_losing").await;
                                 }
                             }
                         } else {
@@ -953,19 +976,20 @@ impl ArbEngine {
                     // Independent force-close for live wallet positions (catches orphaned positions)
                     if market_ending {
                         if let Some(lw) = &self.live_state {
-                            let live_to_close: Vec<(String, String, f64)> = lw.open_positions.iter()
+                            let live_to_close: Vec<(String, String, String, f64)> = lw.open_positions.iter()
                                 .filter(|pos| ending_symbols.contains(&pos.symbol))
-                                .filter(|pos| !self.is_live_close_pending(&pos.symbol, &pos.direction))
+                                .filter(|pos| !self.is_live_close_pending(&pos.position_id))
                                 .map(|pos| {
                                     (
+                                        pos.position_id.clone(),
                                         pos.symbol.clone(),
                                         pos.direction.clone(),
                                         self.wallet.get_share_price(&pos.symbol, &pos.direction),
                                     )
                                 })
                                 .collect();
-                            for (symbol, direction, price) in live_to_close.into_iter().rev() {
-                                self.request_live_close(symbol, direction, price, "market_end").await;
+                            for (position_id, symbol, direction, price) in live_to_close.into_iter().rev() {
+                                self.request_live_close(position_id, symbol, direction, price, "market_end").await;
                             }
                         }
                     }
@@ -1185,6 +1209,7 @@ impl ArbEngine {
             for intent in intents {
                 issued |= self
                     .request_live_close(
+                        intent.position_id,
                         intent.symbol,
                         intent.direction,
                         intent.price,
@@ -1227,6 +1252,7 @@ impl ArbEngine {
             for intent in intents {
                 issued |= self
                     .request_live_close(
+                        intent.position_id,
                         intent.symbol,
                         intent.direction,
                         intent.price,
@@ -1688,6 +1714,7 @@ impl ArbEngine {
                 self.sync_paper_to_live_snapshot();
             }
             LiveEvent::OpenPositionResult {
+                position_id,
                 symbol,
                 direction,
                 spike,
@@ -1701,6 +1728,7 @@ impl ArbEngine {
                 match result {
                     Ok(fill) => {
                         self.wallet.sync_pending_to_live_fill(
+                            &fill.position.position_id,
                             &symbol,
                             &direction,
                             submitted_at,
@@ -1722,8 +1750,12 @@ impl ArbEngine {
                         );
                     }
                     Err(err) => {
-                        self.wallet
-                            .rollback_pending_entry_at(&symbol, &direction, submitted_at);
+                        self.wallet.rollback_pending_entry_id_at(
+                            &position_id,
+                            &symbol,
+                            &direction,
+                            submitted_at,
+                        );
                         if let Some(state) = self.symbol_states.get_mut(&symbol) {
                             let live_reason = format!("LIVE:{}", err);
                             let should_log = Self::should_emit_rejection(state, &live_reason, 3);
@@ -1746,14 +1778,14 @@ impl ArbEngine {
                 self.sync_paper_to_live_snapshot();
             }
             LiveEvent::ClosePositionResult {
+                position_id,
                 symbol,
                 direction,
                 reason,
                 snapshot,
                 latency_trace,
             } => {
-                self.pending_live_closes
-                    .remove(&(symbol.clone(), direction.clone()));
+                self.pending_live_closes.remove(&position_id);
                 self.live_state = Some(snapshot);
                 self.record_latency(LatencyKind::Close, &latency_trace, reason);
                 self.sync_paper_to_live_snapshot();
@@ -1768,9 +1800,9 @@ impl ArbEngine {
         };
 
         let live_positions = &live_state.open_positions;
-        let live_position_keys: HashSet<(String, String)> = live_positions
+        let live_position_keys: HashSet<String> = live_positions
             .iter()
-            .map(|pos| (pos.symbol.clone(), pos.direction.clone()))
+            .map(|pos| pos.position_id.clone())
             .collect();
         self.pending_live_closes
             .retain(|key| live_position_keys.contains(key));
@@ -1778,11 +1810,7 @@ impl ArbEngine {
         self.wallet.open_positions.retain(|paper_pos| {
             let exists_live = live_positions
                 .iter()
-                .any(|live_pos| {
-                    live_pos.symbol == paper_pos.symbol
-                        && live_pos.direction == paper_pos.direction
-                        && live_pos.scale_level == paper_pos.scale_level
-                });
+                .any(|live_pos| live_pos.position_id == paper_pos.position_id);
             if !exists_live {
                 warn!(symbol=%paper_pos.symbol, direction=%paper_pos.direction, "Removing stale paper mirror position absent from live wallet");
             }
@@ -1790,11 +1818,12 @@ impl ArbEngine {
         });
 
         for live_pos in live_positions {
-            if let Some(paper_pos) = self.wallet.open_positions.iter_mut().find(|paper_pos| {
-                paper_pos.symbol == live_pos.symbol
-                    && paper_pos.direction == live_pos.direction
-                    && paper_pos.scale_level == live_pos.scale_level
-            }) {
+            if let Some(paper_pos) = self
+                .wallet
+                .open_positions
+                .iter_mut()
+                .find(|paper_pos| paper_pos.position_id == live_pos.position_id)
+            {
                 let spike_faded_since = paper_pos.spike_faded_since;
                 let trend_reversed_since = paper_pos.trend_reversed_since;
                 let last_suppressed_exit_signal = paper_pos.last_suppressed_exit_signal.clone();
@@ -1805,11 +1834,11 @@ impl ArbEngine {
                 continue;
             }
 
-            let has_pending_mirror = self.wallet.pending_entries.iter().any(|entry| {
-                entry.symbol == live_pos.symbol
-                    && entry.direction == live_pos.direction
-                    && entry.scale_level == live_pos.scale_level
-            });
+            let has_pending_mirror = self
+                .wallet
+                .pending_entries
+                .iter()
+                .any(|entry| entry.position_id == live_pos.position_id);
             if !has_pending_mirror {
                 warn!(symbol=%live_pos.symbol, direction=%live_pos.direction, level=live_pos.scale_level, "Adding missing live position to paper strategy mirror");
                 self.wallet.open_positions.push(live_pos.clone());
