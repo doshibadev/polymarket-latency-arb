@@ -223,6 +223,41 @@ impl ArbEngine {
             }));
         }
 
+        let config_json = json!({
+            "threshold_bps": self.config.threshold_bps,
+            "portfolio_pct": self.config.portfolio_pct,
+            "crypto_fee_rate": self.config.crypto_fee_rate,
+            "max_entry_price": self.config.max_entry_price,
+            "min_entry_price": self.config.min_entry_price,
+            "trend_reversal_pct": self.config.trend_reversal_pct,
+            "trend_reversal_threshold": self.config.trend_reversal_threshold,
+            "spike_faded_pct": self.config.spike_faded_pct,
+            "spike_faded_ms": self.config.spike_faded_ms,
+            "min_hold_ms": self.config.min_hold_ms,
+            "trailing_stop_pct": self.config.trailing_stop_pct,
+            "trailing_stop_activation": self.config.trailing_stop_activation,
+            "stop_loss_pct": self.config.stop_loss_pct,
+            "hold_min_share_price": self.config.hold_min_share_price,
+            "hold_safety_margin": self.config.hold_safety_margin,
+            "early_exit_loss_pct": self.config.early_exit_loss_pct,
+            "hold_margin_per_second": self.config.hold_margin_per_second,
+            "hold_max_seconds": self.config.hold_max_seconds,
+            "hold_max_crossings": self.config.hold_max_crossings,
+            "spike_sustain_ms": self.config.spike_sustain_ms,
+            "execution_delay_ms": self.config.execution_delay_ms,
+            "min_price_distance": self.config.min_price_distance,
+            "max_orders_per_minute": self.config.max_orders_per_minute,
+            "max_daily_loss": self.config.max_daily_loss,
+            "max_exposure_per_market": self.config.max_exposure_per_market,
+            "max_drawdown_pct": self.config.max_drawdown_pct,
+            "trend_filter_enabled": self.config.trend_filter_enabled,
+            "trend_min_magnitude_usd": self.config.trend_min_magnitude_usd,
+            "counter_trend_multiplier": self.config.counter_trend_multiplier,
+            "trend_max_magnitude_usd": self.config.trend_max_magnitude_usd,
+            "ptb_neutral_zone_usd": self.config.ptb_neutral_zone_usd,
+            "ptb_max_counter_distance_usd": self.config.ptb_max_counter_distance_usd,
+        });
+
         let state = json!({
             "balance": balance,
             "starting_balance": starting_balance,
@@ -261,21 +296,7 @@ impl ArbEngine {
             "wallet_address": wallet_address,
             "running": self.running,
             "is_live": self.live_wallet.is_some(),
-            "config": {
-                "threshold_bps": self.config.threshold_bps,
-                "portfolio_pct": self.config.portfolio_pct,
-                "max_entry_price": self.config.max_entry_price,
-                "min_entry_price": self.config.min_entry_price,
-                "trend_reversal_pct": self.config.trend_reversal_pct,
-                "spike_faded_pct": self.config.spike_faded_pct,
-                "spike_faded_ms": self.config.spike_faded_ms,
-                "min_hold_ms": self.config.min_hold_ms,
-                "execution_delay_ms": self.config.execution_delay_ms,
-                "max_orders_per_minute": self.config.max_orders_per_minute,
-                "max_daily_loss": self.config.max_daily_loss,
-                "max_exposure_per_market": self.config.max_exposure_per_market,
-                "max_drawdown_pct": self.config.max_drawdown_pct,
-            }
+            "config": config_json
         });
 
         if let Ok(json_str) = serde_json::to_string(&state) {

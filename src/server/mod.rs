@@ -11,6 +11,42 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn, debug};
 
+const NUMERIC_CONFIG_FIELDS: &[(&str, &str)] = &[
+    ("THRESHOLD_BPS", "threshold_bps"),
+    ("PORTFOLIO_PCT", "portfolio_pct"),
+    ("CRYPTO_FEE_RATE", "crypto_fee_rate"),
+    ("MAX_ENTRY_PRICE", "max_entry_price"),
+    ("MIN_ENTRY_PRICE", "min_entry_price"),
+    ("TREND_REVERSAL_PCT", "trend_reversal_pct"),
+    ("TREND_REVERSAL_THRESHOLD", "trend_reversal_threshold"),
+    ("SPIKE_FADED_PCT", "spike_faded_pct"),
+    ("SPIKE_FADED_MS", "spike_faded_ms"),
+    ("MIN_HOLD_MS", "min_hold_ms"),
+    ("TRAILING_STOP_PCT", "trailing_stop_pct"),
+    ("TRAILING_STOP_ACTIVATION", "trailing_stop_activation"),
+    ("STOP_LOSS_PCT", "stop_loss_pct"),
+    ("HOLD_MIN_SHARE_PRICE", "hold_min_share_price"),
+    ("HOLD_SAFETY_MARGIN", "hold_safety_margin"),
+    ("EARLY_EXIT_LOSS_PCT", "early_exit_loss_pct"),
+    ("HOLD_MARGIN_PER_SECOND", "hold_margin_per_second"),
+    ("HOLD_MAX_SECONDS", "hold_max_seconds"),
+    ("HOLD_MAX_CROSSINGS", "hold_max_crossings"),
+    ("SPIKE_SUSTAIN_MS", "spike_sustain_ms"),
+    ("EXECUTION_DELAY_MS", "execution_delay_ms"),
+    ("MIN_PRICE_DISTANCE", "min_price_distance"),
+    ("MAX_ORDERS_PER_MINUTE", "max_orders_per_minute"),
+    ("MAX_DAILY_LOSS", "max_daily_loss"),
+    ("MAX_EXPOSURE_PER_MARKET", "max_exposure_per_market"),
+    ("MAX_DRAWDOWN_PCT", "max_drawdown_pct"),
+    ("TREND_MIN_MAGNITUDE_USD", "trend_min_magnitude_usd"),
+    ("COUNTER_TREND_MULTIPLIER", "counter_trend_multiplier"),
+    ("TREND_MAX_MAGNITUDE_USD", "trend_max_magnitude_usd"),
+    ("PTB_NEUTRAL_ZONE_USD", "ptb_neutral_zone_usd"),
+    ("PTB_MAX_COUNTER_DISTANCE_USD", "ptb_max_counter_distance_usd"),
+];
+
+const BOOL_CONFIG_FIELDS: &[(&str, &str)] = &[("TREND_FILTER_ENABLED", "trend_filter_enabled")];
+
 pub struct ServerState {
     pub tx: broadcast::Sender<String>,
     pub cmd_tx: mpsc::Sender<serde_json::Value>,
@@ -55,27 +91,18 @@ pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serd
 async fn get_config() -> impl IntoResponse {
     // Re-read .env fresh every time settings modal is opened
     let _ = dotenvy::dotenv_override();
-    let pairs = [
-        ("THRESHOLD_BPS", "threshold_bps"),
-        ("PORTFOLIO_PCT", "portfolio_pct"),
-        ("MAX_ENTRY_PRICE", "max_entry_price"),
-        ("PROFIT_TARGET_PCT", "profit_target_pct"),
-        ("TRAILING_STOP_PCT", "trailing_stop_pct"),
-        ("SPIKE_FADED_PCT", "spike_faded_pct"),
-        ("MAX_SPREAD_BPS", "max_spread_bps"),
-        ("SPIKE_SCALING_FACTOR", "spike_scaling_factor"),
-        ("EMA_ALPHA", "ema_alpha"),
-        ("CRYPTO_FEE_RATE", "crypto_fee_rate"),
-        ("MAX_ORDERS_PER_MINUTE", "max_orders_per_minute"),
-        ("MAX_DAILY_LOSS", "max_daily_loss"),
-        ("MAX_EXPOSURE_PER_MARKET", "max_exposure_per_market"),
-        ("MAX_DRAWDOWN_PCT", "max_drawdown_pct"),
-    ];
     let mut map = serde_json::Map::new();
-    for (env_key, json_key) in &pairs {
+    for (env_key, json_key) in NUMERIC_CONFIG_FIELDS {
         if let Ok(val) = std::env::var(env_key) {
             if let Ok(n) = val.parse::<f64>() {
                 map.insert(json_key.to_string(), serde_json::json!(n));
+            }
+        }
+    }
+    for (env_key, json_key) in BOOL_CONFIG_FIELDS {
+        if let Ok(val) = std::env::var(env_key) {
+            if let Ok(b) = val.parse::<bool>() {
+                map.insert(json_key.to_string(), serde_json::json!(b));
             }
         }
     }
@@ -88,51 +115,68 @@ async fn update_settings(
 ) -> impl IntoResponse {
     info!(settings = ?payload, "Received settings update from dashboard");
 
-    // Persist to .env
-    if let Ok(content) = std::fs::read_to_string(".env") {
-        let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    // Persist to .env, falling back to .env.example on first run.
+    let content = std::fs::read_to_string(".env")
+        .or_else(|_| std::fs::read_to_string(".env.example"))
+        .unwrap_or_default();
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
-        let mappings: &[(&str, &str)] = &[
-            ("threshold_bps", "THRESHOLD_BPS"),
-            ("portfolio_pct", "PORTFOLIO_PCT"),
-            ("profit_target_pct", "PROFIT_TARGET_PCT"),
-            ("trailing_stop_pct", "TRAILING_STOP_PCT"),
-            ("spike_faded_pct", "SPIKE_FADED_PCT"),
-            ("max_spread_bps", "MAX_SPREAD_BPS"),
-            ("max_entry_price", "MAX_ENTRY_PRICE"),
-            ("spike_scaling_factor", "SPIKE_SCALING_FACTOR"),
-            ("ema_alpha", "EMA_ALPHA"),
-            ("execution_delay_ms", "EXECUTION_DELAY_MS"),
-            ("max_orders_per_minute", "MAX_ORDERS_PER_MINUTE"),
-            ("max_daily_loss", "MAX_DAILY_LOSS"),
-            ("max_exposure_per_market", "MAX_EXPOSURE_PER_MARKET"),
-            ("max_drawdown_pct", "MAX_DRAWDOWN_PCT"),
-        ];
-
-        for (json_key, env_key) in mappings {
-            if let Some(val) = payload.get(json_key) {
-                let val_str = val.to_string();
-                let mut found = false;
-                for line in &mut lines {
-                    if line.starts_with(&format!("{}=", env_key)) {
-                        *line = format!("{}={}", env_key, val_str);
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    lines.push(format!("{}={}", env_key, val_str));
+    for (env_key, json_key) in NUMERIC_CONFIG_FIELDS {
+        if let Some(val) = payload.get(json_key) {
+            let val_str = val.to_string();
+            let mut found = false;
+            for line in &mut lines {
+                if line.starts_with(&format!("{}=", env_key)) {
+                    *line = format!("{}={}", env_key, val_str);
+                    found = true;
+                    break;
                 }
             }
+            if !found {
+                lines.push(format!("{}={}", env_key, val_str));
+            }
         }
-
-        let _ = std::fs::write(".env", lines.join("\n") + "\n");
     }
+
+    for (env_key, json_key) in BOOL_CONFIG_FIELDS {
+        if let Some(val) = payload.get(json_key).and_then(|v| v.as_bool()) {
+            let val_str = if val { "true" } else { "false" };
+            let mut found = false;
+            for line in &mut lines {
+                if line.starts_with(&format!("{}=", env_key)) {
+                    *line = format!("{}={}", env_key, val_str);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                lines.push(format!("{}={}", env_key, val_str));
+            }
+        }
+    }
+
+    let _ = std::fs::write(".env", lines.join("\n") + "\n");
 
     let mut cmd = payload;
     cmd["_type"] = serde_json::json!("settings");
     let _ = state.cmd_tx.send(cmd).await;
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BOOL_CONFIG_FIELDS, NUMERIC_CONFIG_FIELDS};
+
+    #[test]
+    fn config_field_keys_are_unique() {
+        let mut env_keys = std::collections::HashSet::new();
+        let mut json_keys = std::collections::HashSet::new();
+
+        for (env_key, json_key) in NUMERIC_CONFIG_FIELDS.iter().chain(BOOL_CONFIG_FIELDS.iter()) {
+            assert!(env_keys.insert(*env_key), "duplicate env key: {}", env_key);
+            assert!(json_keys.insert(*json_key), "duplicate json key: {}", json_key);
+        }
+    }
 }
 
 async fn send_command(
