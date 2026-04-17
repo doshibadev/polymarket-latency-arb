@@ -995,15 +995,17 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 20px;
+  padding: 28px;
+  overflow: hidden;
 }
 
 .modal-content {
   background: var(--bg-card);
   border: 1px solid var(--border-bright);
-  width: 720px;
+  width: min(920px, 100%);
   max-width: 100%;
-  max-height: calc(100vh - 40px);
+  height: min(820px, calc(100vh - 56px));
+  max-height: calc(100vh - 56px);
   border-radius: 8px;
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
   display: flex;
@@ -1019,15 +1021,19 @@ select {
 .settings-groups {
   display: flex;
   flex-direction: column;
-  gap: 22px;
-  padding: 22px 24px 24px 24px;
+  gap: 18px;
+  padding: 20px 22px 22px 22px;
   overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+  overscroll-behavior: contain;
 }
 
 .settings-section {
   border: 1px solid var(--border-dim);
   border-radius: 6px;
   overflow: hidden;
+  flex: 0 0 auto;
 }
 
 .settings-section-head {
@@ -1051,15 +1057,16 @@ select {
 
 .settings-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 18px;
-  padding: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  padding: 16px;
 }
 
 .setting-group {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 
 .setting-label {
@@ -1070,6 +1077,8 @@ select {
 }
 
 .setting-input {
+  width: 100%;
+  min-width: 0;
   background: var(--bg-accent);
   border: 1px solid var(--border-dim);
   color: #fff;
@@ -1085,6 +1094,9 @@ select {
 }
 
 .save-btn {
+  position: sticky;
+  bottom: -22px;
+  z-index: 2;
   margin-top: 2px;
   background: var(--color-neutral);
   color: #fff;
@@ -1219,6 +1231,26 @@ select {
   .market-summary-grid,
   .settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .modal-overlay {
+    padding: 10px;
+    align-items: stretch;
+  }
+
+  .modal-content {
+    height: calc(100vh - 20px);
+    max-height: calc(100vh - 20px);
+  }
+
+  .settings-groups {
+    padding: 14px;
+    gap: 14px;
+  }
+
+  .settings-section-head,
+  .settings-grid {
+    padding: 13px;
   }
 
   .chart-panel {
