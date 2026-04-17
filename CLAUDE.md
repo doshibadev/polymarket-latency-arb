@@ -53,6 +53,10 @@ React terminal - POST /command, /settings -> cmd_rx
 
 - `src/main.rs` wires startup, channels, market fetch, streams, server, and live/paper wallet mode.
 - `src/arb/engine.rs` is the core event loop, spike detector, market state holder, command handler, and dashboard snapshot broadcaster.
+- `src/execution/model.rs` defines shared position, trade, and pending-entry domain types for paper and live paths.
+- `src/execution/planner.rs` owns shared entry sizing, liquidity, PTB, and risk gating so paper/live entry decisions cannot drift.
+- `src/execution/exit.rs` owns shared hold-to-resolution and exit planning so paper/live exit decisions cannot drift.
+- `src/execution/shared.rs` owns shared quote, share-price, and trailing-state helpers.
 - `src/execution/paper.rs` implements paper state, execution delay, fee accounting, liquidity checks, entries, exits, and persistence.
 - `src/execution/live.rs` implements live balance sync, approvals, CLOB order placement, retry/close behavior, and live position tracking.
 - `src/polymarket/market_data.rs` fetches active 5-minute BTC markets from Gamma.

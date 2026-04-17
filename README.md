@@ -41,6 +41,7 @@ This is trading infrastructure, not a SaaS demo. The dashboard is meant to stay 
 - Polymarket CLOB websocket subscription with bid/ask and order-book depth cache.
 - Paper wallet with persistent local state, simulated execution delay, fee model, and order-book-aware fill estimation.
 - Live wallet path using `polymarket-client-sdk`, Polygon approvals, balance sync, order placement, and close/retry logic.
+- Shared entry planner and shared position model so paper and live use the same strategy decisions.
 - Axum dashboard server with `/ws`, `/config`, `/settings`, and `/command`.
 - React + TypeScript terminal frontend served from `web/dist`.
 - Runtime settings editor that persists supported config fields into `.env`.
@@ -87,6 +88,10 @@ React terminal -- POST /settings - persisted .env updates
 |   +-- main.rs                  # Tokio wiring, channels, startup, live/paper selection
 |   +-- arb/engine.rs            # Core event loop, signal logic, state broadcast, orchestration
 |   +-- config/mod.rs            # Env config loading and dashboard config updates
+|   +-- execution/model.rs       # Shared position, trade, and pending-entry domain types
+|   +-- execution/planner.rs     # Shared entry sizing, liquidity, PTB, and risk gating
+|   +-- execution/exit.rs        # Shared hold/exit strategy planner for paper and live
+|   +-- execution/shared.rs      # Shared quote/price/trailing helpers
 |   +-- execution/paper.rs       # Paper wallet, simulated fills, exits, persistence
 |   +-- execution/live.rs        # Live CLOB wallet, approvals, order placement, sync, closes
 |   +-- polymarket/

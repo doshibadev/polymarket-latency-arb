@@ -3,7 +3,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::execution::paper::{OpenPosition, TradeRecord};
+use crate::execution::model::{OpenPosition, PendingEntry, TradeRecord};
 
 use super::live::LiveWallet;
 
@@ -65,12 +65,7 @@ pub enum LiveCommand {
         symbol: String,
     },
     OpenPosition {
-        symbol: String,
-        direction: String,
-        spike: f64,
-        threshold_usd: f64,
-        in_hold_mode: bool,
-        current_btc: f64,
+        plan: PendingEntry,
         latency_trace: LatencyTrace,
     },
     ClosePosition {
@@ -96,6 +91,7 @@ pub enum LiveEvent {
         symbol: String,
         direction: String,
         spike: f64,
+        submitted_at: Instant,
         result: Result<LiveOpenFill, String>,
         snapshot: LiveWalletSnapshot,
         latency_trace: LatencyTrace,
@@ -171,34 +167,23 @@ pub fn spawn_live_execution(
                     wallet.register_tokens(&up_token_id, &down_token_id, &symbol);
                 }
                 LiveCommand::OpenPosition {
-                    symbol,
-                    direction,
-                    spike,
-                    threshold_usd,
-                    in_hold_mode,
-                    current_btc,
+                    plan,
                     mut latency_trace,
                 } => {
+                    let symbol = plan.symbol.clone();
+                    let direction = plan.direction.clone();
+                    let spike = plan.spike;
+                    let submitted_at = plan.submitted_at;
                     latency_trace.actor_received_at = Some(Instant::now());
                     latency_trace.submit_started_at = Some(Instant::now());
-                    let result = wallet
-                        .open_position(
-                            &symbol,
-                            &direction,
-                            spike,
-                            threshold_usd,
-                            in_hold_mode,
-                            current_btc,
-                        )
-                        .await
-                        .and_then(|level| {
-                            wallet
-                                .open_positions
-                                .last()
-                                .cloned()
-                                .map(|position| LiveOpenFill { level, position })
-                                .ok_or_else(|| "LIVE_POSITION_MISSING_AFTER_FILL".to_string())
-                        });
+                    let result = wallet.open_position(&plan).await.and_then(|level| {
+                        wallet
+                            .open_positions
+                            .last()
+                            .cloned()
+                            .map(|position| LiveOpenFill { level, position })
+                            .ok_or_else(|| "LIVE_POSITION_MISSING_AFTER_FILL".to_string())
+                    });
                     latency_trace.submit_finished_at = Some(Instant::now());
 
                     if result.is_ok() {
@@ -223,6 +208,7 @@ pub fn spawn_live_execution(
                             symbol,
                             direction,
                             spike,
+                            submitted_at,
                             result,
                             snapshot,
                             latency_trace,

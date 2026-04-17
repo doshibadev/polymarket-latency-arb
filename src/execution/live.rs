@@ -14,13 +14,17 @@ use polymarket_client_sdk::ctf::Client as CtfClient;
 use polymarket_client_sdk::types::{address, Address, Decimal, U256};
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Row, Sqlite};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 use crate::execution::actor::LiveWalletSnapshot;
-use crate::execution::paper::{OpenPosition, TradeRecord};
+use crate::execution::model::{OpenPosition, PendingEntry, TradeRecord};
+use crate::execution::shared::{
+    directional_bid_ask, share_mid_price, sync_position_price_state, update_btc_extrema,
+    update_directional_bid_ask,
+};
 use crate::polymarket::MarketData;
 
 // Polygon mainnet contract addresses (from Polymarket docs + reference bot)
@@ -140,6 +144,7 @@ struct PersistedLivePosition {
     ptb_tier_at_entry: Option<String>,
     entry_mode: Option<String>,
     exit_suppressed_count: u32,
+    entry_time: String,
 }
 
 enum LiveDbWriteCommand {
@@ -298,7 +303,7 @@ struct PendingOrder {
     submitted_at: std::time::Instant,
 }
 
-/// Cache share prices from WebSocket (matches paper.rs)
+/// Cache share prices from WebSocket
 #[derive(Clone, Default)]
 struct SymbolPriceCache {
     pub up_bid: f64,
@@ -328,7 +333,7 @@ pub struct LiveWallet {
     pending_order_ids: HashMap<String, String>,   // "symbol:direction" -> order_id
     order_timestamps: Vec<std::time::Instant>,    // For rate limiting
     pending_orders: Vec<PendingOrder>, // Track in-flight orders to prevent race conditions
-    price_cache: HashMap<String, SymbolPriceCache>, // Cache WebSocket prices (matches paper.rs)
+    price_cache: HashMap<String, SymbolPriceCache>,
     zero_balance_flags: HashMap<String, Instant>, // "symbol:direction" -> first zero-balance detection time
     redeem_client: Option<RedeemClient>,
     wallet_type: WalletKind,
@@ -570,9 +575,9 @@ impl LiveWallet {
                                         buy_fee, entry_spike, highest_price, scale_level, hold_to_resolution,
                                         peak_spike, entry_btc, peak_btc, trough_btc, trailing_stop_activated,
                                         on_chain_shares, ptb_tier_at_entry, entry_mode, exit_suppressed_count,
-                                        updated_at
+                                        entry_time, updated_at
                                     )
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                     "#,
                                 )
                                 .bind(&position.symbol)
@@ -595,6 +600,7 @@ impl LiveWallet {
                                 .bind(&position.ptb_tier_at_entry)
                                 .bind(&position.entry_mode)
                                 .bind(position.exit_suppressed_count as i64)
+                                .bind(&position.entry_time)
                                 .bind(chrono::Utc::now().to_rfc3339())
                                 .execute(&mut *tx)
                                 .await?;
@@ -706,12 +712,17 @@ impl LiveWallet {
                 ptb_tier_at_entry TEXT,
                 entry_mode TEXT,
                 exit_suppressed_count INTEGER NOT NULL,
+                entry_time TEXT,
                 updated_at TEXT NOT NULL
             )
             "#,
         )
         .execute(db)
         .await?;
+
+        let _ = sqlx::query("ALTER TABLE live_open_positions ADD COLUMN entry_time TEXT")
+            .execute(db)
+            .await;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_live_trades_timestamp ON live_trades(timestamp)",
@@ -768,8 +779,185 @@ impl LiveWallet {
                 ptb_tier_at_entry: position.ptb_tier_at_entry.clone(),
                 entry_mode: position.entry_mode.clone(),
                 exit_suppressed_count: position.exit_suppressed_count,
+                entry_time: chrono::Utc::now()
+                    .checked_sub_signed(
+                        chrono::TimeDelta::from_std(position.entry_time.elapsed())
+                            .unwrap_or_else(|_| chrono::TimeDelta::zero()),
+                    )
+                    .unwrap_or_else(chrono::Utc::now)
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
             })
             .collect()
+    }
+
+    fn restored_entry_time(timestamp: Option<&str>) -> Instant {
+        let Some(timestamp) = timestamp else {
+            return Instant::now();
+        };
+        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
+            return Instant::now();
+        };
+        let age = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
+        if age <= chrono::TimeDelta::zero() {
+            return Instant::now();
+        }
+        let age_std = age
+            .to_std()
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0));
+        Instant::now()
+            .checked_sub(age_std)
+            .unwrap_or_else(Instant::now)
+    }
+
+    pub async fn load_state(&mut self) {
+        let db = match self.db().await {
+            Ok(db) => db,
+            Err(err) => {
+                warn!("Failed to open live wallet database: {err}");
+                return;
+            }
+        };
+
+        let wallet_row = match sqlx::query(
+            r#"
+            SELECT balance, starting_balance, trade_count, wins, losses, total_fees_paid,
+                   total_volume, cumulative_pnl, daily_pnl, wallet_address
+            FROM live_wallet_state
+            WHERE id = 1
+            "#,
+        )
+        .fetch_optional(&db)
+        .await
+        {
+            Ok(row) => row,
+            Err(err) => {
+                warn!("Failed to load live wallet state: {err}");
+                return;
+            }
+        };
+
+        let Some(wallet_row) = wallet_row else {
+            return;
+        };
+
+        self.balance = wallet_row.get("balance");
+        self.starting_balance = wallet_row.get("starting_balance");
+        self.trade_count = wallet_row.get::<i64, _>("trade_count") as u64;
+        self.wins = wallet_row.get::<i64, _>("wins") as u64;
+        self.losses = wallet_row.get::<i64, _>("losses") as u64;
+        self.total_fees_paid = wallet_row.get("total_fees_paid");
+        self.total_volume = wallet_row.get("total_volume");
+        self.cumulative_pnl = wallet_row.get("cumulative_pnl");
+        self.daily_pnl = wallet_row.get("daily_pnl");
+        self.wallet_address = wallet_row.get("wallet_address");
+
+        match sqlx::query("SELECT * FROM live_trades ORDER BY id ASC")
+            .fetch_all(&db)
+            .await
+        {
+            Ok(rows) => {
+                self.trade_history = rows
+                    .iter()
+                    .map(|row| TradeRecord {
+                        symbol: row.get("symbol"),
+                        r#type: row.get("type"),
+                        question: row.get("question"),
+                        direction: row.get("direction"),
+                        entry_price: row.get("entry_price"),
+                        exit_price: row.get("exit_price"),
+                        shares: row.get("shares"),
+                        cost: row.get("cost"),
+                        pnl: row.get("pnl"),
+                        cumulative_pnl: row.get("cumulative_pnl"),
+                        balance_after: row.get("balance_after"),
+                        timestamp: row.get("timestamp"),
+                        close_reason: row.get("close_reason"),
+                        btc_at_entry: row.get("btc_at_entry"),
+                        price_to_beat_at_entry: row.get("price_to_beat_at_entry"),
+                        ptb_margin_at_entry: row.get("ptb_margin_at_entry"),
+                        seconds_to_expiry_at_entry: row
+                            .get::<Option<i64>, _>("seconds_to_expiry_at_entry")
+                            .map(|value| value as u64),
+                        spread_at_entry: row.get("spread_at_entry"),
+                        round_trip_loss_pct_at_entry: row.get("round_trip_loss_pct_at_entry"),
+                        signal_score: row.get("signal_score"),
+                        ptb_margin_at_exit: row.get("ptb_margin_at_exit"),
+                        exit_mode: row.get("exit_mode"),
+                        favorable_ptb_at_exit: row
+                            .get::<Option<i64>, _>("favorable_ptb_at_exit")
+                            .map(|value| value != 0),
+                        ptb_tier_at_entry: row.get("ptb_tier_at_entry"),
+                        ptb_tier_at_exit: row.get("ptb_tier_at_exit"),
+                        entry_mode: row.get("entry_mode"),
+                        exit_suppressed_count: row
+                            .get::<Option<i64>, _>("exit_suppressed_count")
+                            .map(|value| value as u32),
+                    })
+                    .collect();
+                self.saved_trade_count = self.trade_history.len();
+            }
+            Err(err) => warn!("Failed to load live trade history: {err}"),
+        }
+
+        match sqlx::query(
+            r#"
+            SELECT symbol, direction, entry_price, avg_entry_price, shares, position_size, buy_fee,
+                   entry_spike, highest_price, scale_level, hold_to_resolution, peak_spike,
+                   entry_btc, peak_btc, trough_btc, trailing_stop_activated, on_chain_shares,
+                   ptb_tier_at_entry, entry_mode, exit_suppressed_count, entry_time, updated_at
+            FROM live_open_positions
+            ORDER BY id ASC
+            "#,
+        )
+        .fetch_all(&db)
+        .await
+        {
+            Ok(rows) => {
+                self.open_positions = rows
+                    .iter()
+                    .map(|row| {
+                        let entry_time: Option<String> = row.get("entry_time");
+                        let updated_at: Option<String> = row.get("updated_at");
+                        OpenPosition {
+                            symbol: row.get("symbol"),
+                            direction: row.get("direction"),
+                            entry_price: row.get("entry_price"),
+                            avg_entry_price: row.get("avg_entry_price"),
+                            shares: row.get("shares"),
+                            position_size: row.get("position_size"),
+                            buy_fee: row.get("buy_fee"),
+                            entry_spike: row.get("entry_spike"),
+                            entry_time: Self::restored_entry_time(
+                                entry_time.as_deref().or(updated_at.as_deref()),
+                            ),
+                            highest_price: row.get("highest_price"),
+                            scale_level: row.get::<i64, _>("scale_level") as u32,
+                            hold_to_resolution: row.get("hold_to_resolution"),
+                            peak_spike: row.get("peak_spike"),
+                            entry_btc: row.get("entry_btc"),
+                            peak_btc: row.get("peak_btc"),
+                            trough_btc: row.get("trough_btc"),
+                            spike_faded_since: None,
+                            trend_reversed_since: None,
+                            trailing_stop_activated: row.get("trailing_stop_activated"),
+                            on_chain_shares: row.get("on_chain_shares"),
+                            ptb_tier_at_entry: row.get("ptb_tier_at_entry"),
+                            entry_mode: row.get("entry_mode"),
+                            exit_suppressed_count: row.get::<i64, _>("exit_suppressed_count")
+                                as u32,
+                            last_suppressed_exit_signal: None,
+                        }
+                    })
+                    .collect();
+            }
+            Err(err) => warn!("Failed to load live open positions: {err}"),
+        }
+
+        info!(
+            "Loaded live wallet state from SQLite ({} trades, {} open positions)",
+            self.trade_history.len(),
+            self.open_positions.len()
+        );
     }
 
     pub async fn save_state(&mut self) {
@@ -863,8 +1051,13 @@ impl LiveWallet {
             )
             .into());
         }
+        let recovered_state_exists = self.trade_count > 0
+            || !self.trade_history.is_empty()
+            || !self.open_positions.is_empty();
         self.balance = usdc_balance;
-        self.starting_balance = usdc_balance;
+        if !recovered_state_exists && self.starting_balance <= 0.0 {
+            self.starting_balance = usdc_balance;
+        }
         checks.push(LivePreflightCheck {
             name: "usdc_balance",
             detail: format!("wallet balance ${usdc_balance:.2}"),
@@ -878,6 +1071,31 @@ impl LiveWallet {
         };
         report.log_success();
         Ok(report)
+    }
+
+    pub async fn recover_startup_state(
+        &mut self,
+        initial_markets: &[MarketData],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.load_state().await;
+
+        for market in initial_markets {
+            self.register_tokens(&market.up_token_id, &market.down_token_id, &market.symbol);
+        }
+
+        if self.open_positions.is_empty() && self.trade_history.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            trades = self.trade_history.len(),
+            open_positions = self.open_positions.len(),
+            "Recovering persisted live wallet state before actor startup"
+        );
+
+        self.sync_from_clob().await;
+        self.save_state().await;
+        Ok(())
     }
 
     pub async fn ensure_approvals(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1134,47 +1352,47 @@ impl LiveWallet {
         self.price_cache.remove(symbol);
     }
 
-    /// Update share prices from WebSocket (matches paper.rs)
+    /// Update share prices from WebSocket
     pub fn update_share_price(&mut self, symbol: &str, direction: &str, bid: f64, ask: f64) {
         let cache = self.price_cache.entry(symbol.to_string()).or_default();
-        if direction == "UP" {
-            cache.up_bid = bid;
-            cache.up_ask = ask;
-        } else {
-            cache.down_bid = bid;
-            cache.down_ask = ask;
-        }
+        update_directional_bid_ask(
+            &mut cache.up_bid,
+            &mut cache.up_ask,
+            &mut cache.down_bid,
+            &mut cache.down_ask,
+            direction,
+            bid,
+            ask,
+        );
 
-        // Keep highest_price in sync on live positions (mirrors paper.rs behavior)
-        let mid_price = (bid + ask) / 2.0;
-        for pos in &mut self.open_positions {
-            if pos.symbol == symbol && pos.direction == direction && mid_price > pos.highest_price {
-                pos.highest_price = mid_price;
-            }
-        }
+        sync_position_price_state(
+            &mut self.open_positions,
+            symbol,
+            direction,
+            share_mid_price(bid, ask),
+            self.config.trailing_stop_activation,
+        );
     }
 
-    /// Get bid/ask from cache (matches paper.rs)
+    /// Get bid/ask from cache
     pub fn get_bid_ask(&self, symbol: &str, direction: &str) -> (f64, f64) {
         if let Some(cache) = self.price_cache.get(symbol) {
-            if direction == "UP" {
-                (cache.up_bid, cache.up_ask)
-            } else {
-                (cache.down_bid, cache.down_ask)
-            }
+            directional_bid_ask(
+                cache.up_bid,
+                cache.up_ask,
+                cache.down_bid,
+                cache.down_ask,
+                direction,
+            )
         } else {
             (0.0, 0.0)
         }
     }
 
-    /// Get share price from cache (matches paper.rs)
+    /// Get share price from cache
     pub fn get_share_price(&self, symbol: &str, direction: &str) -> f64 {
         let (bid, ask) = self.get_bid_ask(symbol, direction);
-        if bid > 0.0 && ask > 0.0 {
-            (bid + ask) / 2.0
-        } else {
-            0.0
-        }
+        share_mid_price(bid, ask)
     }
 
     /// Clean up stale pending orders (called periodically by engine)
@@ -1191,20 +1409,7 @@ impl LiveWallet {
 
     /// Update BTC trailing stop tracking for all open positions of a symbol
     pub fn update_btc_trailing(&mut self, symbol: &str, current_btc: f64) {
-        for pos in &mut self.open_positions {
-            if pos.symbol != symbol {
-                continue;
-            }
-
-            // entry_btc is now set immediately when position is created
-            // Just update peak/trough here
-            if current_btc > pos.peak_btc {
-                pos.peak_btc = current_btc;
-            }
-            if current_btc < pos.trough_btc {
-                pos.trough_btc = current_btc;
-            }
-        }
+        update_btc_extrema(&mut self.open_positions, symbol, current_btc);
     }
 
     pub async fn verify_position_balance(&mut self, symbol: &str, direction: &str) {
@@ -1383,122 +1588,32 @@ impl LiveWallet {
         Err("Max retries exceeded".to_string())
     }
 
-    /// Open a live position — matches paper.rs logic exactly
-    pub async fn open_position(
-        &mut self,
-        symbol: &str,
-        direction: &str,
-        spike: f64,
-        _threshold_usd: f64,
-        allow_scaling: bool,
-        current_btc: f64,
-    ) -> Result<u32, String> {
-        // Reset daily PnL at midnight UTC
-        let today = chrono::Utc::now().date_naive().day();
-        if today != self.last_reset_day {
-            self.daily_pnl = 0.0;
-            self.last_reset_day = today;
-        }
+    /// Execute exact paper-generated plan on Polymarket.
+    /// Paper planner stays source of truth for strategy, sizing, and gating.
+    pub async fn open_position(&mut self, plan: &PendingEntry) -> Result<u32, String> {
+        let symbol = plan.symbol.as_str();
+        let direction = plan.direction.as_str();
+        let scale_level = plan.scale_level;
+        let current_btc = plan.entry_btc;
+        let planned_entry_price = plan.entry_price;
+        let planned_position_size = plan.position_size;
+        let planned_shares = plan.shares;
+        let spike = plan.spike;
+        let entry_mode = plan.entry_mode.clone();
+        let ptb_tier_at_entry = plan.ptb_tier_at_entry.clone();
 
-        // EMERGENCY STOP: If balance drops below $2, refuse new positions
-        if self.balance < 2.0 {
-            return Err("EMERGENCY_STOP_BALANCE_TOO_LOW".to_string());
-        }
-
-        // DRAWDOWN CHECK: Stop if drawdown exceeds threshold
-        if self.starting_balance > 0.0 {
-            let drawdown = (self.starting_balance - self.balance) / self.starting_balance;
-            if drawdown > self.config.max_drawdown_pct {
-                return Err(format!(
-                    "DRAWDOWN_EXCEEDED: {:.1}% > {:.1}%",
-                    drawdown * 100.0,
-                    self.config.max_drawdown_pct * 100.0
-                ));
-            }
-        }
-
-        // DAILY LOSS LIMIT: Stop if daily losses exceed threshold
-        if self.daily_pnl < -self.config.max_daily_loss {
-            return Err(format!(
-                "DAILY_LOSS_LIMIT: ${:.2} < -${:.2}",
-                self.daily_pnl, self.config.max_daily_loss
-            ));
-        }
-
-        // RATE LIMITING: Check orders per minute
-        let now = std::time::Instant::now();
-        self.order_timestamps
-            .retain(|t| now.duration_since(*t).as_secs() < 60);
-        if self.order_timestamps.len() >= self.config.max_orders_per_minute as usize {
-            return Err(format!(
-                "RATE_LIMIT: {} orders/min exceeded",
-                self.config.max_orders_per_minute
-            ));
-        }
-
-        // PER-MARKET EXPOSURE: Check total exposure in this market
-        let market_exposure: f64 = self
-            .open_positions
-            .iter()
-            .filter(|p| p.symbol == symbol)
-            .map(|p| p.position_size)
-            .sum();
-        let position_size_planned = self.balance * self.config.portfolio_pct;
-        if market_exposure + position_size_planned > self.config.max_exposure_per_market {
-            return Err(format!(
-                "MARKET_EXPOSURE_LIMIT: ${:.2} + ${:.2} > ${:.2}",
-                market_exposure, position_size_planned, self.config.max_exposure_per_market
-            ));
-        }
-
-        // SCALE LEVEL CHECK - matches paper.rs exactly
-        // Clean up stale pending orders (older than 5 seconds = failed/stuck)
-        let now = std::time::Instant::now();
-        self.pending_orders
-            .retain(|p| now.duration_since(p.submitted_at).as_secs() < 5);
-
-        // Count existing positions + in-flight orders (matches paper.rs logic)
-        let existing: Vec<_> = self
-            .open_positions
-            .iter()
-            .filter(|p| p.symbol == symbol && p.direction == direction)
-            .collect();
-        let pending_same = self
-            .pending_orders
-            .iter()
-            .filter(|p| p.symbol == symbol && p.direction == direction)
-            .count();
-        let scale_level = (existing.len() + pending_same) as u32 + 1;
-
-        // In HOLD mode (allow_scaling=true), ignore MAX_SCALE_LEVEL to add to winning positions
-        if !allow_scaling && scale_level > 1 {
-            // Log why we're rejecting - helps debug stuck pending orders
-            if pending_same > 0 {
-                warn!(
-                    "MAX_SCALE_LEVEL rejected: {} existing positions, {} pending orders for {} {}",
-                    existing.len(),
-                    pending_same,
-                    symbol,
-                    direction
-                );
-            }
-            return Err("MAX_SCALE_LEVEL".to_string());
-        }
-
-        // Mark this order as in-flight BEFORE any async operations to prevent race conditions
-        let pending_marker = now;
+        let pending_marker = std::time::Instant::now();
         self.pending_orders.push(PendingOrder {
-            symbol: symbol.to_string(),
-            direction: direction.to_string(),
+            symbol: plan.symbol.clone(),
+            direction: plan.direction.clone(),
             submitted_at: pending_marker,
         });
 
-        // Helper macro to clean up pending order on early return
         macro_rules! cleanup_and_return {
             ($err:expr) => {{
                 self.pending_orders.retain(|p| {
-                    !(p.symbol == symbol
-                        && p.direction == direction
+                    !(p.symbol == plan.symbol
+                        && p.direction == plan.direction
                         && p.submitted_at == pending_marker)
                 });
                 return Err($err);
@@ -1509,52 +1624,6 @@ impl LiveWallet {
             Some(id) => id,
             None => cleanup_and_return!("NO_TOKEN_ID".to_string()),
         };
-
-        // Get entry price from WebSocket cache (matches paper.rs exactly)
-        let entry_price = self.get_share_price(symbol, direction);
-
-        // ENTRY PRICE CHECKS - matches paper.rs exactly
-        if entry_price <= 0.0 {
-            cleanup_and_return!("NO_PRICE_DATA".to_string());
-        }
-        if entry_price > self.config.max_entry_price {
-            cleanup_and_return!("PRICE_TOO_HIGH".to_string());
-        }
-        if entry_price < self.config.min_entry_price {
-            cleanup_and_return!("PRICE_TOO_LOW".to_string());
-        }
-
-        // Position sizing based on share price tiers (matches paper.rs)
-        // Cheaper shares = smaller position (higher risk), expensive shares = larger position
-        let portfolio_pct = if entry_price < 0.20 {
-            0.10 // 10% for very cheap shares
-        } else if entry_price < 0.50 {
-            0.15 // 15% for mid-range shares
-        } else if entry_price < 0.75 {
-            0.20 // 20% for higher-priced shares
-        } else {
-            self.config.portfolio_pct // config default for 75c+
-        };
-        let position_size = self.balance * portfolio_pct * (1.0 / scale_level as f64);
-
-        // Cap position size at $20
-        let position_size = position_size.min(20.0);
-
-        let shares = position_size / entry_price;
-        let buy_fee = shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
-
-        // Preliminary balance check (will recheck after rounding)
-        if (position_size + buy_fee) > self.balance {
-            cleanup_and_return!("INSUFFICIENT_BALANCE".to_string());
-        }
-
-        // ADDITIONAL SAFETY CHECKS for live trading
-        if entry_price < 0.05 {
-            cleanup_and_return!(format!(
-                "CRITICAL_SAFETY: Entry price {:.3} < 0.05 (5 cents minimum)",
-                entry_price
-            ));
-        }
 
         let tick = 0.01f64;
 
@@ -1578,44 +1647,33 @@ impl LiveWallet {
         let market_price = (ask + 0.04).min(0.99);
 
         info!(symbol=%symbol, direction=%direction, cached_ask=ask, limit_price=market_price,
-              position_size=position_size, "Sending FAK buy order");
+              position_size=planned_position_size, "Sending FAK buy order");
 
         let rounded_price = Self::round_to_tick(market_price, tick);
 
         // Round shares to 2 decimal places for Polymarket API
         // Polymarket requires: maker amount max 2 decimals, taker amount max 4 decimals
-        let rounded_shares = (shares * 100.0).floor() / 100.0;
+        let rounded_shares = (planned_shares * 100.0).floor() / 100.0;
 
         // Skip if rounded to 0 shares
         if rounded_shares < 0.01 {
             cleanup_and_return!(format!(
                 "SHARES_TOO_SMALL: {:.4} shares rounds to 0",
-                shares
+                planned_shares
             ));
         }
 
-        // Recalculate actual cost with rounded shares
-        let actual_position_size = rounded_shares * entry_price;
-        let actual_buy_fee =
-            rounded_shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
-
-        // Check minimum order size ($1 minimum on Polymarket)
-        if actual_position_size < 1.0 {
+        let rounded_usdc_budget = (planned_position_size * 100.0).floor() / 100.0;
+        if rounded_usdc_budget < 1.0 {
             cleanup_and_return!(format!(
                 "BELOW_MIN_ORDER_SIZE: ${:.2} < $1 minimum",
-                actual_position_size
+                rounded_usdc_budget
             ));
         }
-
-        // For FAK buys, the USDC amount is how much we want to SPEND, not shares × limit_price.
-        // We want to spend our position_size worth of USDC at whatever price the book offers.
-        // Round to 2 decimals as required by Polymarket API.
-        let usdc_amount = (actual_position_size * 100.0).floor() / 100.0;
-
-        // Final balance check with actual amounts
-        if (actual_position_size + actual_buy_fee) > self.balance {
-            cleanup_and_return!("INSUFFICIENT_BALANCE_AFTER_ROUNDING".to_string());
+        if rounded_usdc_budget > self.balance {
+            cleanup_and_return!("INSUFFICIENT_BALANCE".to_string());
         }
+        let usdc_amount = rounded_usdc_budget;
 
         let price = match Decimal::try_from(rounded_price) {
             Ok(p) => p,
@@ -1682,7 +1740,7 @@ impl LiveWallet {
         // Fee already absorbed into fewer shares — don't double-count in USDC accounting
         let final_buy_fee = 0.0;
 
-        info!(symbol=%symbol, direction=%direction, cached_price=entry_price, fill_price=actual_entry_price,
+        info!(symbol=%symbol, direction=%direction, planned_price=planned_entry_price, fill_price=actual_entry_price,
               requested_shares=rounded_shares, gross_shares=actual_shares, net_shares=net_shares,
               filled_usdc=actual_usdc, order_id=%order_id, "Live BUY filled (FAK)");
 
@@ -1718,18 +1776,18 @@ impl LiveWallet {
             timestamp: now_rfc3339(),
             close_reason: None,
             btc_at_entry: Some(current_btc),
-            price_to_beat_at_entry: None,
-            ptb_margin_at_entry: None,
-            seconds_to_expiry_at_entry: None,
-            spread_at_entry: None,
-            round_trip_loss_pct_at_entry: None,
-            signal_score: None,
+            price_to_beat_at_entry: plan.price_to_beat_at_entry,
+            ptb_margin_at_entry: plan.ptb_margin_at_entry,
+            seconds_to_expiry_at_entry: plan.seconds_to_expiry_at_entry,
+            spread_at_entry: plan.spread_at_entry,
+            round_trip_loss_pct_at_entry: plan.round_trip_loss_pct_at_entry,
+            signal_score: plan.signal_score,
             ptb_margin_at_exit: None,
             exit_mode: None,
             favorable_ptb_at_exit: None,
-            ptb_tier_at_entry: None,
+            ptb_tier_at_entry: ptb_tier_at_entry.clone(),
             ptb_tier_at_exit: None,
-            entry_mode: Some(if allow_scaling { "ptb_hold" } else { "scalp" }.to_string()),
+            entry_mode: entry_mode.clone(),
             exit_suppressed_count: Some(0),
         });
 
@@ -1745,7 +1803,7 @@ impl LiveWallet {
             entry_time: Instant::now(),
             highest_price: actual_entry_price,
             scale_level,
-            hold_to_resolution: false,
+            hold_to_resolution: matches!(entry_mode.as_deref(), Some("ptb_hold")),
             peak_spike: spike.abs(),
             // BTC price set immediately at entry to avoid race condition - matches paper.rs
             entry_btc: current_btc,
@@ -1755,8 +1813,8 @@ impl LiveWallet {
             trend_reversed_since: None,
             trailing_stop_activated: false,
             on_chain_shares: None, // Async verification updates this after the realism delay
-            ptb_tier_at_entry: None,
-            entry_mode: Some(if allow_scaling { "ptb_hold" } else { "scalp" }.to_string()),
+            ptb_tier_at_entry,
+            entry_mode,
             exit_suppressed_count: 0,
             last_suppressed_exit_signal: None,
         });

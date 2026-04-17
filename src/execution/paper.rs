@@ -1,94 +1,27 @@
 use crate::config::AppConfig;
+use crate::execution::exit::{
+    evaluate_hold_to_resolution, evaluate_position_exit, exit_mode_for, now_unix_secs, ptb_margin,
+    update_exit_persistence, HoldEvaluationInput, PlannedExit, PositionExitContext,
+};
+use crate::execution::model::{OpenPosition, PendingEntry, TradeRecord};
+use crate::execution::planner::{
+    build_entry_plan, calculate_fee, estimate_fak_buy, estimate_fak_sell, EntryPlanInput, PtbTier,
+};
+use crate::execution::shared::{
+    directional_bid_ask, share_mid_price, sync_position_price_state, update_btc_extrema,
+    update_directional_bid_ask,
+};
 use crate::polymarket::BookLevel;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteRow, SqliteSynchronous,
 };
 use sqlx::{Pool, Row, Sqlite};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
-
-/// An open scalp position
-#[derive(Clone, Serialize)]
-pub struct OpenPosition {
-    pub symbol: String,
-    pub direction: String,
-    pub entry_price: f64,
-    pub avg_entry_price: f64, // Weighted average when scaling in
-    pub shares: f64,
-    pub position_size: f64,
-    pub buy_fee: f64,
-    pub entry_spike: f64,
-    #[serde(skip)]
-    pub entry_time: std::time::Instant,
-    pub highest_price: f64,
-    pub scale_level: u32,
-    pub hold_to_resolution: bool,
-    pub peak_spike: f64, // highest spike seen since entry
-    // BTC-based exit fields
-    pub entry_btc: f64,  // BTC price at entry
-    pub peak_btc: f64,   // highest BTC since entry (for UP positions)
-    pub trough_btc: f64, // lowest BTC since entry (for DOWN positions)
-    #[serde(skip)]
-    pub spike_faded_since: Option<Instant>, // when spike_faded reversal first detected
-    #[serde(skip)]
-    pub trend_reversed_since: Option<Instant>, // when trend_reversed first detected
-    pub trailing_stop_activated: bool, // true once share price gains activation_pct% from entry
-    pub on_chain_shares: Option<f64>, // actual on-chain balance from sync_from_clob (live only)
-    pub ptb_tier_at_entry: Option<String>,
-    pub entry_mode: Option<String>,
-    pub exit_suppressed_count: u32,
-    #[serde(skip)]
-    pub last_suppressed_exit_signal: Option<(String, Instant)>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct TradeRecord {
-    pub symbol: String,
-    pub r#type: String,
-    pub question: String,
-    pub direction: String,
-    pub entry_price: Option<f64>,
-    pub exit_price: Option<f64>,
-    pub shares: f64,
-    pub cost: f64,
-    pub pnl: Option<f64>,
-    pub cumulative_pnl: Option<f64>,
-    pub balance_after: Option<f64>,
-    pub timestamp: String,
-    pub close_reason: Option<String>,
-    #[serde(default)]
-    pub btc_at_entry: Option<f64>,
-    #[serde(default)]
-    pub price_to_beat_at_entry: Option<f64>,
-    #[serde(default)]
-    pub ptb_margin_at_entry: Option<f64>,
-    #[serde(default)]
-    pub seconds_to_expiry_at_entry: Option<u64>,
-    #[serde(default)]
-    pub spread_at_entry: Option<f64>,
-    #[serde(default)]
-    pub round_trip_loss_pct_at_entry: Option<f64>,
-    #[serde(default)]
-    pub signal_score: Option<f64>,
-    #[serde(default)]
-    pub ptb_margin_at_exit: Option<f64>,
-    #[serde(default)]
-    pub exit_mode: Option<String>,
-    #[serde(default)]
-    pub favorable_ptb_at_exit: Option<bool>,
-    #[serde(default)]
-    pub ptb_tier_at_entry: Option<String>,
-    #[serde(default)]
-    pub ptb_tier_at_exit: Option<String>,
-    #[serde(default)]
-    pub entry_mode: Option<String>,
-    #[serde(default)]
-    pub exit_suppressed_count: Option<u32>,
-}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct HistoryPoint {
@@ -117,58 +50,6 @@ struct SymbolMarketState {
     pub btc_history_idx: usize,
     pub last_price_to_beat: Option<f64>, // price_to_beat for hold mode
     pub last_market_end_ts: Option<u64>, // market end timestamp for hold mode
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PtbTier {
-    Unknown,
-    Unfavorable,
-    Neutral,
-    Favorable,
-    Strong,
-    Extreme,
-}
-
-impl PtbTier {
-    fn from_margin(margin: Option<f64>) -> Self {
-        match margin {
-            Some(m) if m >= 150.0 => Self::Extreme,
-            Some(m) if m >= 100.0 => Self::Strong,
-            Some(m) if m >= 30.0 => Self::Favorable,
-            Some(m) if m >= -20.0 => Self::Neutral,
-            Some(_) => Self::Unfavorable,
-            None => Self::Unknown,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Unfavorable => "unfavorable",
-            Self::Neutral => "neutral",
-            Self::Favorable => "favorable",
-            Self::Strong => "strong",
-            Self::Extreme => "extreme",
-        }
-    }
-
-    fn is_favorable(self) -> bool {
-        matches!(self, Self::Favorable | Self::Strong | Self::Extreme)
-    }
-
-    fn is_ptb_hold(self) -> bool {
-        matches!(self, Self::Strong | Self::Extreme)
-    }
-}
-
-struct EntryContext {
-    score: f64,
-    round_trip_loss_pct: f64,
-    spread: f64,
-    ptb_margin: Option<f64>,
-    seconds_to_expiry: Option<u64>,
-    ptb_tier: PtbTier,
-    entry_mode: &'static str,
 }
 
 impl Default for SymbolMarketState {
@@ -206,30 +87,6 @@ pub struct PendingClose {
     pub close_price: f64,
     pub reason: &'static str,
     pub submitted_at: Instant,
-}
-
-/// A pending entry waiting for execution delay to elapse
-#[derive(Clone)]
-pub struct PendingEntry {
-    pub symbol: String,
-    pub direction: String,
-    pub spike: f64,
-    pub entry_price: f64,
-    pub scale_level: u32,
-    pub position_size: f64,
-    pub shares: f64,
-    pub buy_fee: f64,
-    pub submitted_at: Instant,
-    pub entry_btc: f64,    // BTC price at entry to avoid race condition
-    pub live_synced: bool, // true if synced from live fill — skip recalculation in flush_pending
-    pub price_to_beat_at_entry: Option<f64>,
-    pub ptb_margin_at_entry: Option<f64>,
-    pub seconds_to_expiry_at_entry: Option<u64>,
-    pub spread_at_entry: Option<f64>,
-    pub round_trip_loss_pct_at_entry: Option<f64>,
-    pub signal_score: Option<f64>,
-    pub ptb_tier_at_entry: Option<String>,
-    pub entry_mode: Option<String>,
 }
 
 #[derive(Clone)]
@@ -824,10 +681,17 @@ impl PaperWallet {
         asks: Vec<BookLevel>,
     ) {
         let state = self.symbol_states.entry(symbol.to_string()).or_default();
-        let mid_price = (bid + ask) / 2.0;
+        let mid_price = share_mid_price(bid, ask);
+        update_directional_bid_ask(
+            &mut state.up_bid,
+            &mut state.up_ask,
+            &mut state.down_bid,
+            &mut state.down_ask,
+            direction,
+            bid,
+            ask,
+        );
         if direction == "UP" {
-            state.up_bid = bid;
-            state.up_ask = ask;
             if !bids.is_empty() {
                 state.up_bids = bids;
             }
@@ -835,8 +699,6 @@ impl PaperWallet {
                 state.up_asks = asks;
             }
         } else {
-            state.down_bid = bid;
-            state.down_ask = ask;
             if !bids.is_empty() {
                 state.down_bids = bids;
             }
@@ -845,23 +707,32 @@ impl PaperWallet {
             }
         }
 
-        // Update best price for all positions of this symbol/direction
-        for pos in &mut self.open_positions {
-            if pos.symbol == symbol && pos.direction == direction {
-                if mid_price > pos.highest_price {
-                    pos.highest_price = mid_price;
-                }
-                // We are long shares for both UP and DOWN, so profit is a higher share price.
-                if !pos.trailing_stop_activated && self.config.trailing_stop_activation > 0.0 {
-                    let threshold =
-                        pos.entry_price * (1.0 + self.config.trailing_stop_activation / 100.0);
-                    if pos.highest_price >= threshold {
-                        pos.trailing_stop_activated = true;
-                        info!(symbol=%symbol, direction=%direction, entry=pos.entry_price, peak=pos.highest_price,
-                              "Trailing stop ACTIVATED (share price gained {}%+)", self.config.trailing_stop_activation);
-                    }
-                }
-            }
+        let trailing_before = self
+            .open_positions
+            .iter()
+            .filter(|pos| pos.symbol == symbol && pos.direction == direction)
+            .filter(|pos| !pos.trailing_stop_activated)
+            .count();
+        sync_position_price_state(
+            &mut self.open_positions,
+            symbol,
+            direction,
+            mid_price,
+            self.config.trailing_stop_activation,
+        );
+        let trailing_after = self
+            .open_positions
+            .iter()
+            .filter(|pos| pos.symbol == symbol && pos.direction == direction)
+            .filter(|pos| !pos.trailing_stop_activated)
+            .count();
+        if trailing_after < trailing_before {
+            info!(
+                symbol = %symbol,
+                direction = %direction,
+                "Trailing stop ACTIVATED (share price gained {}%+)",
+                self.config.trailing_stop_activation
+            );
         }
     }
 
@@ -885,20 +756,7 @@ impl PaperWallet {
     /// Update BTC trailing stop tracking for all open positions of a symbol
     /// Called on every BTC price update from the engine
     pub fn update_btc_trailing(&mut self, symbol: &str, current_btc: f64) {
-        for pos in &mut self.open_positions {
-            if pos.symbol != symbol {
-                continue;
-            }
-
-            // entry_btc is now set immediately when position is created
-            // Just update peak/trough here
-            if current_btc > pos.peak_btc {
-                pos.peak_btc = current_btc;
-            }
-            if current_btc < pos.trough_btc {
-                pos.trough_btc = current_btc;
-            }
-        }
+        update_btc_extrema(&mut self.open_positions, symbol, current_btc);
     }
 
     /// Push the current momentum value into ring buffer for exit smoothing
@@ -952,94 +810,34 @@ impl PaperWallet {
                 continue;
             }
 
-            let margin = if pos.direction == "UP" {
-                current_btc - ptb
-            } else {
-                ptb - current_btc
-            };
-
-            // If BTC has crossed price_to_beat → close immediately, don't hold
-            if margin <= 0.0 {
-                pos.hold_to_resolution = false;
-                continue;
+            if let Some(should_hold) = evaluate_hold_to_resolution(HoldEvaluationInput {
+                pos,
+                btc_history,
+                current_btc,
+                price_to_beat: ptb,
+                time_remaining,
+                hold_margin_per_second,
+                hold_max_seconds,
+                hold_max_crossings,
+            }) {
+                pos.hold_to_resolution = should_hold;
             }
-
-            // Only consider holding in the last hold_max_seconds
-            if time_remaining > hold_max_seconds {
-                pos.hold_to_resolution = false;
-                continue;
-            }
-
-            // Count crossings in btc_history
-            let mut crossings = 0usize;
-            let mut iter = btc_history.iter().map(|(price, _)| *price);
-            if let Some(mut previous) = iter.next() {
-                for current in iter {
-                    let was_above = previous > ptb;
-                    let is_above = current > ptb;
-                    if was_above != is_above {
-                        crossings += 1;
-                    }
-                    previous = current;
-                }
-            }
-
-            if crossings > hold_max_crossings {
-                pos.hold_to_resolution = false;
-                continue;
-            }
-
-            // Check trend: BTC must be consistently on correct side AND accelerating away from ptb
-            let trend_ok = if btc_history.len() >= 10 {
-                let recent: Vec<f64> = btc_history
-                    .iter()
-                    .rev()
-                    .take(10)
-                    .map(|(price, _)| *price)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                // All recent ticks must be on the correct side of price-to-beat
-                let all_correct_side = if pos.direction == "UP" {
-                    recent.iter().all(|p| *p > ptb)
-                } else {
-                    recent.iter().all(|p| *p < ptb)
-                };
-                // Trend must be moving away from price-to-beat (not just sideways)
-                let slope = recent.last().unwrap() - recent.first().unwrap();
-                let moving_away = if pos.direction == "UP" {
-                    slope > 0.0
-                } else {
-                    slope < 0.0
-                };
-                all_correct_side && moving_away
-            } else {
-                false
-            }; // not enough history = don't hold
-
-            // Required margin check — stricter: 2x the normal requirement for high confidence
-            let required_margin = hold_margin_per_second * time_remaining as f64;
-            pos.hold_to_resolution = margin >= required_margin && trend_ok && crossings == 0;
         }
     }
 
     pub fn calculate_fee(&self, shares: f64, price: f64) -> f64 {
-        let fee = shares * self.config.crypto_fee_rate * price * (1.0 - price);
-        if fee < 0.00001 {
-            0.0
-        } else {
-            (fee * 100000.0).round() / 100000.0
-        }
+        calculate_fee(shares, price, self.config.crypto_fee_rate)
     }
 
     pub fn get_bid_ask(&self, symbol: &str, direction: &str) -> (f64, f64) {
         if let Some(state) = self.symbol_states.get(symbol) {
-            if direction == "UP" {
-                (state.up_bid, state.up_ask)
-            } else {
-                (state.down_bid, state.down_ask)
-            }
+            directional_bid_ask(
+                state.up_bid,
+                state.up_ask,
+                state.down_bid,
+                state.down_ask,
+                direction,
+            )
         } else {
             (0.0, 0.0)
         }
@@ -1066,29 +864,7 @@ impl PaperWallet {
             Some((_bids, asks)) if !asks.is_empty() => asks,
             _ => return None,
         };
-        if asks.is_empty() {
-            return None;
-        }
-        let mut remaining = usdc_budget;
-        let mut shares = 0.0;
-        let mut spent = 0.0;
-        for level in asks {
-            if remaining <= 0.0 || level.price > limit_price {
-                break;
-            }
-            let spend = remaining.min(level.price * level.size);
-            if spend <= 0.0 {
-                continue;
-            }
-            spent += spend;
-            shares += spend / level.price;
-            remaining -= spend;
-        }
-        if shares > 0.0 && spent > 0.0 {
-            Some((spent / shares, shares, spent))
-        } else {
-            None
-        }
+        estimate_fak_buy(asks, usdc_budget, limit_price)
     }
 
     pub fn estimate_fak_sell(
@@ -1102,182 +878,93 @@ impl PaperWallet {
             Some((bids, _asks)) if !bids.is_empty() => bids,
             _ => return None,
         };
-        if bids.is_empty() {
-            return None;
-        }
-        let mut remaining = shares_to_sell;
-        let mut sold = 0.0;
-        let mut gross = 0.0;
-        for level in bids {
-            if remaining <= 0.0 || level.price < limit_price {
-                break;
-            }
-            let fill = remaining.min(level.size);
-            if fill <= 0.0 {
-                continue;
-            }
-            sold += fill;
-            gross += fill * level.price;
-            remaining -= fill;
-        }
-        if sold > 0.0 && gross > 0.0 {
-            Some((gross / sold, sold, gross))
-        } else {
-            None
-        }
+        estimate_fak_sell(bids, shares_to_sell, limit_price)
     }
 
     pub fn get_share_price(&self, symbol: &str, direction: &str) -> f64 {
         let (bid, ask) = self.get_bid_ask(symbol, direction);
-        if bid > 0.0 && ask > 0.0 {
-            (bid + ask) / 2.0
-        } else {
-            0.0
-        }
+        share_mid_price(bid, ask)
     }
 
-    fn entry_context_score(
-        &self,
-        symbol: &str,
-        direction: &str,
-        spike: f64,
-        threshold_usd: f64,
-        current_btc: f64,
-        position_size: f64,
-    ) -> std::result::Result<EntryContext, String> {
-        let (bid, ask) = self.get_bid_ask(symbol, direction);
-        if bid <= 0.0 || ask <= 0.0 {
-            return Err("NO_POL_LIQUIDITY".to_string());
+    pub fn close_position_at_price(
+        &mut self,
+        idx: usize,
+        current_price: f64,
+        reason: &str,
+    ) -> Option<TradeRecord> {
+        if idx >= self.open_positions.len() {
+            return None;
         }
-        let buy_limit = (ask + 0.04).min(0.99);
-        let (buy_price, buy_shares, spent_usdc) = self
-            .estimate_fak_buy(symbol, direction, position_size, buy_limit)
-            .ok_or_else(|| "ENTRY_NO_FAK_LIQUIDITY".to_string())?;
-        let sell_limit = if bid > 0.04 {
-            (bid - 0.04).max(0.01)
+
+        let pos = self.open_positions.remove(idx);
+        let sell_fee = self.calculate_fee(pos.shares, current_price);
+        let gross_revenue = pos.shares * current_price;
+        let net_revenue = gross_revenue - sell_fee;
+        let pnl = net_revenue - (pos.position_size + pos.buy_fee);
+
+        self.balance += net_revenue;
+        self.trade_count += 1;
+        if pnl > 0.0 {
+            self.wins += 1;
         } else {
-            0.01
-        };
-        let (sell_price, sell_shares, gross_revenue) = self
-            .estimate_fak_sell(symbol, direction, buy_shares, sell_limit)
-            .ok_or_else(|| "EXIT_NO_FAK_LIQUIDITY".to_string())?;
-        let coverage = (sell_shares / buy_shares).clamp(0.0, 1.0);
-        let buy_fee = self.calculate_fee(buy_shares, buy_price);
-        let sell_fee = self.calculate_fee(sell_shares, sell_price);
-        let round_trip_loss = ((spent_usdc + buy_fee) - (gross_revenue - sell_fee))
-            / (spent_usdc + buy_fee).max(0.01);
-        if coverage < 0.80 {
-            return Err(format!("EXIT_DEPTH_TOO_THIN({:.0}%)", coverage * 100.0));
+            self.losses += 1;
         }
-        if round_trip_loss > 0.16 {
-            return Err(format!(
-                "ROUND_TRIP_TOO_EXPENSIVE({:.1}%)",
-                round_trip_loss * 100.0
-            ));
-        }
+        self.total_fees_paid += pos.buy_fee + sell_fee;
+        self.total_volume += pos.position_size + gross_revenue;
 
-        let state = self.symbol_states.get(symbol).cloned().unwrap_or_default();
-        let ptb_margin = state.last_price_to_beat.map(|ptb| {
-            if direction == "UP" {
-                current_btc - ptb
-            } else {
-                ptb - current_btc
-            }
-        });
-        let seconds_to_expiry = state.last_market_end_ts.and_then(|end| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_secs();
-            (end > now).then_some(end - now)
-        });
-        let ptb_tier = PtbTier::from_margin(ptb_margin);
-        let spike_multiple = spike.abs() / threshold_usd.max(0.01);
-
-        if seconds_to_expiry.is_some_and(|s| s < 45)
-            && !(ptb_tier == PtbTier::Extreme && buy_price >= 0.70)
-        {
-            return Err(format!(
-                "ENTRY_REJECT_TIMING(late,secs={},tier={})",
-                seconds_to_expiry.unwrap_or(0),
-                ptb_tier.as_str()
-            ));
-        }
-        if seconds_to_expiry.is_some_and(|s| s >= 240)
-            && (!ptb_tier.is_favorable() || spike_multiple < 1.35)
-        {
-            return Err(format!(
-                "ENTRY_REJECT_TIMING(early,secs={},tier={},spike={:.2}x)",
-                seconds_to_expiry.unwrap_or(0),
-                ptb_tier.as_str(),
-                spike_multiple
-            ));
-        }
-        if ptb_tier == PtbTier::Unfavorable && spike_multiple < 1.80 {
-            return Err(format!(
-                "ENTRY_REJECT_PTB_TIER({},spike={:.2}x)",
-                ptb_tier.as_str(),
-                spike_multiple
-            ));
-        }
-
-        let ptb_score = ptb_margin
-            .map(|m| {
-                if m >= 20.0 {
-                    0.9
-                } else if m >= -20.0 {
-                    0.35
-                } else {
-                    (-0.9f64).max(m / 120.0)
-                }
-            })
-            .unwrap_or(0.0);
-        let expiry_score = seconds_to_expiry
-            .map(|s| {
-                if s < 20 {
-                    -0.8
-                } else if s <= 90 {
-                    0.25
-                } else {
-                    0.0
-                }
-            })
-            .unwrap_or(0.0);
-        let spread = ask - bid;
-        let spread_penalty = (spread / 0.08).clamp(0.0, 1.0) * 0.7;
-        let spike_score = (spike.abs() / threshold_usd.max(0.01)).min(3.0);
-        let liquidity_score = coverage - (round_trip_loss * 2.5);
-        let score = spike_score + ptb_score + expiry_score + liquidity_score - spread_penalty;
-        let entry_mode = if ptb_tier.is_ptb_hold() {
-            "ptb_hold"
-        } else if ptb_tier == PtbTier::Favorable {
-            "breakout"
+        let exit_mode = if reason == "manual" {
+            "manual"
         } else {
-            "scalp"
+            "forced"
         };
-        Ok(EntryContext {
-            score,
-            round_trip_loss_pct: round_trip_loss,
-            spread,
-            ptb_margin,
-            seconds_to_expiry,
-            ptb_tier,
-            entry_mode,
-        })
+        let trade = TradeRecord {
+            symbol: pos.symbol.clone(),
+            r#type: "exit".to_string(),
+            question: String::new(),
+            direction: pos.direction.clone(),
+            entry_price: Some(pos.entry_price),
+            exit_price: Some(current_price),
+            shares: pos.shares,
+            cost: pos.position_size,
+            pnl: Some(pnl),
+            cumulative_pnl: None,
+            balance_after: None,
+            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            close_reason: Some(reason.to_string()),
+            btc_at_entry: Some(pos.entry_btc),
+            price_to_beat_at_entry: None,
+            ptb_margin_at_entry: None,
+            seconds_to_expiry_at_entry: None,
+            spread_at_entry: None,
+            round_trip_loss_pct_at_entry: None,
+            signal_score: None,
+            ptb_margin_at_exit: None,
+            exit_mode: Some(exit_mode.to_string()),
+            favorable_ptb_at_exit: None,
+            ptb_tier_at_entry: pos.ptb_tier_at_entry.clone(),
+            ptb_tier_at_exit: None,
+            entry_mode: pos.entry_mode.clone(),
+            exit_suppressed_count: Some(pos.exit_suppressed_count),
+        };
+
+        info!(symbol=%pos.symbol, pnl=pnl, reason=%reason, "Paper position closed at requested price");
+        self.trade_history.push(trade.clone());
+        Some(trade)
     }
 
-    pub async fn try_close_position(&mut self) -> bool {
+    fn collect_exit_decisions(
+        &mut self,
+        excluded_positions: &HashSet<(String, String)>,
+    ) -> Vec<(usize, &'static str)> {
         let mut to_close = Vec::new();
         let mut suppressed_exits: Vec<(usize, String, String, f64, &'static str)> = Vec::new();
+        let now_secs = now_unix_secs();
 
-        // Calculate current time for hold mode
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        // First pass: collect all data needed for decisions
         for (idx, pos) in self.open_positions.iter().enumerate() {
+            if excluded_positions.contains(&(pos.symbol.clone(), pos.direction.clone())) {
+                continue;
+            }
+
             let current_price = self.get_share_price(&pos.symbol, &pos.direction);
             if current_price <= 0.0 {
                 continue;
@@ -1288,253 +975,31 @@ impl PaperWallet {
                 None => continue,
             };
 
-            let current_btc = state.last_binance;
-            let held_ms = pos.entry_time.elapsed().as_millis() as u64;
+            let decision = evaluate_position_exit(
+                pos,
+                &PositionExitContext {
+                    current_price,
+                    current_btc: state.last_binance,
+                    last_price_to_beat: state.last_price_to_beat,
+                    last_market_end_ts: state.last_market_end_ts,
+                },
+                &self.config,
+                now_secs,
+            );
 
-            // Calculate time remaining for hold mode
-            let time_remaining = state.last_market_end_ts.and_then(|end| {
-                if end > now_secs {
-                    Some(end - now_secs)
-                } else {
-                    None
-                }
-            });
-            let ptb_margin = state.last_price_to_beat.map(|ptb| {
-                if pos.direction == "UP" {
-                    current_btc - ptb
-                } else {
-                    ptb - current_btc
-                }
-            });
-            let ptb_tier = PtbTier::from_margin(ptb_margin);
-
-            // Max price exit ALWAYS fires, even in hold mode — take the guaranteed profit
-            if current_price >= 0.995 {
-                to_close.push((idx, "max_price"));
-                continue;
-            }
-
-            // Minimum hold time check - don't exit too early
-            // Give Polymarket time to update their chart
-            let min_hold_passed = held_ms >= self.config.min_hold_ms;
-
-            // PTB-dynamic exit thresholds: adjust based on distance from price_to_beat
-            // Positive margin = winning side, negative = losing side
-            // Dead zone: -$30 to +$30 → no adjustment (normal exits)
-            // Far winning (>$50): hold longer (wider thresholds, up to 1.5x)
-            // Far losing (<-$30): exit faster (tighter thresholds, down to 0.6x)
-            let ptb_factor = {
-                let ptb_margin = if let Some(ptb) = state.last_price_to_beat {
-                    if current_btc > 0.0 {
-                        if pos.direction == "UP" {
-                            current_btc - ptb
-                        } else {
-                            ptb - current_btc
-                        }
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
-                };
-
-                if ptb_margin > 50.0 {
-                    1.5 // Far winning: 50% wider → ride it out
-                } else if ptb_margin > 30.0 {
-                    1.0 + (ptb_margin - 30.0) / 20.0 * 0.5 // Linear 1.0→1.5
-                } else if ptb_margin < -50.0 {
-                    0.6 // Far losing: 40% tighter → exit fast
-                } else if ptb_margin < -30.0 {
-                    1.0 - ((-ptb_margin) - 30.0) / 20.0 * 0.4 // Linear 1.0→0.6
-                } else {
-                    1.0 // Dead zone: no adjustment
-                }
-            };
-
-            // Trend reversed - exit if BTC reverses by a percentage of the entry spike from entry
-            // Uses trend_reversal_pct (e.g., 50% of spike), floored at trend_reversal_threshold ($10)
-            // PTB factor widens threshold when winning, tightens when losing
-            let trend_reversed_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 {
-                let reversal_threshold = (pos.entry_spike.abs()
-                    * (self.config.trend_reversal_pct / 100.0))
-                    .max(self.config.trend_reversal_threshold)
-                    * ptb_factor;
-                if pos.direction == "UP" {
-                    // For UP: exit if BTC drops below threshold
-                    current_btc < (pos.entry_btc - reversal_threshold)
-                } else {
-                    // For DOWN: exit if BTC rises above threshold
-                    current_btc > (pos.entry_btc + reversal_threshold)
-                }
-            } else {
-                false
-            };
-
-            // Trend reversed requires persistence; loss-making favorable-PTB trades need more proof.
-            let trend_confirmation_ms =
-                if current_price < pos.entry_price && ptb_margin.is_some_and(|m| m > 30.0) {
-                    700
-                } else {
-                    200
-                };
-            // This filters out single-tick flash spikes that bounce right back
-            let trend_reversed_confirmed = trend_reversed_hit
-                && pos
-                    .trend_reversed_since
-                    .is_some_and(|t| t.elapsed().as_millis() >= trend_confirmation_ms);
-            let trend_reversed = trend_reversed_confirmed && min_hold_passed;
-
-            // Spike faded: exit if BTC reverses by X% of the peak favorable move from peak/trough
-            // Uses the GREATER of entry_spike or total favorable move (peak_btc - entry_btc for UP)
-            // This lets big winning runs breathe — if BTC ran $80, need $40 reversal (50%), not $10
-            // PTB factor widens threshold when winning, tightens when losing
-            let spike_faded_hit =
-                if pos.entry_btc > 0.0 && current_btc > 0.0 && pos.entry_spike.abs() > 0.0 {
-                    // Calculate total favorable move from entry
-                    let favorable_move = if pos.direction == "UP" {
-                        pos.peak_btc - pos.entry_btc
-                    } else {
-                        pos.entry_btc - pos.trough_btc
-                    };
-                    let reference_move = favorable_move.max(pos.entry_spike.abs());
-                    let threshold_dollars =
-                        reference_move * (self.config.spike_faded_pct / 100.0) * ptb_factor;
-                    if pos.direction == "UP" {
-                        // For UP: check if BTC dropped from peak
-                        let peak = pos.peak_btc;
-                        if peak > 0.0 {
-                            let drop_from_peak = peak - current_btc;
-                            drop_from_peak >= threshold_dollars
-                        } else {
-                            false
-                        }
-                    } else {
-                        // For DOWN: check if BTC rose from trough
-                        let trough = pos.trough_btc;
-                        if trough > 0.0 {
-                            let rise_from_trough = current_btc - trough;
-                            rise_from_trough >= threshold_dollars
-                        } else {
-                            false
-                        }
-                    }
-                } else {
-                    false
-                };
-
-            // Spike faded requires persistence
-            let spike_faded_confirmed = spike_faded_hit
-                && pos
-                    .spike_faded_since
-                    .is_some_and(|t| t.elapsed().as_millis() >= self.config.spike_faded_ms as u128);
-
-            // Stop-loss: exit if share price drops by X% from entry
-            // Works the same for both UP and DOWN - we're long shares, price drop = loss
-            let stop_loss_hit = if self.config.stop_loss_pct > 0.0 && min_hold_passed {
-                let stop_price = pos.entry_price * (1.0 - self.config.stop_loss_pct / 100.0);
-                current_price <= stop_price
-            } else {
-                false
-            };
-
-            // Trailing stop: protect profits by trailing the best share price
-            // Only fires after trailing_stop_activated (share price gained activation_pct% from entry)
-            let trailing_stop_hit = if pos.trailing_stop_activated
-                && self.config.trailing_stop_pct > 0.0
-                && min_hold_passed
-            {
-                let stop_level = pos.highest_price * (1.0 - self.config.trailing_stop_pct / 100.0);
-                current_price <= stop_level
-            } else {
-                false
-            };
-
-            // Max price exit: if share price hits 0.995, take the free money
-            let max_price_hit = current_price >= 0.995;
-
-            let near_end = held_ms > 295000;
-
-            let ptb_hold_active = ptb_tier.is_ptb_hold()
-                || pos.entry_mode.as_deref() == Some("ptb_hold")
-                || (pos.hold_to_resolution
-                    && ptb_margin.is_some_and(|m| m > self.config.hold_safety_margin));
-
-            if ptb_hold_active {
-                let margin = ptb_margin.unwrap_or(0.0);
-                if margin <= self.config.hold_safety_margin {
-                    to_close.push((idx, "hold_safety_exit"));
-                    continue;
-                }
-                if time_remaining.is_some_and(|t| t <= 2) {
-                    to_close.push((idx, "market_end"));
-                    continue;
-                }
-
-                let emergency_reversal = trend_reversed && margin < 30.0;
-                if emergency_reversal {
-                    to_close.push((idx, "trend_reversed"));
-                    continue;
-                }
-
-                let suppressed_reason = if trend_reversed {
-                    Some("trend_reversed")
-                } else if trailing_stop_hit {
-                    Some("trailing_stop")
-                } else if stop_loss_hit {
-                    Some("stop_loss")
-                } else if spike_faded_confirmed {
-                    Some("spike_faded")
-                } else {
-                    None
-                };
-                if let Some(reason) = suppressed_reason {
-                    suppressed_exits.push((
-                        idx,
-                        pos.symbol.clone(),
-                        pos.direction.clone(),
-                        pos.entry_spike,
-                        reason,
-                    ));
-                }
-                continue;
-            }
-
-            let suppress_loss_trend_for_ptb = trend_reversed
-                && current_price < pos.entry_price
-                && ptb_margin.is_some_and(|m| m > 30.0);
-            if suppress_loss_trend_for_ptb {
+            if let Some(reason) = decision.suppressed_reason {
                 suppressed_exits.push((
                     idx,
                     pos.symbol.clone(),
                     pos.direction.clone(),
                     pos.entry_spike,
-                    "trend_reversed",
+                    reason,
                 ));
                 continue;
             }
 
-            // Determine exit reason (priority order)
-            let reason = if max_price_hit {
-                Some("max_price")
-            } else if trend_reversed {
-                Some("trend_reversed")
-            } else if trailing_stop_hit {
-                Some("trailing_stop")
-            } else if min_hold_passed && stop_loss_hit {
-                Some("stop_loss")
-            } else if min_hold_passed && spike_faded_confirmed {
-                Some("spike_faded")
-            } else if min_hold_passed && near_end {
-                Some("near_end")
-            } else {
-                None
-            };
-
-            if let Some(r) = reason {
-                if pos.hold_to_resolution && r != "trend_reversed" && r != "max_price" {
-                    continue;
-                }
-                to_close.push((idx, r));
+            if let Some(reason) = decision.reason {
+                to_close.push((idx, reason));
             }
         }
 
@@ -1569,76 +1034,38 @@ impl PaperWallet {
             }
         }
 
-        // Update spike_faded_since for all positions
         for pos in self.open_positions.iter_mut() {
             let state = match self.symbol_states.get(&pos.symbol) {
                 Some(s) => s,
                 None => continue,
             };
 
-            let current_btc = state.last_binance;
-
-            // Track spike_faded_since (uses same threshold as exit check)
-            let spike_faded_hit =
-                if pos.entry_btc > 0.0 && current_btc > 0.0 && pos.entry_spike.abs() > 0.0 {
-                    let favorable_move = if pos.direction == "UP" {
-                        pos.peak_btc - pos.entry_btc
-                    } else {
-                        pos.entry_btc - pos.trough_btc
-                    };
-                    let reference_move = favorable_move.max(pos.entry_spike.abs());
-                    let threshold_dollars = reference_move * (self.config.spike_faded_pct / 100.0);
-                    if pos.direction == "UP" {
-                        let peak = pos.peak_btc;
-                        if peak > 0.0 {
-                            let drop_from_peak = peak - current_btc;
-                            drop_from_peak >= threshold_dollars
-                        } else {
-                            false
-                        }
-                    } else {
-                        let trough = pos.trough_btc;
-                        if trough > 0.0 {
-                            let rise_from_trough = current_btc - trough;
-                            rise_from_trough >= threshold_dollars
-                        } else {
-                            false
-                        }
-                    }
-                } else {
-                    false
-                };
-
-            if spike_faded_hit {
-                if pos.spike_faded_since.is_none() {
-                    pos.spike_faded_since = Some(Instant::now());
-                }
-            } else {
-                pos.spike_faded_since = None;
-            }
-
-            // Track trend_reversed_since (uses same scaled threshold as exit check)
-            let trend_reversed_hit = if pos.entry_btc > 0.0 && current_btc > 0.0 {
-                let reversal_threshold = (pos.entry_spike.abs()
-                    * (self.config.trend_reversal_pct / 100.0))
-                    .max(self.config.trend_reversal_threshold);
-                if pos.direction == "UP" {
-                    current_btc < (pos.entry_btc - reversal_threshold)
-                } else {
-                    current_btc > (pos.entry_btc + reversal_threshold)
-                }
-            } else {
-                false
-            };
-
-            if trend_reversed_hit {
-                if pos.trend_reversed_since.is_none() {
-                    pos.trend_reversed_since = Some(Instant::now());
-                }
-            } else {
-                pos.trend_reversed_since = None;
-            }
+            update_exit_persistence(pos, state.last_binance, &self.config);
         }
+
+        to_close
+    }
+
+    pub fn planned_exit_intents(
+        &mut self,
+        excluded_positions: &HashSet<(String, String)>,
+    ) -> Vec<PlannedExit> {
+        self.collect_exit_decisions(excluded_positions)
+            .into_iter()
+            .filter_map(|(idx, reason)| {
+                let pos = self.open_positions.get(idx)?;
+                Some(PlannedExit {
+                    symbol: pos.symbol.clone(),
+                    direction: pos.direction.clone(),
+                    price: self.get_share_price(&pos.symbol, &pos.direction),
+                    reason,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn try_close_position(&mut self) -> bool {
+        let mut to_close = self.collect_exit_decisions(&HashSet::new());
 
         if to_close.is_empty() {
             return false;
@@ -1693,34 +1120,13 @@ impl PaperWallet {
                 .get(&pos.symbol)
                 .cloned()
                 .unwrap_or_default();
-            let ptb_margin_at_exit = state.last_price_to_beat.map(|ptb| {
-                if pos.direction == "UP" {
-                    state.last_binance - ptb
-                } else {
-                    ptb - state.last_binance
-                }
-            });
+            let ptb_margin_at_exit =
+                ptb_margin(&pos.direction, state.last_binance, state.last_price_to_beat);
             let remaining_secs = state.last_market_end_ts.and_then(|end| {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()?
-                    .as_secs();
+                let now = now_unix_secs();
                 (end > now).then_some(end - now)
             });
-            let required_exit_margin = remaining_secs
-                .map(|t| {
-                    self.config
-                        .hold_safety_margin
-                        .max(self.config.hold_margin_per_second * t as f64)
-                })
-                .unwrap_or(self.config.hold_safety_margin);
-            let exit_mode = if matches!(reason, "market_end" | "near_end" | "manual") {
-                "forced"
-            } else if ptb_margin_at_exit.is_some_and(|m| m >= 100.0 || m >= required_exit_margin) {
-                "ptb_conviction"
-            } else {
-                "scalp"
-            };
+            let exit_mode = exit_mode_for(reason, ptb_margin_at_exit, remaining_secs, &self.config);
             let ptb_tier_at_exit = PtbTier::from_margin(ptb_margin_at_exit);
 
             if sold_shares + 0.000001 < pos.shares {
@@ -1804,99 +1210,60 @@ impl PaperWallet {
         symbol: &str,
         direction: &str,
         spike: f64,
-        _threshold_usd: f64,
+        threshold_usd: f64,
         allow_scaling: bool,
         current_btc: f64,
     ) -> std::result::Result<u32, String> {
-        let existing: Vec<_> = self
+        let existing_same_direction = self
             .open_positions
             .iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
-            .collect();
-        let pending_same = self
+            .count();
+        let pending_same_direction = self
             .pending_entries
             .iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
             .count();
-        let scale_level = (existing.len() + pending_same) as u32 + 1;
 
-        // In HOLD mode (allow_scaling=true), ignore MAX_SCALE_LEVEL to add to winning positions
-        if !allow_scaling && scale_level > 1 {
-            return Err("MAX_SCALE_LEVEL".to_string());
-        }
-
-        let entry_price = self.get_share_price(symbol, direction);
-        if entry_price <= 0.0 {
-            return Err("NO_PRICE_DATA".to_string());
-        }
-        if entry_price > self.config.max_entry_price {
-            return Err("PRICE_TOO_HIGH".to_string());
-        }
-        if entry_price < self.config.min_entry_price {
-            return Err("PRICE_TOO_LOW".to_string());
-        }
-
-        // Position sizing based on share price tiers
-        // Cheaper shares = smaller position (higher risk), expensive shares = larger position
-        let portfolio_pct = if entry_price < 0.20 {
-            0.10 // 10% for very cheap shares
-        } else if entry_price < 0.50 {
-            0.15 // 15% for mid-range shares
-        } else if entry_price < 0.75 {
-            0.20 // 20% for higher-priced shares
+        let state = self.symbol_states.get(symbol).cloned().unwrap_or_default();
+        let (bids, asks) = if direction == "UP" {
+            (state.up_bids.as_slice(), state.up_asks.as_slice())
         } else {
-            self.portfolio_pct // config default for 75c+
+            (state.down_bids.as_slice(), state.down_asks.as_slice())
         };
-        let position_size = self.balance * portfolio_pct * (1.0 / scale_level as f64);
+        let (bid, ask) = directional_bid_ask(
+            state.up_bid,
+            state.up_ask,
+            state.down_bid,
+            state.down_ask,
+            direction,
+        );
 
-        // Cap position size at $20
-        let position_size = position_size.min(20.0);
-
-        let shares = position_size / entry_price;
-        let buy_fee = self.calculate_fee(shares, entry_price);
-        if (position_size + buy_fee) > self.balance {
-            return Err("INSUFFICIENT_BALANCE".to_string());
-        }
-        if position_size < 1.0 {
-            return Err("BELOW_MIN_ORDER_SIZE".to_string());
-        }
-        let entry_context = self.entry_context_score(
+        let plan = build_entry_plan(EntryPlanInput {
             symbol,
             direction,
             spike,
-            _threshold_usd,
+            threshold_usd,
+            allow_scaling,
             current_btc,
-            position_size,
-        )?;
-        let price_to_beat_at_entry = self
-            .symbol_states
-            .get(symbol)
-            .and_then(|s| s.last_price_to_beat);
+            balance: self.balance,
+            portfolio_pct: self.portfolio_pct,
+            config: &self.config,
+            existing_same_direction,
+            pending_same_direction,
+            bid,
+            ask,
+            bids,
+            asks,
+            price_to_beat: state.last_price_to_beat,
+            market_end_ts: state.last_market_end_ts,
+            submitted_at: Instant::now(),
+        })?;
+        let scale_level = plan.scale_level;
 
         // Reserve balance immediately so concurrent entries don't over-allocate
-        self.balance -= position_size + buy_fee;
-
-        self.pending_entries.push(PendingEntry {
-            symbol: symbol.to_string(),
-            direction: direction.to_string(),
-            spike,
-            entry_price,
-            scale_level,
-            position_size,
-            shares,
-            buy_fee,
-            submitted_at: Instant::now(),
-            entry_btc: current_btc, // Set BTC price immediately to avoid race condition
-            live_synced: false,
-            price_to_beat_at_entry,
-            ptb_margin_at_entry: entry_context.ptb_margin,
-            seconds_to_expiry_at_entry: entry_context.seconds_to_expiry,
-            spread_at_entry: Some(entry_context.spread),
-            round_trip_loss_pct_at_entry: Some(entry_context.round_trip_loss_pct),
-            signal_score: Some(entry_context.score),
-            ptb_tier_at_entry: Some(entry_context.ptb_tier.as_str().to_string()),
-            entry_mode: Some(entry_context.entry_mode.to_string()),
-        });
+        self.balance -= plan.position_size + plan.buy_fee;
+        self.pending_entries.push(plan);
 
         Ok(scale_level)
     }
@@ -1915,6 +1282,23 @@ impl PaperWallet {
         }
     }
 
+    pub fn rollback_pending_entry_at(
+        &mut self,
+        symbol: &str,
+        direction: &str,
+        submitted_at: Instant,
+    ) {
+        if let Some(idx) = self.pending_entries.iter().position(|p| {
+            p.symbol == symbol && p.direction == direction && p.submitted_at == submitted_at
+        }) {
+            let entry = self.pending_entries.remove(idx);
+            self.balance += entry.position_size + entry.buy_fee;
+            info!(symbol=%symbol, direction=%direction, restored=entry.position_size + entry.buy_fee, "Rolled back exact pending paper entry");
+        } else {
+            self.rollback_pending_entry(symbol, direction);
+        }
+    }
+
     /// Sync a pending paper entry to match the live wallet's actual fill.
     /// This ensures paper and live positions are identical so exit decisions apply correctly.
     /// Called after live wallet fills an order — adjusts the pending entry's price, shares,
@@ -1923,16 +1307,15 @@ impl PaperWallet {
         &mut self,
         symbol: &str,
         direction: &str,
+        submitted_at: Instant,
         live_entry_price: f64,
         live_shares: f64,
         live_position_size: f64,
         live_buy_fee: f64,
     ) {
-        if let Some(entry) = self
-            .pending_entries
-            .iter_mut()
-            .find(|p| p.symbol == symbol && p.direction == direction)
-        {
+        if let Some(entry) = self.pending_entries.iter_mut().find(|p| {
+            p.symbol == symbol && p.direction == direction && p.submitted_at == submitted_at
+        }) {
             let old_reserved = entry.position_size + entry.buy_fee;
             let new_reserved = live_position_size + live_buy_fee;
 
@@ -1951,6 +1334,8 @@ impl PaperWallet {
             entry.position_size = live_position_size;
             entry.buy_fee = live_buy_fee;
             entry.live_synced = true;
+        } else {
+            warn!(symbol=%symbol, direction=%direction, "Pending paper entry missing for exact live fill sync");
         }
     }
 
@@ -2125,5 +1510,79 @@ impl PaperWallet {
             });
             info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened with FAK orderbook simulation");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use crate::config::AppConfig;
+
+    use super::{PaperWallet, PendingEntry};
+
+    #[test]
+    fn sync_pending_to_live_fill_targets_exact_pending_entry() {
+        let mut config = AppConfig::load().expect("config");
+        config.paper_trading = true;
+        let mut wallet = PaperWallet::new(config);
+
+        let first_submitted_at = Instant::now() - Duration::from_millis(20);
+        let second_submitted_at = Instant::now() - Duration::from_millis(10);
+
+        wallet.pending_entries = vec![
+            PendingEntry {
+                symbol: "BTC-1".to_string(),
+                direction: "UP".to_string(),
+                spike: 10.0,
+                entry_price: 0.40,
+                scale_level: 1,
+                position_size: 4.0,
+                shares: 10.0,
+                buy_fee: 0.1,
+                submitted_at: first_submitted_at,
+                entry_btc: 100000.0,
+                live_synced: false,
+                price_to_beat_at_entry: None,
+                ptb_margin_at_entry: None,
+                seconds_to_expiry_at_entry: None,
+                spread_at_entry: None,
+                round_trip_loss_pct_at_entry: None,
+                signal_score: None,
+                ptb_tier_at_entry: None,
+                entry_mode: Some("scalp".to_string()),
+            },
+            PendingEntry {
+                symbol: "BTC-1".to_string(),
+                direction: "UP".to_string(),
+                spike: 12.0,
+                entry_price: 0.45,
+                scale_level: 2,
+                position_size: 6.0,
+                shares: 13.0,
+                buy_fee: 0.2,
+                submitted_at: second_submitted_at,
+                entry_btc: 100010.0,
+                live_synced: false,
+                price_to_beat_at_entry: None,
+                ptb_margin_at_entry: None,
+                seconds_to_expiry_at_entry: None,
+                spread_at_entry: None,
+                round_trip_loss_pct_at_entry: None,
+                signal_score: None,
+                ptb_tier_at_entry: None,
+                entry_mode: Some("ptb_hold".to_string()),
+            },
+        ];
+
+        wallet.sync_pending_to_live_fill("BTC-1", "UP", second_submitted_at, 0.51, 11.0, 5.61, 0.0);
+
+        assert_eq!(wallet.pending_entries[0].entry_price, 0.40);
+        assert!(!wallet.pending_entries[0].live_synced);
+
+        assert_eq!(wallet.pending_entries[1].entry_price, 0.51);
+        assert_eq!(wallet.pending_entries[1].shares, 11.0);
+        assert_eq!(wallet.pending_entries[1].position_size, 5.61);
+        assert!(wallet.pending_entries[1].live_synced);
     }
 }

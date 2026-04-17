@@ -1,8 +1,7 @@
 use crate::config::AppConfig;
 use crate::error::Result;
 use crate::execution::{
-    paper::OpenPosition, LatencyTrace, LiveCommand, LiveEvent, LiveExecutionHandle,
-    LiveWalletSnapshot, PaperWallet,
+    LatencyTrace, LiveCommand, LiveEvent, LiveExecutionHandle, LiveWalletSnapshot, PaperWallet,
 };
 use crate::polymarket::{MarketData, SharePriceUpdate};
 use crate::rtds::{PriceSource, PriceUpdate};
@@ -347,46 +346,17 @@ impl ArbEngine {
         sent
     }
 
-    async fn evaluate_live_exit_intents(&mut self) -> Vec<LiveCloseIntent> {
-        let original_open_positions: Vec<OpenPosition> = self.wallet.open_positions.clone();
-        let original_balance = self.wallet.balance;
-        let original_trade_count = self.wallet.trade_count;
-        let original_wins = self.wallet.wins;
-        let original_losses = self.wallet.losses;
-        let original_total_fees_paid = self.wallet.total_fees_paid;
-        let original_total_volume = self.wallet.total_volume;
-        let original_trade_history_len = self.wallet.trade_history.len();
-        let pending_live_closes = self.pending_live_closes.clone();
-
-        self.wallet.open_positions.retain(|pos| {
-            !pending_live_closes.contains(&(pos.symbol.clone(), pos.direction.clone()))
-        });
-
-        let _ = self.wallet.try_close_position().await;
-
-        let intents = self.wallet.trade_history[original_trade_history_len..]
-            .iter()
-            .filter(|trade| trade.r#type == "exit")
-            .map(|trade| LiveCloseIntent {
-                symbol: trade.symbol.clone(),
-                direction: trade.direction.clone(),
-                price: trade.exit_price.unwrap_or(0.0),
-                reason: Self::trade_reason_to_live_reason(trade.close_reason.as_deref()),
-            })
-            .collect();
-
-        self.wallet.open_positions = original_open_positions;
-        self.wallet.balance = original_balance;
-        self.wallet.trade_count = original_trade_count;
-        self.wallet.wins = original_wins;
-        self.wallet.losses = original_losses;
-        self.wallet.total_fees_paid = original_total_fees_paid;
-        self.wallet.total_volume = original_total_volume;
+    fn evaluate_live_exit_intents(&mut self) -> Vec<LiveCloseIntent> {
         self.wallet
-            .trade_history
-            .truncate(original_trade_history_len);
-
-        intents
+            .planned_exit_intents(&self.pending_live_closes)
+            .into_iter()
+            .map(|intent| LiveCloseIntent {
+                symbol: intent.symbol,
+                direction: intent.direction,
+                price: intent.price,
+                reason: Self::trade_reason_to_live_reason(Some(intent.reason)),
+            })
+            .collect()
     }
 
     fn add_signal(
@@ -829,48 +799,10 @@ impl ArbEngine {
                                         warn!(idx=idx, live_len=live_positions.len(), "Close button: index out of bounds for live wallet");
                                     }
                                 } else {
-                                    // PAPER MODE: existing logic
                                     if idx < self.wallet.open_positions.len() {
-                                        let pos = self.wallet.open_positions.remove(idx);
+                                        let pos = &self.wallet.open_positions[idx];
                                         let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
-                                        let sell_fee = self.wallet.calculate_fee(pos.shares, current_price);
-                                        let net_revenue = (pos.shares * current_price) - sell_fee;
-                                        let pnl = net_revenue - (pos.position_size + pos.buy_fee);
-                                        self.wallet.balance += net_revenue;
-                                        self.wallet.trade_count += 1;
-                                        if pnl > 0.0 { self.wallet.wins += 1; } else { self.wallet.losses += 1; }
-                                        self.wallet.total_fees_paid += pos.buy_fee + sell_fee;
-                                        self.wallet.total_volume += pos.position_size + (pos.shares * current_price);
-                                        self.wallet.trade_history.push(crate::execution::paper::TradeRecord {
-                                            symbol: pos.symbol.clone(),
-                                            r#type: "exit".to_string(),
-                                            question: String::new(),
-                                            direction: pos.direction.clone(),
-                                            entry_price: Some(pos.entry_price),
-                                            exit_price: Some(current_price),
-                                            shares: pos.shares,
-                                            cost: pos.position_size,
-                                            pnl: Some(pnl),
-                                            cumulative_pnl: None,
-                                            balance_after: None,
-                                            timestamp: Self::now_rfc3339(),
-                                            close_reason: Some("manual".to_string()),
-                                            btc_at_entry: Some(pos.entry_btc),
-                                            price_to_beat_at_entry: None,
-                                            ptb_margin_at_entry: None,
-                                            seconds_to_expiry_at_entry: None,
-                                            spread_at_entry: None,
-                                            round_trip_loss_pct_at_entry: None,
-                                            signal_score: None,
-                                            ptb_margin_at_exit: None,
-                                            exit_mode: Some("manual".to_string()),
-                                            favorable_ptb_at_exit: None,
-                                            ptb_tier_at_entry: pos.ptb_tier_at_entry.clone(),
-                                            ptb_tier_at_exit: None,
-                                            entry_mode: pos.entry_mode.clone(),
-                                            exit_suppressed_count: Some(pos.exit_suppressed_count),
-                                        });
-                                        info!(symbol=%pos.symbol, pnl=pnl, "Position manually closed");
+                                        self.wallet.close_position_at_price(idx, current_price, "manual");
                                     }
                                 }
                                 // Update chart history
@@ -988,45 +920,11 @@ impl ArbEngine {
                                 .collect();
 
                             for (idx, current_price) in positions_to_close.iter().rev() {
-                                let pos = self.wallet.open_positions.remove(*idx);
-                                let sell_fee = self.wallet.calculate_fee(pos.shares, *current_price);
-                                let net_revenue = (pos.shares * current_price) - sell_fee;
-                                let pnl = net_revenue - (pos.position_size + pos.buy_fee);
-                                self.wallet.balance += net_revenue;
-                                self.wallet.trade_count += 1;
-                                if pnl > 0.0 { self.wallet.wins += 1; } else { self.wallet.losses += 1; }
-                                self.wallet.total_fees_paid += pos.buy_fee + sell_fee;
-                                self.wallet.total_volume += pos.position_size + (pos.shares * current_price);
-                                self.wallet.trade_history.push(crate::execution::paper::TradeRecord {
-                                    symbol: pos.symbol.clone(),
-                                    r#type: "exit".to_string(),
-                                    question: String::new(),
-                                    direction: pos.direction.clone(),
-                                    entry_price: Some(pos.entry_price),
-                                    exit_price: Some(*current_price),
-                                    shares: pos.shares,
-                                    cost: pos.position_size,
-                                    pnl: Some(pnl),
-                                    cumulative_pnl: None,
-                                    balance_after: None,
-                                    timestamp: Self::now_rfc3339(),
-                                    close_reason: Some("early_exit_losing".to_string()),
-                                    btc_at_entry: Some(pos.entry_btc),
-                                    price_to_beat_at_entry: None,
-                                    ptb_margin_at_entry: None,
-                                    seconds_to_expiry_at_entry: None,
-                                    spread_at_entry: None,
-                                    round_trip_loss_pct_at_entry: None,
-                                    signal_score: None,
-                                    ptb_margin_at_exit: None,
-                                    exit_mode: Some("forced".to_string()),
-                                    favorable_ptb_at_exit: None,
-                                    ptb_tier_at_entry: pos.ptb_tier_at_entry.clone(),
-                                    ptb_tier_at_exit: None,
-                                    entry_mode: pos.entry_mode.clone(),
-                                    exit_suppressed_count: Some(pos.exit_suppressed_count),
-                                });
-                                info!(symbol=%pos.symbol, pnl=pnl, "Early exit for losing position before market end");
+                                self.wallet.close_position_at_price(
+                                    *idx,
+                                    *current_price,
+                                    "early_exit_losing",
+                                );
                             }
                         }
                     }
@@ -1041,46 +939,9 @@ impl ArbEngine {
                     if !self.is_live_mode() && market_ending && !self.wallet.open_positions.is_empty() {
                         let indices: Vec<usize> = (0..self.wallet.open_positions.len()).rev().collect();
                         for idx in indices {
-                            let pos = self.wallet.open_positions.remove(idx);
+                            let pos = &self.wallet.open_positions[idx];
                             let current_price = self.wallet.get_share_price(&pos.symbol, &pos.direction);
-                            let sell_fee = self.wallet.calculate_fee(pos.shares, current_price);
-                            let net_revenue = (pos.shares * current_price) - sell_fee;
-                            let pnl = net_revenue - (pos.position_size + pos.buy_fee);
-                            self.wallet.balance += net_revenue;
-                            self.wallet.trade_count += 1;
-                            if pnl > 0.0 { self.wallet.wins += 1; } else { self.wallet.losses += 1; }
-                            self.wallet.total_fees_paid += pos.buy_fee + sell_fee;
-                            self.wallet.total_volume += pos.position_size + (pos.shares * current_price);
-                            self.wallet.trade_history.push(crate::execution::paper::TradeRecord {
-                                symbol: pos.symbol.clone(),
-                                r#type: "exit".to_string(),
-                                question: String::new(),
-                                direction: pos.direction.clone(),
-                                entry_price: Some(pos.entry_price),
-                                exit_price: Some(current_price),
-                                shares: pos.shares,
-                                cost: pos.position_size,
-                                pnl: Some(pnl),
-                                cumulative_pnl: None,
-                                balance_after: None,
-                                timestamp: Self::now_rfc3339(),
-                                close_reason: Some("market_end".to_string()),
-                                btc_at_entry: Some(pos.entry_btc),
-                                price_to_beat_at_entry: None,
-                                ptb_margin_at_entry: None,
-                                seconds_to_expiry_at_entry: None,
-                                spread_at_entry: None,
-                                round_trip_loss_pct_at_entry: None,
-                                signal_score: None,
-                                ptb_margin_at_exit: None,
-                                exit_mode: Some("forced".to_string()),
-                                favorable_ptb_at_exit: None,
-                                ptb_tier_at_entry: pos.ptb_tier_at_entry.clone(),
-                                ptb_tier_at_exit: None,
-                                entry_mode: pos.entry_mode.clone(),
-                                exit_suppressed_count: Some(pos.exit_suppressed_count),
-                            });
-                            info!(symbol=%pos.symbol, pnl=pnl, "Position force-closed at market end");
+                            self.wallet.close_position_at_price(idx, current_price, "market_end");
                         }
                         let mut _net_market_value = 0.0;
                         for p in &self.wallet.open_positions {
@@ -1319,7 +1180,7 @@ impl ArbEngine {
         self.wallet.flush_pending();
         self.drain_wallet_events_to_signals();
         let closed = if self.is_live_mode() {
-            let intents = self.evaluate_live_exit_intents().await;
+            let intents = self.evaluate_live_exit_intents();
             let mut issued = false;
             for intent in intents {
                 issued |= self
@@ -1361,7 +1222,7 @@ impl ArbEngine {
         self.wallet.flush_pending();
         self.drain_wallet_events_to_signals();
         let closed = if self.is_live_mode() {
-            let intents = self.evaluate_live_exit_intents().await;
+            let intents = self.evaluate_live_exit_intents();
             let mut issued = false;
             for intent in intents {
                 issued |= self
@@ -1730,11 +1591,35 @@ impl ArbEngine {
                     state.last_spike_usd = abs_spike;
 
                     if self.live_execution.is_some() {
+                        let Some(plan) = self
+                            .wallet
+                            .pending_entries
+                            .iter()
+                            .rev()
+                            .find(|entry| {
+                                entry.symbol == symbol
+                                    && entry.direction == direction.as_str()
+                                    && entry.scale_level == level
+                            })
+                            .cloned()
+                        else {
+                            self.wallet
+                                .rollback_pending_entry(symbol, direction.as_str());
+                            let state = self.symbol_states.get_mut(symbol).unwrap();
+                            let reason = "LIVE_PLAN_MISSING".to_string();
+                            state.last_rejection = Some((reason.clone(), Instant::now()));
+                            self.add_signal(
+                                symbol,
+                                direction,
+                                adjusted_spike,
+                                SignalStatus::Rejected,
+                                Some(reason),
+                            );
+                            return;
+                        };
+
                         let sym = symbol.to_string();
                         let dir = direction.as_str().to_string();
-                        let spk = adjusted_spike;
-                        let thresh = threshold_usd;
-                        let btc = current_btc;
                         let latency_trace = LatencyTrace {
                             operation: "open",
                             symbol: sym.clone(),
@@ -1750,12 +1635,7 @@ impl ArbEngine {
                             submit_finished_at: None,
                         };
                         self.send_live_command(LiveCommand::OpenPosition {
-                            symbol: sym,
-                            direction: dir,
-                            spike: spk,
-                            threshold_usd: thresh,
-                            in_hold_mode,
-                            current_btc: btc,
+                            plan,
                             latency_trace,
                         })
                         .await;
@@ -1811,6 +1691,7 @@ impl ArbEngine {
                 symbol,
                 direction,
                 spike,
+                submitted_at,
                 result,
                 snapshot,
                 latency_trace,
@@ -1822,6 +1703,7 @@ impl ArbEngine {
                         self.wallet.sync_pending_to_live_fill(
                             &symbol,
                             &direction,
+                            submitted_at,
                             fill.position.entry_price,
                             fill.position.shares,
                             fill.position.position_size,
@@ -1840,7 +1722,8 @@ impl ArbEngine {
                         );
                     }
                     Err(err) => {
-                        self.wallet.rollback_pending_entry(&symbol, &direction);
+                        self.wallet
+                            .rollback_pending_entry_at(&symbol, &direction, submitted_at);
                         if let Some(state) = self.symbol_states.get_mut(&symbol) {
                             let live_reason = format!("LIVE:{}", err);
                             let should_log = Self::should_emit_rejection(state, &live_reason, 3);
@@ -1895,19 +1778,41 @@ impl ArbEngine {
         self.wallet.open_positions.retain(|paper_pos| {
             let exists_live = live_positions
                 .iter()
-                .any(|live_pos| live_pos.symbol == paper_pos.symbol && live_pos.direction == paper_pos.direction);
+                .any(|live_pos| {
+                    live_pos.symbol == paper_pos.symbol
+                        && live_pos.direction == paper_pos.direction
+                        && live_pos.scale_level == paper_pos.scale_level
+                });
             if !exists_live {
                 warn!(symbol=%paper_pos.symbol, direction=%paper_pos.direction, "Removing stale paper mirror position absent from live wallet");
             }
             exists_live
         });
 
-        for paper_pos in &mut self.wallet.open_positions {
-            if let Some(live_pos) = live_positions.iter().find(|live_pos| {
-                live_pos.symbol == paper_pos.symbol && live_pos.direction == paper_pos.direction
+        for live_pos in live_positions {
+            if let Some(paper_pos) = self.wallet.open_positions.iter_mut().find(|paper_pos| {
+                paper_pos.symbol == live_pos.symbol
+                    && paper_pos.direction == live_pos.direction
+                    && paper_pos.scale_level == live_pos.scale_level
             }) {
-                paper_pos.shares = live_pos.shares;
-                paper_pos.on_chain_shares = live_pos.on_chain_shares;
+                let spike_faded_since = paper_pos.spike_faded_since;
+                let trend_reversed_since = paper_pos.trend_reversed_since;
+                let last_suppressed_exit_signal = paper_pos.last_suppressed_exit_signal.clone();
+                *paper_pos = live_pos.clone();
+                paper_pos.spike_faded_since = spike_faded_since;
+                paper_pos.trend_reversed_since = trend_reversed_since;
+                paper_pos.last_suppressed_exit_signal = last_suppressed_exit_signal;
+                continue;
+            }
+
+            let has_pending_mirror = self.wallet.pending_entries.iter().any(|entry| {
+                entry.symbol == live_pos.symbol
+                    && entry.direction == live_pos.direction
+                    && entry.scale_level == live_pos.scale_level
+            });
+            if !has_pending_mirror {
+                warn!(symbol=%live_pos.symbol, direction=%live_pos.direction, level=live_pos.scale_level, "Adding missing live position to paper strategy mirror");
+                self.wallet.open_positions.push(live_pos.clone());
             }
         }
     }

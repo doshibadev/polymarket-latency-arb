@@ -89,6 +89,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("LIVE TRADING MODE — initializing live wallet...");
         match execution::LiveWallet::new(config).await {
             Ok(mut lw) => {
+                lw.recover_startup_state(&initial_markets)
+                    .await
+                    .map_err(|err| format!("Failed live startup recovery: {err}"))?;
                 lw.run_startup_preflight(&initial_markets)
                     .await
                     .map_err(|err| format!("Failed live startup preflight: {err}"))?;
