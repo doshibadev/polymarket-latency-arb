@@ -95,28 +95,66 @@ impl AppConfig {
     pub fn update_from_json(&mut self, json: serde_json::Value) -> Result<()> {
         if let Some(v) = json.get("threshold_bps").and_then(|v| v.as_u64()) { self.threshold_bps = v; }
         if let Some(v) = json.get("portfolio_pct").and_then(|v| v.as_f64()) { self.portfolio_pct = v; }
+        if let Some(v) = json.get("crypto_fee_rate").and_then(|v| v.as_f64()) { self.crypto_fee_rate = v; }
         if let Some(v) = json.get("max_entry_price").and_then(|v| v.as_f64()) { self.max_entry_price = v; }
         if let Some(v) = json.get("min_entry_price").and_then(|v| v.as_f64()) { self.min_entry_price = v; }
         if let Some(v) = json.get("trend_reversal_pct").and_then(|v| v.as_f64()) { self.trend_reversal_pct = v; }
+        if let Some(v) = json.get("trend_reversal_threshold").and_then(|v| v.as_f64()) { self.trend_reversal_threshold = v; }
         if let Some(v) = json.get("spike_faded_pct").and_then(|v| v.as_f64()) { self.spike_faded_pct = v; }
         if let Some(v) = json.get("spike_faded_ms").and_then(|v| v.as_u64()) { self.spike_faded_ms = v; }
         if let Some(v) = json.get("min_hold_ms").and_then(|v| v.as_u64()) { self.min_hold_ms = v; }
-        if let Some(v) = json.get("execution_delay_ms").and_then(|v| v.as_u64()) { self.execution_delay_ms = v; }
-        if let Some(v) = json.get("max_orders_per_minute").and_then(|v| v.as_u64()) { self.max_orders_per_minute = v as u32; }
-        if let Some(v) = json.get("max_daily_loss").and_then(|v| v.as_f64()) { self.max_daily_loss = v; }
-        if let Some(v) = json.get("max_exposure_per_market").and_then(|v| v.as_f64()) { self.max_exposure_per_market = v; }
-        if let Some(v) = json.get("max_drawdown_pct").and_then(|v| v.as_f64()) { self.max_drawdown_pct = v; }
+        if let Some(v) = json.get("trailing_stop_pct").and_then(|v| v.as_f64()) { self.trailing_stop_pct = v; }
+        if let Some(v) = json.get("trailing_stop_activation").and_then(|v| v.as_f64()) { self.trailing_stop_activation = v; }
         if let Some(v) = json.get("stop_loss_pct").and_then(|v| v.as_f64()) { self.stop_loss_pct = v; }
         if let Some(v) = json.get("hold_safety_margin").and_then(|v| v.as_f64()) { self.hold_safety_margin = v; }
         if let Some(v) = json.get("hold_min_share_price").and_then(|v| v.as_f64()) { self.hold_min_share_price = v; }
         if let Some(v) = json.get("early_exit_loss_pct").and_then(|v| v.as_f64()) { self.early_exit_loss_pct = v; }
-        if let Some(v) = json.get("trend_reversal_threshold").and_then(|v| v.as_f64()) { self.trend_reversal_threshold = v; }
+        if let Some(v) = json.get("hold_margin_per_second").and_then(|v| v.as_f64()) { self.hold_margin_per_second = v; }
+        if let Some(v) = json.get("hold_max_seconds").and_then(|v| v.as_u64()) { self.hold_max_seconds = v; }
+        if let Some(v) = json.get("hold_max_crossings").and_then(|v| v.as_u64()) { self.hold_max_crossings = v as usize; }
+        if let Some(v) = json.get("spike_sustain_ms").and_then(|v| v.as_u64()) { self.spike_sustain_ms = v; }
+        if let Some(v) = json.get("execution_delay_ms").and_then(|v| v.as_u64()) { self.execution_delay_ms = v; }
+        if let Some(v) = json.get("min_price_distance").and_then(|v| v.as_f64()) { self.min_price_distance = v; }
+        if let Some(v) = json.get("max_orders_per_minute").and_then(|v| v.as_u64()) { self.max_orders_per_minute = v as u32; }
+        if let Some(v) = json.get("max_daily_loss").and_then(|v| v.as_f64()) { self.max_daily_loss = v; }
+        if let Some(v) = json.get("max_exposure_per_market").and_then(|v| v.as_f64()) { self.max_exposure_per_market = v; }
+        if let Some(v) = json.get("max_drawdown_pct").and_then(|v| v.as_f64()) { self.max_drawdown_pct = v; }
         if let Some(v) = json.get("trend_filter_enabled").and_then(|v| v.as_bool()) { self.trend_filter_enabled = v; }
         if let Some(v) = json.get("trend_min_magnitude_usd").and_then(|v| v.as_f64()) { self.trend_min_magnitude_usd = v; }
         if let Some(v) = json.get("counter_trend_multiplier").and_then(|v| v.as_f64()) { self.counter_trend_multiplier = v; }
+        if let Some(v) = json.get("trend_max_magnitude_usd").and_then(|v| v.as_f64()) { self.trend_max_magnitude_usd = v; }
+        if let Some(v) = json.get("ptb_neutral_zone_usd").and_then(|v| v.as_f64()) { self.ptb_neutral_zone_usd = v; }
         if let Some(v) = json.get("ptb_max_counter_distance_usd").and_then(|v| v.as_f64()) { self.ptb_max_counter_distance_usd = v; }
-        if let Some(v) = json.get("trailing_stop_pct").and_then(|v| v.as_f64()) { self.trailing_stop_pct = v; }
-        if let Some(v) = json.get("trailing_stop_activation").and_then(|v| v.as_f64()) { self.trailing_stop_activation = v; }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+    use serde_json::json;
+
+    #[test]
+    fn update_from_json_updates_extended_config_surface() {
+        let mut config = AppConfig::load().expect("config should load");
+        config.update_from_json(json!({
+            "crypto_fee_rate": 0.08,
+            "trend_reversal_threshold": 12.0,
+            "hold_max_crossings": 4,
+            "spike_sustain_ms": 75,
+            "trend_filter_enabled": false,
+            "trend_max_magnitude_usd": 220.0,
+            "ptb_neutral_zone_usd": 33.0,
+            "trailing_stop_activation": 18.0
+        })).expect("json update should succeed");
+
+        assert_eq!(config.crypto_fee_rate, 0.08);
+        assert_eq!(config.trend_reversal_threshold, 12.0);
+        assert_eq!(config.hold_max_crossings, 4);
+        assert_eq!(config.spike_sustain_ms, 75);
+        assert!(!config.trend_filter_enabled);
+        assert_eq!(config.trend_max_magnitude_usd, 220.0);
+        assert_eq!(config.ptb_neutral_zone_usd, 33.0);
+        assert_eq!(config.trailing_stop_activation, 18.0);
     }
 }
