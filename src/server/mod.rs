@@ -1,12 +1,13 @@
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::State,
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{debug, info, warn};
@@ -122,17 +123,52 @@ const NUMERIC_CONFIG_FIELDS: &[(&str, &str)] = &[
         "ETH_PTB_MAX_COUNTER_DISTANCE_USD",
         "eth_ptb_max_counter_distance_usd",
     ),
+    ("LIVE_MAX_ORDER_USDC", "live_max_order_usdc"),
+    ("LIVE_MAX_SESSION_LOSS_USDC", "live_max_session_loss_usdc"),
+    ("LIVE_MAX_OPEN_POSITIONS", "live_max_open_positions"),
+    ("LIVE_MAX_SLIPPAGE_CENTS", "live_max_slippage_cents"),
+    ("LIVE_MAX_QUOTE_AGE_MS", "live_max_quote_age_ms"),
+    ("LIVE_MIN_GAS_POL", "live_min_gas_pol"),
+    ("LIVE_MIN_USDC_BALANCE", "live_min_usdc_balance"),
+    ("LIVE_MAX_FEED_AGE_MS", "live_max_feed_age_ms"),
+    ("LIVE_MAX_CLOCK_SKEW_MS", "live_max_clock_skew_ms"),
 ];
 
-const BOOL_CONFIG_FIELDS: &[(&str, &str)] = &[("TREND_FILTER_ENABLED", "trend_filter_enabled")];
+const BOOL_CONFIG_FIELDS: &[(&str, &str)] = &[
+    ("TREND_FILTER_ENABLED", "trend_filter_enabled"),
+    ("LIVE_DRY_RUN_ORDERS", "live_dry_run_orders"),
+];
 
 pub struct ServerState {
     pub tx: broadcast::Sender<String>,
     pub cmd_tx: mpsc::Sender<serde_json::Value>,
+    pub startup_preflight: Arc<RwLock<serde_json::Value>>,
+    pub latest_fast: Arc<RwLock<Option<serde_json::Value>>>,
 }
 
-pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serde_json::Value>) {
-    let state = Arc::new(ServerState { tx, cmd_tx });
+pub async fn run_server(
+    tx: broadcast::Sender<String>,
+    cmd_tx: mpsc::Sender<serde_json::Value>,
+    startup_preflight: Arc<RwLock<serde_json::Value>>,
+) {
+    let latest_fast = Arc::new(RwLock::new(None));
+    let state = Arc::new(ServerState {
+        tx: tx.clone(),
+        cmd_tx,
+        startup_preflight,
+        latest_fast: latest_fast.clone(),
+    });
+    let mut snapshot_rx = tx.subscribe();
+    tokio::spawn(async move {
+        while let Ok(msg) = snapshot_rx.recv().await {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg) else {
+                continue;
+            };
+            if value.get("_kind").and_then(|v| v.as_str()) == Some("fast") {
+                *latest_fast.write().await = Some(value);
+            }
+        }
+    });
 
     let app = if std::path::Path::new(FRONTEND_ENTRYPOINT).exists() {
         info!("Serving frontend assets from {}", FRONTEND_DIST_DIR);
@@ -142,6 +178,7 @@ pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serd
             .route("/ws/fast", get(ws_fast_handler))
             .route("/ws/slow", get(ws_slow_handler))
             .route("/config", get(get_config))
+            .route("/preflight", get(get_preflight))
             .route("/settings", post(update_settings))
             .route("/command", post(send_command))
             .fallback_service(
@@ -161,6 +198,7 @@ pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serd
             .route("/ws/fast", get(ws_fast_handler))
             .route("/ws/slow", get(ws_slow_handler))
             .route("/config", get(get_config))
+            .route("/preflight", get(get_preflight))
             .route("/settings", post(update_settings))
             .route("/command", post(send_command))
             .fallback(get(frontend_setup_page))
@@ -208,6 +246,36 @@ async fn get_config() -> impl IntoResponse {
         }
     }
     Json(serde_json::Value::Object(map))
+}
+
+async fn get_preflight(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    let startup = state.startup_preflight.read().await.clone();
+    let latest_fast = state.latest_fast.read().await.clone();
+    Json(build_preflight_response(startup, latest_fast))
+}
+
+fn build_preflight_response(
+    startup: serde_json::Value,
+    latest_fast: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let runtime_gate = latest_fast
+        .as_ref()
+        .and_then(|value| value.get("snapshot"))
+        .and_then(|snapshot| snapshot.get("live_start_gate"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let running = latest_fast
+        .as_ref()
+        .and_then(|value| value.get("snapshot"))
+        .and_then(|snapshot| snapshot.get("running"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    serde_json::json!({
+        "startup": startup,
+        "runtime_gate": runtime_gate,
+        "running": running,
+    })
 }
 
 async fn update_settings(
@@ -266,7 +334,8 @@ async fn update_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::{BOOL_CONFIG_FIELDS, NUMERIC_CONFIG_FIELDS};
+    use super::{build_preflight_response, BOOL_CONFIG_FIELDS, NUMERIC_CONFIG_FIELDS};
+    use serde_json::json;
 
     #[test]
     fn config_field_keys_are_unique() {
@@ -284,6 +353,30 @@ mod tests {
                 json_key
             );
         }
+    }
+
+    #[test]
+    fn preflight_response_includes_startup_and_runtime_gate() {
+        let startup = json!({
+            "mode": "live",
+            "status": "passed"
+        });
+        let latest_fast = Some(json!({
+            "_kind": "fast",
+            "snapshot": {
+                "running": false,
+                "live_start_gate": {
+                    "ready": true,
+                    "errors": []
+                }
+            }
+        }));
+
+        let response = build_preflight_response(startup.clone(), latest_fast);
+
+        assert_eq!(response["startup"], startup);
+        assert_eq!(response["runtime_gate"]["ready"], json!(true));
+        assert_eq!(response["running"], json!(false));
     }
 }
 

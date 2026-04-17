@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod arb;
 pub mod config;
 pub mod error;
@@ -14,7 +16,7 @@ use arb::ArbEngine;
 use config::AppConfig;
 use execution::spawn_live_execution;
 use polymarket::{fetch_current_market, ClobClient};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -51,11 +53,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (market_tx, market_rx) = mpsc::channel(10);
     let (broadcast_tx, _broadcast_rx) = broadcast::channel(100);
     let (cmd_tx, cmd_rx) = mpsc::channel(10);
+    let startup_preflight = std::sync::Arc::new(RwLock::new(serde_json::json!({
+        "mode": if config.paper_trading { "paper" } else { "live" },
+        "status": "pending",
+    })));
 
     // Dashboard Server
     let server_tx = broadcast_tx.clone();
+    let server_preflight = startup_preflight.clone();
     tokio::spawn(async move {
-        server::run_server(server_tx, cmd_tx).await;
+        server::run_server(server_tx, cmd_tx, server_preflight).await;
     });
 
     // CLOB WebSocket
@@ -92,9 +99,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 lw.recover_startup_state(&initial_markets)
                     .await
                     .map_err(|err| format!("Failed live startup recovery: {err}"))?;
-                lw.run_startup_preflight(&initial_markets)
+                let report = lw
+                    .run_startup_preflight(&initial_markets)
                     .await
                     .map_err(|err| format!("Failed live startup preflight: {err}"))?;
+                *startup_preflight.write().await = serde_json::json!({
+                    "mode": "live",
+                    "status": "passed",
+                    "report": report.to_json(),
+                });
                 let (handle, live_event_rx) = spawn_live_execution(lw);
                 engine.live_execution = Some(handle);
                 engine.live_event_rx = Some(live_event_rx);
@@ -105,6 +118,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
+        *startup_preflight.write().await = serde_json::json!({
+            "mode": "paper",
+            "status": "skipped",
+        });
         tracing::info!("Paper trading mode");
     }
 

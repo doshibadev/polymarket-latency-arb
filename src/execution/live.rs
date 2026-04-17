@@ -85,7 +85,10 @@ pub struct LivePreflightCheck {
 pub struct LivePreflightReport {
     pub wallet_address: String,
     pub wallet_type: String,
+    pub chain_id: u64,
+    pub gas_balance_pol: f64,
     pub usdc_balance: f64,
+    pub clock_skew_ms: i64,
     pub checks: Vec<LivePreflightCheck>,
 }
 
@@ -94,13 +97,31 @@ impl LivePreflightReport {
         info!(
             wallet_address = %self.wallet_address,
             wallet_type = %self.wallet_type,
+            chain_id = self.chain_id,
+            gas_balance_pol = self.gas_balance_pol,
             usdc_balance = self.usdc_balance,
+            clock_skew_ms = self.clock_skew_ms,
             checks = self.checks.len(),
             "Live startup preflight passed"
         );
         for check in &self.checks {
             info!(check = check.name, detail = %check.detail, "Preflight check passed");
         }
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "wallet_address": self.wallet_address,
+            "wallet_type": self.wallet_type,
+            "chain_id": self.chain_id,
+            "gas_balance_pol": self.gas_balance_pol,
+            "usdc_balance": self.usdc_balance,
+            "clock_skew_ms": self.clock_skew_ms,
+            "checks": self.checks.iter().map(|check| serde_json::json!({
+                "name": check.name,
+                "detail": check.detail,
+            })).collect::<Vec<_>>(),
+        })
     }
 }
 
@@ -266,10 +287,33 @@ async fn connect_redeem_client(
     Ok(CtfClient::new(provider, POLYGON)?)
 }
 
+async fn measure_clock_skew_ms() -> Result<i64, String> {
+    let response = reqwest::Client::new()
+        .get("https://clob.polymarket.com/")
+        .send()
+        .await
+        .map_err(|err| format!("clock-skew request failed: {err}"))?;
+    let date_header = response
+        .headers()
+        .get(reqwest::header::DATE)
+        .ok_or_else(|| "clock-skew response missing Date header".to_string())?;
+    let date_str = date_header
+        .to_str()
+        .map_err(|err| format!("clock-skew Date header invalid: {err}"))?;
+    let server_time = chrono::DateTime::parse_from_rfc2822(date_str)
+        .map_err(|err| format!("clock-skew Date header parse failed: {err}"))?
+        .with_timezone(&chrono::Utc);
+    Ok(chrono::Utc::now()
+        .signed_duration_since(server_time)
+        .num_milliseconds()
+        .abs())
+}
+
 /// Check and set required on-chain approvals — view calls are FREE (no gas)
 /// Only approve() and setApprovalForAll() cost gas, and only on first run
 pub async fn ensure_approvals(
     signer: &K256Signer,
+    min_gas_pol: f64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let provider = ProviderBuilder::new()
         .wallet(signer.clone())
@@ -281,11 +325,12 @@ pub async fn ensure_approvals(
     // Check POL balance first — write txs need gas
     let pol_balance = provider.get_balance(owner).await.unwrap_or_default();
     let pol_f64 = pol_balance.to::<u128>() as f64 / 1e18;
-    if pol_f64 < 0.001 {
+    if pol_f64 < min_gas_pol {
         return Err(format!(
-            "Insufficient POL for gas: {:.6} POL. Send at least 0.1 POL to {} to pay for approval transactions.",
-            pol_f64, owner
-        ).into());
+            "Insufficient POL for gas: {:.6} POL. Need at least {:.6} POL in {}.",
+            pol_f64, min_gas_pol, owner
+        )
+        .into());
     }
     info!(
         pol_balance = pol_f64,
@@ -1457,10 +1502,22 @@ impl LiveWallet {
     ) -> Result<LivePreflightReport, Box<dyn std::error::Error + Send + Sync>> {
         validate_markets(initial_markets).map_err(|err| err.to_string())?;
 
+        if self.wallet_address.trim().is_empty() {
+            return Err("Live preflight failed: derived wallet address is empty".into());
+        }
+
         let mut checks = vec![LivePreflightCheck {
             name: "market_metadata",
             detail: format!("{} active market(s) ready", initial_markets.len()),
         }];
+        checks.push(LivePreflightCheck {
+            name: "wallet_identity",
+            detail: format!(
+                "wallet={} type={}",
+                self.wallet_address,
+                self.wallet_type.as_str()
+            ),
+        });
 
         self.clob
             .api_keys()
@@ -1478,6 +1535,53 @@ impl LiveWallet {
         checks.push(LivePreflightCheck {
             name: "polygon_rpc",
             detail: format!("RPC reachable via {}", rpc_url()),
+        });
+        checks.push(LivePreflightCheck {
+            name: "chain_id",
+            detail: format!("configured chain id {}", POLYGON),
+        });
+
+        let provider = ProviderBuilder::new()
+            .wallet(self.signer.clone())
+            .connect(&rpc_url())
+            .await
+            .map_err(|err| format!("Live preflight failed: provider init failed: {err}"))?;
+        let pol_balance = provider
+            .get_balance(self.signer.address())
+            .await
+            .map_err(|err| format!("Live preflight failed: could not fetch POL balance: {err}"))?;
+        let gas_balance_pol = pol_balance.to::<u128>() as f64 / 1e18;
+        if gas_balance_pol < self.config.live_min_gas_pol {
+            return Err(format!(
+                "Live preflight failed: wallet has {:.6} POL, need at least {:.6} POL",
+                gas_balance_pol, self.config.live_min_gas_pol
+            )
+            .into());
+        }
+        checks.push(LivePreflightCheck {
+            name: "gas_balance",
+            detail: format!(
+                "wallet gas {:.6} POL (min {:.6})",
+                gas_balance_pol, self.config.live_min_gas_pol
+            ),
+        });
+
+        let clock_skew_ms = measure_clock_skew_ms()
+            .await
+            .map_err(|err| format!("Live preflight failed: {err}"))?;
+        if clock_skew_ms as u64 > self.config.live_max_clock_skew_ms {
+            return Err(format!(
+                "Live preflight failed: clock skew {}ms exceeds {}ms",
+                clock_skew_ms, self.config.live_max_clock_skew_ms
+            )
+            .into());
+        }
+        checks.push(LivePreflightCheck {
+            name: "clock_skew",
+            detail: format!(
+                "clock skew {}ms (max {}ms)",
+                clock_skew_ms, self.config.live_max_clock_skew_ms
+            ),
         });
 
         self.ensure_approvals()
@@ -1501,9 +1605,10 @@ impl LiveWallet {
             .map_err(|err| format!("Live preflight failed: could not fetch USDC balance: {err}"))?;
         let raw: f64 = balance.balance.try_into().unwrap_or(0.0);
         let usdc_balance = raw / 1_000_000.0;
-        if usdc_balance < 1.0 {
+        if usdc_balance < self.config.live_min_usdc_balance {
             return Err(format!(
-                "Live preflight failed: wallet has ${usdc_balance:.2} USDC, need at least $1.00 to place live orders"
+                "Live preflight failed: wallet has ${usdc_balance:.2} USDC, need at least ${:.2} to place live orders",
+                self.config.live_min_usdc_balance
             )
             .into());
         }
@@ -1516,13 +1621,19 @@ impl LiveWallet {
         }
         checks.push(LivePreflightCheck {
             name: "usdc_balance",
-            detail: format!("wallet balance ${usdc_balance:.2}"),
+            detail: format!(
+                "wallet balance ${usdc_balance:.2} (min ${:.2})",
+                self.config.live_min_usdc_balance
+            ),
         });
 
         let report = LivePreflightReport {
             wallet_address: self.wallet_address.clone(),
             wallet_type: self.wallet_type.as_str().to_string(),
+            chain_id: POLYGON,
+            gas_balance_pol,
             usdc_balance,
+            clock_skew_ms,
             checks,
         };
         report.log_success();
@@ -1577,7 +1688,7 @@ impl LiveWallet {
     }
 
     pub async fn ensure_approvals(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        ensure_approvals(&self.signer).await
+        ensure_approvals(&self.signer, self.config.live_min_gas_pol).await
     }
 
     pub fn snapshot(&self) -> LiveWalletSnapshot {
@@ -3019,6 +3130,55 @@ mod tests {
         assert_eq!(outcome.positions.len(), 0);
         assert_eq!(outcome.report.db_positions, 1);
         assert_eq!(outcome.report.onchain_positions, 0);
+    }
+
+    #[test]
+    fn startup_reconciliation_keeps_position_when_onchain_balance_still_exists() {
+        let outcome = LiveWallet::reconcile_startup_positions(
+            &[local_position("BTC", "UP", "p1")],
+            &[ExternalLivePosition {
+                symbol: "BTC".to_string(),
+                direction: "UP".to_string(),
+                shares: 6.25,
+                market_price: 0.54,
+            }],
+            &[entry_trade("BTC", "UP", "p1")],
+            &[sample_market()],
+            0,
+            18.0,
+        );
+
+        assert!(!outcome.report.has_unsafe_mismatch());
+        assert_eq!(outcome.positions.len(), 1);
+        assert_eq!(outcome.positions[0].shares, 6.25);
+        assert_eq!(outcome.positions[0].on_chain_shares, Some(6.25));
+    }
+
+    #[test]
+    fn startup_reconciliation_flags_pending_close_crash_when_local_exceeds_onchain() {
+        let outcome = LiveWallet::reconcile_startup_positions(
+            &[
+                local_position("BTC", "UP", "p1"),
+                local_position("BTC", "UP", "p2"),
+            ],
+            &[ExternalLivePosition {
+                symbol: "BTC".to_string(),
+                direction: "UP".to_string(),
+                shares: 4.0,
+                market_price: 0.52,
+            }],
+            &[
+                entry_trade("BTC", "UP", "p1"),
+                entry_trade("BTC", "UP", "p2"),
+            ],
+            &[sample_market()],
+            1,
+            18.0,
+        );
+
+        assert!(outcome.report.has_unsafe_mismatch());
+        assert_eq!(outcome.positions.len(), 1);
+        assert_eq!(outcome.report.mismatches.len(), 1);
     }
 
     #[test]

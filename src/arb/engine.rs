@@ -151,6 +151,7 @@ struct SymbolState {
     pub enabled: bool,
     pub last_binance: Option<(f64, Instant)>,
     pub last_chainlink: Option<(f64, Instant)>,
+    pub last_clob_update: Option<Instant>,
     pub last_spike_usd: f64,
     pub market_end_ts: Option<u64>,
     pub condition_id: Option<String>,
@@ -382,6 +383,20 @@ impl ArbEngine {
         }
     }
 
+    fn add_system_signal(&mut self, status: SignalStatus, reason: String) {
+        self.signals.push_back(json!({
+            "t": Self::now_hms(),
+            "s": "SYSTEM",
+            "d": "UP",
+            "v": 0.0,
+            "st": status.as_str(),
+            "r": reason
+        }));
+        if self.signals.len() > 50 {
+            self.signals.pop_front();
+        }
+    }
+
     fn rejection_key(reason: &str) -> String {
         reason
             .split_once('(')
@@ -404,6 +419,78 @@ impl ArbEngine {
 
     fn update_history(&mut self, total_val: f64) {
         self.wallet.push_history(total_val);
+    }
+
+    fn live_start_gate_errors(&self) -> Vec<String> {
+        if !self.is_live_mode() {
+            return Vec::new();
+        }
+
+        let max_age = Duration::from_millis(self.config.live_max_feed_age_ms);
+        let mut errors = Vec::new();
+        let enabled_symbols: Vec<_> = self
+            .symbol_states
+            .iter()
+            .filter(|(_, state)| state.enabled)
+            .collect();
+
+        if enabled_symbols.is_empty() {
+            errors.push("No enabled live symbols".to_string());
+        }
+
+        for (symbol, state) in enabled_symbols {
+            if state.question.trim().is_empty() {
+                errors.push(format!("{symbol}: missing market question"));
+            }
+            if state.market_end_ts.is_none() || state.condition_id.is_none() {
+                errors.push(format!("{symbol}: market metadata missing"));
+            }
+            match state.last_binance {
+                Some((_, ts)) if ts.elapsed() <= max_age => {}
+                Some((_, ts)) => errors.push(format!(
+                    "{symbol}: Binance stale ({}ms)",
+                    ts.elapsed().as_millis()
+                )),
+                None => errors.push(format!("{symbol}: Binance missing")),
+            }
+            match state.last_chainlink {
+                Some((_, ts)) if ts.elapsed() <= max_age => {}
+                Some((_, ts)) => errors.push(format!(
+                    "{symbol}: Chainlink stale ({}ms)",
+                    ts.elapsed().as_millis()
+                )),
+                None => errors.push(format!("{symbol}: Chainlink missing")),
+            }
+            match state.last_clob_update {
+                Some(ts) if ts.elapsed() <= max_age => {}
+                Some(ts) => errors.push(format!(
+                    "{symbol}: CLOB stale ({}ms)",
+                    ts.elapsed().as_millis()
+                )),
+                None => errors.push(format!("{symbol}: CLOB missing")),
+            }
+
+            let (up_bid, up_ask) = self.wallet.get_bid_ask(symbol, "UP");
+            let (down_bid, down_ask) = self.wallet.get_bid_ask(symbol, "DOWN");
+            if up_bid <= 0.0 || up_ask <= 0.0 {
+                errors.push(format!("{symbol}: UP quote empty"));
+            }
+            if down_bid <= 0.0 || down_ask <= 0.0 {
+                errors.push(format!("{symbol}: DOWN quote empty"));
+            }
+        }
+
+        errors
+    }
+
+    fn live_start_gate_json(&self) -> Value {
+        let errors = self.live_start_gate_errors();
+        json!({
+            "ready": errors.is_empty(),
+            "checked_at": Self::now_rfc3339(),
+            "max_feed_age_ms": self.config.live_max_feed_age_ms,
+            "errors": errors,
+        })
     }
 
     fn drain_wallet_events_to_signals(&mut self) {
@@ -547,7 +634,10 @@ impl ArbEngine {
                     "ema_offset": 0.0,
                     "price_to_beat": state.price_to_beat,
                     "end_ts": state.market_end_ts,
-                    "enabled": state.enabled
+                    "enabled": state.enabled,
+                    "binance_age_ms": state.last_binance.map(|(_, ts)| ts.elapsed().as_millis() as u64),
+                    "chainlink_age_ms": state.last_chainlink.map(|(_, ts)| ts.elapsed().as_millis() as u64),
+                    "clob_age_ms": state.last_clob_update.map(|ts| ts.elapsed().as_millis() as u64)
                 }),
             );
         }
@@ -569,6 +659,7 @@ impl ArbEngine {
             "signals": self.signals,
             "latency": self.latest_latency_json(),
             "markets": markets,
+            "live_start_gate": self.live_start_gate_json(),
             "running": self.running,
             "runtime_ms": self.started_at.map(|started_at| started_at.elapsed().as_millis() as u64).unwrap_or(0),
             "is_live": self.live_execution.is_some()
@@ -690,6 +781,16 @@ impl ArbEngine {
             "eth_ptb_neutral_zone_usd": self.config.eth_ptb_neutral_zone_usd,
             "ptb_max_counter_distance_usd": self.config.ptb_max_counter_distance_usd,
             "eth_ptb_max_counter_distance_usd": self.config.eth_ptb_max_counter_distance_usd,
+            "live_max_order_usdc": self.config.live_max_order_usdc,
+            "live_max_session_loss_usdc": self.config.live_max_session_loss_usdc,
+            "live_max_open_positions": self.config.live_max_open_positions,
+            "live_max_slippage_cents": self.config.live_max_slippage_cents,
+            "live_max_quote_age_ms": self.config.live_max_quote_age_ms,
+            "live_min_gas_pol": self.config.live_min_gas_pol,
+            "live_min_usdc_balance": self.config.live_min_usdc_balance,
+            "live_max_feed_age_ms": self.config.live_max_feed_age_ms,
+            "live_max_clock_skew_ms": self.config.live_max_clock_skew_ms,
+            "live_dry_run_orders": self.config.live_dry_run_orders,
         });
         self.slow_snapshot_cache.updated_at = Some(Instant::now());
         true
@@ -765,8 +866,19 @@ impl ArbEngine {
                             info!("Settings updated");
                         }
                         Some("start") => {
-                            // Approvals are permanent on-chain (set during LiveWallet::new).
-                            // Don't check here — it blocks the event loop for seconds.
+                            if self.is_live_mode() {
+                                let errors = self.live_start_gate_errors();
+                                if !errors.is_empty() {
+                                    let reason = format!(
+                                        "LIVE_START_BLOCKED({})",
+                                        errors.join(" | ")
+                                    );
+                                    warn!(reason = %reason, "Live start rejected");
+                                    self.add_system_signal(SignalStatus::Rejected, reason);
+                                    self.broadcast_state();
+                                    continue;
+                                }
+                            }
                             if !self.running {
                                 self.started_at = Some(Instant::now());
                             }
@@ -1235,6 +1347,9 @@ impl ArbEngine {
     }
 
     async fn handle_clob_update(&mut self, update: SharePriceUpdate) -> bool {
+        if let Some(state) = self.symbol_states.get_mut(&update.symbol) {
+            state.last_clob_update = Some(update.timestamp);
+        }
         let live_bids = update.bids.clone();
         let live_asks = update.asks.clone();
         let live_timestamp = update.timestamp;
@@ -1308,6 +1423,7 @@ impl ArbEngine {
             state.last_spike_usd = 0.0;
             // Block spike detection for 3 seconds after market transition
             state.last_market_update = Some(Instant::now());
+            state.last_clob_update = None;
         }
         // Clear old tokens FIRST, then register new ones for live wallet
         if self.live_execution.is_some() {

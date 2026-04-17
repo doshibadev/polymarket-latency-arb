@@ -52,6 +52,10 @@ pub struct AppConfig {
     pub live_max_slippage_cents: f64,
     pub live_max_quote_age_ms: u64,
     pub live_dry_run_orders: bool,
+    pub live_min_gas_pol: f64,
+    pub live_min_usdc_balance: f64,
+    pub live_max_feed_age_ms: u64,
+    pub live_max_clock_skew_ms: u64,
 }
 
 impl AppConfig {
@@ -251,6 +255,22 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(false),
+            live_min_gas_pol: env::var("LIVE_MIN_GAS_POL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.10),
+            live_min_usdc_balance: env::var("LIVE_MIN_USDC_BALANCE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0),
+            live_max_feed_age_ms: env::var("LIVE_MAX_FEED_AGE_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3000),
+            live_max_clock_skew_ms: env::var("LIVE_MAX_CLOCK_SKEW_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5000),
         })
     }
 
@@ -426,6 +446,18 @@ impl AppConfig {
         if let Some(v) = json.get("live_dry_run_orders").and_then(|v| v.as_bool()) {
             self.live_dry_run_orders = v;
         }
+        if let Some(v) = json.get("live_min_gas_pol").and_then(|v| v.as_f64()) {
+            self.live_min_gas_pol = v;
+        }
+        if let Some(v) = json.get("live_min_usdc_balance").and_then(|v| v.as_f64()) {
+            self.live_min_usdc_balance = v;
+        }
+        if let Some(v) = json.get("live_max_feed_age_ms").and_then(|v| v.as_u64()) {
+            self.live_max_feed_age_ms = v;
+        }
+        if let Some(v) = json.get("live_max_clock_skew_ms").and_then(|v| v.as_u64()) {
+            self.live_max_clock_skew_ms = v;
+        }
         Ok(())
     }
 
@@ -531,7 +563,11 @@ mod tests {
                 "live_max_open_positions": 2,
                 "live_max_slippage_cents": 3.0,
                 "live_max_quote_age_ms": 900,
-                "live_dry_run_orders": true
+                "live_dry_run_orders": true,
+                "live_min_gas_pol": 0.12,
+                "live_min_usdc_balance": 2.5,
+                "live_max_feed_age_ms": 2200,
+                "live_max_clock_skew_ms": 3500
             }))
             .expect("json update should succeed");
 
@@ -555,5 +591,9 @@ mod tests {
         assert_eq!(config.live_max_slippage_cents, 3.0);
         assert_eq!(config.live_max_quote_age_ms, 900);
         assert!(config.live_dry_run_orders);
+        assert_eq!(config.live_min_gas_pol, 0.12);
+        assert_eq!(config.live_min_usdc_balance, 2.5);
+        assert_eq!(config.live_max_feed_age_ms, 2200);
+        assert_eq!(config.live_max_clock_skew_ms, 3500);
     }
 }
