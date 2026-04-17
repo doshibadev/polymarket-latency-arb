@@ -7,7 +7,7 @@ use sqlx::sqlite::{
 use sqlx::{Pool, Row, Sqlite};
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -41,6 +41,8 @@ pub struct OpenPosition {
     pub ptb_tier_at_entry: Option<String>,
     pub entry_mode: Option<String>,
     pub exit_suppressed_count: u32,
+    #[serde(skip)]
+    pub last_suppressed_exit_signal: Option<(String, Instant)>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -284,6 +286,7 @@ enum DbWriteCommand {
 
 impl PaperWallet {
     const DB_URL: &'static str = "sqlite://lattice.db";
+    const SUPPRESSED_EXIT_SIGNAL_INTERVAL: Duration = Duration::from_secs(5);
 
     pub fn new(config: AppConfig) -> Self {
         Self {
@@ -1536,16 +1539,34 @@ impl PaperWallet {
         }
 
         for (idx, symbol, direction, spike, reason) in suppressed_exits {
-            if let Some(pos) = self.open_positions.get_mut(idx) {
+            let should_emit = if let Some(pos) = self.open_positions.get_mut(idx) {
                 pos.exit_suppressed_count += 1;
+
+                let should_emit = pos.last_suppressed_exit_signal.as_ref().is_none_or(
+                    |(last_reason, last_at)| {
+                        last_reason != reason
+                            || last_at.elapsed() >= Self::SUPPRESSED_EXIT_SIGNAL_INTERVAL
+                    },
+                );
+
+                if should_emit {
+                    pos.last_suppressed_exit_signal = Some((reason.to_string(), Instant::now()));
+                }
+
+                should_emit
+            } else {
+                false
+            };
+
+            if should_emit {
+                self.events.push(WalletEvent {
+                    symbol,
+                    direction,
+                    spike,
+                    status: "HOLD".to_string(),
+                    reason: format!("EXIT_SUPPRESSED_PTB_HOLD({})", reason),
+                });
             }
-            self.events.push(WalletEvent {
-                symbol,
-                direction,
-                spike,
-                status: "HOLD".to_string(),
-                reason: format!("EXIT_SUPPRESSED_PTB_HOLD({})", reason),
-            });
         }
 
         // Update spike_faded_since for all positions
@@ -2100,6 +2121,7 @@ impl PaperWallet {
                 ptb_tier_at_entry: p.ptb_tier_at_entry,
                 entry_mode: p.entry_mode,
                 exit_suppressed_count: 0,
+                last_suppressed_exit_signal: None,
             });
             info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened with FAK orderbook simulation");
         }

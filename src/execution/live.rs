@@ -1160,6 +1160,7 @@ impl LiveWallet {
             ptb_tier_at_entry: None,
             entry_mode: Some(if allow_scaling { "ptb_hold" } else { "scalp" }.to_string()),
             exit_suppressed_count: 0,
+            last_suppressed_exit_signal: None,
         });
 
         Ok(scale_level)
