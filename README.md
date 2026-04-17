@@ -24,7 +24,11 @@ High-frequency trading bot that exploits the 1.7-second delay between Binance pr
 2. Copy `.env.example` to `.env`
 3. Configure settings in `.env`
 4. Run: `cargo run --release`
-5. Open dashboard: `http://localhost:3030`
+5. Open dashboard: `http://localhost:3000`
+6. Frontend development:
+   - `cd web`
+   - `npm install`
+   - `npm run dev`
 
 ## Configuration
 

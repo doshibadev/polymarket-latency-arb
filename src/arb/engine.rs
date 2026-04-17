@@ -51,6 +51,7 @@ pub struct ArbEngine {
     symbol_states: HashMap<String, SymbolState>,
     signals: Vec<Value>,
     running: bool,
+    started_at: Option<Instant>,
     last_clob_sync: Option<Instant>,
 }
 
@@ -77,6 +78,7 @@ impl ArbEngine {
             symbol_states: HashMap::new(),
             signals: Vec::new(),
             running: false, // starts paused — user must press START
+            started_at: None,
             last_clob_sync: None,
         }
     }
@@ -301,6 +303,7 @@ impl ArbEngine {
             "markets": markets,
             "wallet_address": wallet_address,
             "running": self.running,
+            "runtime_ms": self.started_at.map(|started_at| started_at.elapsed().as_millis() as u64).unwrap_or(0),
             "is_live": self.live_wallet.is_some(),
             "config": config_json
         });
@@ -335,11 +338,15 @@ impl ArbEngine {
                         Some("start") => {
                             // Approvals are permanent on-chain (set during LiveWallet::new).
                             // Don't check here — it blocks the event loop for seconds.
+                            if !self.running {
+                                self.started_at = Some(Instant::now());
+                            }
                             self.running = true;
                             info!("Bot started");
                         }
                         Some("stop") => {
                             self.running = false;
+                            self.started_at = None;
                             self.wallet.save_state();
                             info!("Bot stopped");
                         }

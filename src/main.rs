@@ -8,14 +8,16 @@ pub mod server;
 
 use arb::ArbEngine;
 use config::AppConfig;
-use polymarket::{ClobClient, fetch_current_market};
-use tokio::sync::{mpsc, broadcast};
+use polymarket::{fetch_current_market, ClobClient};
+use tokio::sync::{broadcast, mpsc};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .init();
 
@@ -54,17 +56,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CLOB WebSocket
     let clob = ClobClient::new(initial_markets.clone(), clob_tx, Some(market_tx));
     tokio::spawn(async move {
-        if let Err(e) = clob.run().await { tracing::error!(error = %e, "CLOB stream error"); }
+        if let Err(e) = clob.run().await {
+            tracing::error!(error = %e, "CLOB stream error");
+        }
     });
 
     // RTDS Stream
     tokio::spawn(async move {
         let mut stream = crate::rtds::RtdsStream::new();
-        if let Err(e) = stream.run(price_tx).await { tracing::error!(error = %e, "RTDS stream error"); }
+        if let Err(e) = stream.run(price_tx).await {
+            tracing::error!(error = %e, "RTDS stream error");
+        }
     });
 
     // Arb Engine
-    let mut engine = ArbEngine::new(config.clone(), price_rx, clob_rx, market_rx, broadcast_tx, cmd_rx);
+    let mut engine = ArbEngine::new(
+        config.clone(),
+        price_rx,
+        clob_rx,
+        market_rx,
+        broadcast_tx,
+        cmd_rx,
+    );
 
     // Live trading mode
     if !config.paper_trading {
@@ -81,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::info!("Paper trading mode");
     }
-    
+
     // Initialize engine with current markets
     for m in initial_markets {
         engine.handle_market_update(m).await;

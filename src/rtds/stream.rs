@@ -26,7 +26,9 @@ pub struct PriceUpdate {
 }
 
 /// Direct Binance WebSocket for low-latency BTC price (~10ms updates vs RTDS relay ~50ms)
-async fn run_binance_direct(tx: mpsc::Sender<PriceUpdate>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn run_binance_direct(
+    tx: mpsc::Sender<PriceUpdate>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let url = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade";
     loop {
         match connect_async(url).await {
@@ -99,7 +101,9 @@ impl RtdsStream {
         let mut backoff_secs = 3u64;
         loop {
             match self.connect_and_stream(&url, &tx).await {
-                Ok(_) => { backoff_secs = 3; }
+                Ok(_) => {
+                    backoff_secs = 3;
+                }
                 Err(e) => {
                     error!(error = %e, backoff = backoff_secs, "RTDS WebSocket error, reconnecting...");
                     tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
@@ -123,7 +127,9 @@ impl RtdsStream {
                 { "topic": "crypto_prices", "type": "update", "filters": "{\"symbol\":\"btcusdt\"}" }
             ]
         });
-        ws_stream.send(Message::Text(binance_sub.to_string().into())).await?;
+        ws_stream
+            .send(Message::Text(binance_sub.to_string().into()))
+            .await?;
 
         // Chainlink subscriptions
         let chainlink_sub = serde_json::json!({
@@ -132,7 +138,9 @@ impl RtdsStream {
                 { "topic": "crypto_prices_chainlink", "type": "*", "filters": "{\"symbol\":\"btc/usd\"}" }
             ]
         });
-        ws_stream.send(Message::Text(chainlink_sub.to_string().into())).await?;
+        ws_stream
+            .send(Message::Text(chainlink_sub.to_string().into()))
+            .await?;
 
         info!("RTDS connected, subscribed to BTC (Binance & Chainlink)");
         let (mut write, mut read) = ws_stream.split();

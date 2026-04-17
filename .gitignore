@@ -2,4 +2,10 @@ target/
 .DS_Store
 .env
 .vscode
+.idea
 paper_wallet_state.json
+web/node_modules
+web/dist
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts

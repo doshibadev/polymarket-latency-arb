@@ -1,4 +1,4 @@
-pub mod paper;
 pub mod live;
-pub use paper::PaperWallet;
+pub mod paper;
 pub use live::LiveWallet;
+pub use paper::PaperWallet;

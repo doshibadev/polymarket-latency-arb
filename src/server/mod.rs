@@ -1,15 +1,77 @@
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    response::IntoResponse,
-    routing::{get, post, any_service},
-    Router, Json,
+    response::{Html, IntoResponse},
+    routing::{get, post},
+    Json, Router,
 };
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
+
+const FRONTEND_DIST_DIR: &str = "web/dist";
+const FRONTEND_ENTRYPOINT: &str = "web/dist/index.html";
+const FRONTEND_SETUP_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lattice Terminal</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        background:
+          radial-gradient(circle at top, rgba(203, 237, 117, 0.14), transparent 28%),
+          linear-gradient(180deg, #0f1311 0%, #090b0a 100%);
+        color: #e8ecd9;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      main {
+        width: min(760px, 100%);
+        padding: 32px;
+        border: 1px solid rgba(232, 236, 217, 0.12);
+        border-radius: 28px;
+        background: rgba(15, 19, 17, 0.78);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.3);
+      }
+      p {
+        color: rgba(232, 236, 217, 0.72);
+      }
+      code {
+        font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+      }
+      pre {
+        margin: 18px 0 0;
+        padding: 16px;
+        border-radius: 18px;
+        overflow-x: auto;
+        background: #0b0f0c;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p>Lattice Terminal</p>
+      <h1>Frontend is currently removed.</h1>
+      <p>
+        The backend server is running, but no frontend is installed right now.
+        Add a new frontend later and place its production build in
+        <code>web/dist</code> if you want Axum to serve it.
+      </p>
+    </main>
+  </body>
+</html>
+"#;
 
 const NUMERIC_CONFIG_FIELDS: &[(&str, &str)] = &[
     ("THRESHOLD_BPS", "threshold_bps"),
@@ -42,7 +104,10 @@ const NUMERIC_CONFIG_FIELDS: &[(&str, &str)] = &[
     ("COUNTER_TREND_MULTIPLIER", "counter_trend_multiplier"),
     ("TREND_MAX_MAGNITUDE_USD", "trend_max_magnitude_usd"),
     ("PTB_NEUTRAL_ZONE_USD", "ptb_neutral_zone_usd"),
-    ("PTB_MAX_COUNTER_DISTANCE_USD", "ptb_max_counter_distance_usd"),
+    (
+        "PTB_MAX_COUNTER_DISTANCE_USD",
+        "ptb_max_counter_distance_usd",
+    ),
 ];
 
 const BOOL_CONFIG_FIELDS: &[(&str, &str)] = &[("TREND_FILTER_ENABLED", "trend_filter_enabled")];
@@ -55,32 +120,50 @@ pub struct ServerState {
 pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serde_json::Value>) {
     let state = Arc::new(ServerState { tx, cmd_tx });
 
-    // Check if dashboard.html exists
-    if !std::path::Path::new("dashboard.html").exists() {
-        warn!("dashboard.html not found in current directory: {:?}", std::env::current_dir());
-    }
+    let app = if std::path::Path::new(FRONTEND_ENTRYPOINT).exists() {
+        info!("Serving frontend assets from {}", FRONTEND_DIST_DIR);
 
-    let app = Router::new()
-        .route("/", any_service(ServeFile::new("dashboard.html")))
-        .route("/ws", get(ws_handler))
-        .route("/config", get(get_config))
-        .route("/settings", post(update_settings))
-        .route("/command", post(send_command))
-        .fallback_service(ServeDir::new("."))
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+        Router::new()
+            .route("/ws", get(ws_handler))
+            .route("/config", get(get_config))
+            .route("/settings", post(update_settings))
+            .route("/command", post(send_command))
+            .fallback_service(
+                ServeDir::new(FRONTEND_DIST_DIR).fallback(ServeFile::new(FRONTEND_ENTRYPOINT)),
+            )
+            .layer(CorsLayer::permissive())
+            .with_state(state)
+    } else {
+        warn!(
+            "Frontend build not found at {:?}. Serving setup page instead.",
+            std::path::Path::new(FRONTEND_ENTRYPOINT)
+        );
+
+        Router::new()
+            .route("/", get(frontend_setup_page))
+            .route("/ws", get(ws_handler))
+            .route("/config", get(get_config))
+            .route("/settings", post(update_settings))
+            .route("/command", post(send_command))
+            .fallback(get(frontend_setup_page))
+            .layer(CorsLayer::permissive())
+            .with_state(state)
+    };
 
     // Read port from environment variable, default to 3000
     let port = std::env::var("DASHBOARD_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(3000);
-    
+
     let addr = format!("0.0.0.0:{}", port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
-            panic!("Failed to bind to {}: {}. Port might already be in use.", addr, e);
+            panic!(
+                "Failed to bind to {}: {}. Port might already be in use.",
+                addr, e
+            );
         }
     };
     info!("Dashboard server running on http://localhost:{}", port);
@@ -172,9 +255,16 @@ mod tests {
         let mut env_keys = std::collections::HashSet::new();
         let mut json_keys = std::collections::HashSet::new();
 
-        for (env_key, json_key) in NUMERIC_CONFIG_FIELDS.iter().chain(BOOL_CONFIG_FIELDS.iter()) {
+        for (env_key, json_key) in NUMERIC_CONFIG_FIELDS
+            .iter()
+            .chain(BOOL_CONFIG_FIELDS.iter())
+        {
             assert!(env_keys.insert(*env_key), "duplicate env key: {}", env_key);
-            assert!(json_keys.insert(*json_key), "duplicate json key: {}", json_key);
+            assert!(
+                json_keys.insert(*json_key),
+                "duplicate json key: {}",
+                json_key
+            );
         }
     }
 }
@@ -231,4 +321,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
     }
 
     debug!("Dashboard client disconnected");
+}
+
+async fn frontend_setup_page() -> Html<&'static str> {
+    Html(FRONTEND_SETUP_PAGE)
 }

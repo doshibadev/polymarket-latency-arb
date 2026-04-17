@@ -8,9 +8,9 @@ use alloy::sol;
 use chrono::Datelike;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer as _};
-use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::clob::types::{OrderType, Side};
-use polymarket_client_sdk::types::{Address, Decimal, U256, address};
+use polymarket_client_sdk::clob::{Client, Config};
+use polymarket_client_sdk::types::{address, Address, Decimal, U256};
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
 use tracing::{error, info, warn};
 
@@ -18,15 +18,14 @@ use crate::config::AppConfig;
 use crate::execution::paper::{OpenPosition, TradeRecord};
 
 // Polygon mainnet contract addresses (from Polymarket docs + reference bot)
-const USDC:           Address = address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
-const CTF:            Address = address!("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045");
-const EXCHANGE:       Address = address!("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E");
+const USDC: Address = address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
+const CTF: Address = address!("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045");
+const EXCHANGE: Address = address!("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E");
 const NEG_RISK_EXCHANGE: Address = address!("0xC5d563A36AE78145C45a50134d48A1215220f80a");
-const NEG_RISK_ADAPTER:  Address = address!("0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296");
+const NEG_RISK_ADAPTER: Address = address!("0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296");
 
 fn rpc_url() -> String {
-    std::env::var("POLYGON_RPC_URL")
-        .unwrap_or_else(|_| "https://rpc.ankr.com/polygon".to_string())
+    std::env::var("POLYGON_RPC_URL").unwrap_or_else(|_| "https://rpc.ankr.com/polygon".to_string())
 }
 
 sol! {
@@ -47,7 +46,9 @@ type AuthClient = Client<Authenticated<Normal>>;
 
 /// Check and set required on-chain approvals — view calls are FREE (no gas)
 /// Only approve() and setApprovalForAll() cost gas, and only on first run
-pub async fn ensure_approvals(signer: &K256Signer) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn ensure_approvals(
+    signer: &K256Signer,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let provider = ProviderBuilder::new()
         .wallet(signer.clone())
         .connect(&rpc_url())
@@ -65,16 +66,19 @@ pub async fn ensure_approvals(signer: &K256Signer) -> Result<(), Box<dyn std::er
             pol_f64, owner
         ).into());
     }
-    info!(pol_balance = pol_f64, "POL balance sufficient for approvals");
+    info!(
+        pol_balance = pol_f64,
+        "POL balance sufficient for approvals"
+    );
 
     let usdc = IERC20::new(USDC, provider.clone());
     let ctf = IERC1155::new(CTF, provider.clone());
 
     // All contracts that need USDC + CTF approval
     let targets = [
-        ("Exchange",         EXCHANGE),
+        ("Exchange", EXCHANGE),
         ("Neg Risk Exchange", NEG_RISK_EXCHANGE),
-        ("Neg Risk Adapter",  NEG_RISK_ADAPTER),
+        ("Neg Risk Adapter", NEG_RISK_ADAPTER),
     ];
 
     for (name, target) in &targets {
@@ -82,7 +86,11 @@ pub async fn ensure_approvals(signer: &K256Signer) -> Result<(), Box<dyn std::er
         let allowance = usdc.allowance(owner, *target).call().await?;
         if allowance < AlloyU256::from(1_000_000u64) {
             info!(contract = name, "Approving USDC (one-time gas cost)...");
-            usdc.approve(*target, AlloyU256::MAX).send().await?.watch().await?;
+            usdc.approve(*target, AlloyU256::MAX)
+                .send()
+                .await?
+                .watch()
+                .await?;
             info!(contract = name, "USDC approved");
         } else {
             info!(contract = name, "USDC already approved (no gas)");
@@ -92,7 +100,11 @@ pub async fn ensure_approvals(signer: &K256Signer) -> Result<(), Box<dyn std::er
         let approved = ctf.isApprovedForAll(owner, *target).call().await?;
         if !approved {
             info!(contract = name, "Approving CTF (one-time gas cost)...");
-            ctf.setApprovalForAll(*target, true).send().await?.watch().await?;
+            ctf.setApprovalForAll(*target, true)
+                .send()
+                .await?
+                .watch()
+                .await?;
             info!(contract = name, "CTF approved");
         } else {
             info!(contract = name, "CTF already approved (no gas)");
@@ -141,18 +153,17 @@ pub struct LiveWallet {
     token_map: HashMap<String, (String, String)>, // token_id -> (symbol, direction)
     pending_order_ids: HashMap<String, String>,   // "symbol:direction" -> order_id
     order_timestamps: Vec<std::time::Instant>,    // For rate limiting
-    pending_orders: Vec<PendingOrder>,            // Track in-flight orders to prevent race conditions
+    pending_orders: Vec<PendingOrder>, // Track in-flight orders to prevent race conditions
     price_cache: HashMap<String, SymbolPriceCache>, // Cache WebSocket prices (matches paper.rs)
     zero_balance_flags: HashMap<String, Instant>, // "symbol:direction" -> first zero-balance detection time
 }
 
 impl LiveWallet {
     pub async fn new(config: AppConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let private_key = std::env::var(PRIVATE_KEY_VAR)
-            .map_err(|_| "POLYMARKET_PRIVATE_KEY not set in .env")?;
+        let private_key =
+            std::env::var(PRIVATE_KEY_VAR).map_err(|_| "POLYMARKET_PRIVATE_KEY not set in .env")?;
 
-        let signer = K256Signer::from_str(&private_key)?
-            .with_chain_id(Some(POLYGON));
+        let signer = K256Signer::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
         let wallet_address = format!("{:?}", signer.address());
         info!(eoa_address = %wallet_address, wallet_type = %std::env::var("WALLET_TYPE").unwrap_or("gnosis".into()), "Live wallet");
@@ -166,17 +177,26 @@ impl LiveWallet {
             let builder = Client::new("https://clob.polymarket.com", clob_config)?
                 .authentication_builder(&signer);
             if wallet_type.to_lowercase() == "eoa" {
-                builder.signature_type(SignatureType::Eoa).authenticate().await?
+                builder
+                    .signature_type(SignatureType::Eoa)
+                    .authenticate()
+                    .await?
             } else {
                 // GnosisSafe: SDK auto-derives the proxy wallet address via CREATE2
-                builder.signature_type(SignatureType::GnosisSafe).authenticate().await?
+                builder
+                    .signature_type(SignatureType::GnosisSafe)
+                    .authenticate()
+                    .await?
             }
         };
 
         // Validate API credentials work
         match clob.api_keys().await {
             Ok(_) => info!("API credentials validated"),
-            Err(e) => warn!("API credential validation failed: {} — trading may not work", e),
+            Err(e) => warn!(
+                "API credential validation failed: {} — trading may not work",
+                e
+            ),
         }
 
         // Fetch real USDC balance from CLOB
@@ -231,7 +251,11 @@ impl LiveWallet {
             if let Ok(raw) = f64::try_from(b.balance) {
                 let new_balance = raw / 1_000_000.0;
                 if (new_balance - self.balance).abs() > 0.01 {
-                    info!(previous=self.balance, on_chain=new_balance, "USDC balance synced from CLOB");
+                    info!(
+                        previous = self.balance,
+                        on_chain = new_balance,
+                        "USDC balance synced from CLOB"
+                    );
                 }
                 self.balance = new_balance;
             }
@@ -242,7 +266,9 @@ impl LiveWallet {
         use polymarket_client_sdk::clob::types::OrderStatusType;
 
         if let Ok(orders) = self.clob.orders(&OrdersRequest::default(), None).await {
-            let live_ids: std::collections::HashSet<String> = orders.data.iter()
+            let live_ids: std::collections::HashSet<String> = orders
+                .data
+                .iter()
                 .filter(|o| matches!(o.status, OrderStatusType::Live | OrderStatusType::Matched))
                 .map(|o| o.id.to_string())
                 .collect();
@@ -269,27 +295,33 @@ impl LiveWallet {
 
         for (idx, pos) in self.open_positions.iter().enumerate() {
             // Skip positions younger than 30 seconds — CLOB cache may not have updated yet
-            if pos.entry_time.elapsed().as_secs() < 30 { continue; }
+            if pos.entry_time.elapsed().as_secs() < 30 {
+                continue;
+            }
 
             let key = format!("{}:{}", pos.symbol, pos.direction);
-            if self.pending_order_ids.contains_key(&key) { continue; } // Handled by order check above
+            if self.pending_order_ids.contains_key(&key) {
+                continue;
+            } // Handled by order check above
 
             if let Some(token_id) = self.get_token_id(&pos.symbol, &pos.direction) {
                 // Force CLOB to refresh its cached on-chain balance before querying
-                let update_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
-                    .asset_type(AssetType::Conditional)
-                    .token_id(token_id.clone())
-                    .build();
+                let update_req =
+                    polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                        .asset_type(AssetType::Conditional)
+                        .token_id(token_id.clone())
+                        .build();
                 let _ = self.clob.update_balance_allowance(update_req).await;
 
                 // Now query the (hopefully fresh) balance
-                let query_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
-                    .asset_type(AssetType::Conditional)
-                    .token_id(token_id)
-                    .build();
+                let query_req =
+                    polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                        .asset_type(AssetType::Conditional)
+                        .token_id(token_id)
+                        .build();
                 if let Ok(b) = self.clob.balance_allowance(query_req).await {
                     let raw: f64 = b.balance.try_into().unwrap_or(1.0); // Default to 1 (keep) on parse error
-                    // Conditional token balances are in atomic units, divide by 1e6
+                                                                        // Conditional token balances are in atomic units, divide by 1e6
                     let shares = raw / 1_000_000.0;
                     info!(symbol=%pos.symbol, direction=%pos.direction,
                           on_chain_raw=raw, on_chain_shares=shares, tracked_shares=pos.shares,
@@ -341,11 +373,18 @@ impl LiveWallet {
             self.losses += 1;
             self.total_fees_paid += pos.buy_fee;
             self.trade_history.push(TradeRecord {
-                symbol: pos.symbol.clone(), r#type: "exit".to_string(), question: String::new(),
-                direction: pos.direction.clone(), entry_price: Some(pos.entry_price),
-                exit_price: Some(0.0), shares: pos.shares, cost: pos.position_size,
-                pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
-                balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
+                symbol: pos.symbol.clone(),
+                r#type: "exit".to_string(),
+                question: String::new(),
+                direction: pos.direction.clone(),
+                entry_price: Some(pos.entry_price),
+                exit_price: Some(0.0),
+                shares: pos.shares,
+                cost: pos.position_size,
+                pnl: Some(pnl),
+                cumulative_pnl: Some(self.cumulative_pnl),
+                balance_after: Some(self.balance),
+                timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some("external_close".to_string()),
                 btc_at_entry: Some(pos.entry_btc), price_to_beat_at_entry: None,
                 ptb_margin_at_entry: None, seconds_to_expiry_at_entry: None,
@@ -359,29 +398,44 @@ impl LiveWallet {
 
         // Clean up zero_balance_flags for positions that no longer exist
         self.zero_balance_flags.retain(|key, _| {
-            self.open_positions.iter().any(|p| format!("{}:{}", p.symbol, p.direction) == *key)
+            self.open_positions
+                .iter()
+                .any(|p| format!("{}:{}", p.symbol, p.direction) == *key)
         });
     }
 
     /// Auto-redeem winning tokens after market resolution (on-chain tx, costs gas)
     pub async fn redeem_resolved_positions(&self, condition_id: &str) {
-        use polymarket_client_sdk::ctf::Client as CtfClient;
-        use polymarket_client_sdk::ctf::types::RedeemPositionsRequest;
         use alloy::primitives::B256;
+        use polymarket_client_sdk::ctf::types::RedeemPositionsRequest;
+        use polymarket_client_sdk::ctf::Client as CtfClient;
 
-        let provider = match ProviderBuilder::new().wallet(self.signer.clone()).connect(&rpc_url()).await {
+        let provider = match ProviderBuilder::new()
+            .wallet(self.signer.clone())
+            .connect(&rpc_url())
+            .await
+        {
             Ok(p) => p,
-            Err(e) => { error!("RPC connect failed for redeem: {}", e); return; }
+            Err(e) => {
+                error!("RPC connect failed for redeem: {}", e);
+                return;
+            }
         };
 
         let ctf_client = match CtfClient::new(provider, POLYGON) {
             Ok(c) => c,
-            Err(e) => { error!("CTF client init failed: {}", e); return; }
+            Err(e) => {
+                error!("CTF client init failed: {}", e);
+                return;
+            }
         };
 
         let condition_id_bytes = match B256::from_str(condition_id) {
             Ok(b) => b,
-            Err(e) => { error!("Invalid condition_id {}: {}", condition_id, e); return; }
+            Err(e) => {
+                error!("Invalid condition_id {}: {}", condition_id, e);
+                return;
+            }
         };
 
         // Redeem both index sets — CTF only pays out the winning one
@@ -393,14 +447,20 @@ impl LiveWallet {
             .build();
 
         match ctf_client.redeem_positions(&request).await {
-            Ok(r) => info!(condition_id=%condition_id, tx=%r.transaction_hash, "Positions redeemed"),
+            Ok(r) => {
+                info!(condition_id=%condition_id, tx=%r.transaction_hash, "Positions redeemed")
+            }
             Err(e) => error!(condition_id=%condition_id, error=%e, "Redeem failed"),
         }
     }
 
     pub fn register_tokens(&mut self, up_token: &str, down_token: &str, symbol: &str) {
-        self.token_map.insert(up_token.to_string(), (symbol.to_string(), "UP".to_string()));
-        self.token_map.insert(down_token.to_string(), (symbol.to_string(), "DOWN".to_string()));
+        self.token_map
+            .insert(up_token.to_string(), (symbol.to_string(), "UP".to_string()));
+        self.token_map.insert(
+            down_token.to_string(),
+            (symbol.to_string(), "DOWN".to_string()),
+        );
     }
 
     pub fn clear_tokens(&mut self, symbol: &str) {
@@ -428,9 +488,13 @@ impl LiveWallet {
         for pos in &mut self.open_positions {
             if pos.symbol == symbol && pos.direction == direction {
                 if direction == "UP" {
-                    if mid_price > pos.highest_price { pos.highest_price = mid_price; }
+                    if mid_price > pos.highest_price {
+                        pos.highest_price = mid_price;
+                    }
                 } else {
-                    if mid_price < pos.highest_price { pos.highest_price = mid_price; }
+                    if mid_price < pos.highest_price {
+                        pos.highest_price = mid_price;
+                    }
                 }
             }
         }
@@ -463,7 +527,8 @@ impl LiveWallet {
     pub fn cleanup_pending_orders(&mut self) {
         let before = self.pending_orders.len();
         let now = std::time::Instant::now();
-        self.pending_orders.retain(|p| now.duration_since(p.submitted_at).as_secs() < 5);
+        self.pending_orders
+            .retain(|p| now.duration_since(p.submitted_at).as_secs() < 5);
         let after = self.pending_orders.len();
         if before > after {
             warn!("Cleaned up {} stale pending orders", before - after);
@@ -473,8 +538,10 @@ impl LiveWallet {
     /// Update BTC trailing stop tracking for all open positions of a symbol
     pub fn update_btc_trailing(&mut self, symbol: &str, current_btc: f64) {
         for pos in &mut self.open_positions {
-            if pos.symbol != symbol { continue; }
-            
+            if pos.symbol != symbol {
+                continue;
+            }
+
             // entry_btc is now set immediately when position is created
             // Just update peak/trough here
             if current_btc > pos.peak_btc {
@@ -487,14 +554,15 @@ impl LiveWallet {
     }
 
     fn get_token_id(&self, symbol: &str, direction: &str) -> Option<U256> {
-        self.token_map.iter()
+        self.token_map
+            .iter()
             .find(|(_, (s, d))| s == symbol && d == direction)
             .and_then(|(id, _)| U256::from_str(id).ok())
     }
 
     fn round_to_tick(price: f64, tick: f64) -> f64 {
         if tick <= 0.0 {
-            price  // Return original price if tick is invalid
+            price // Return original price if tick is invalid
         } else {
             (price / tick).round() * tick
         }
@@ -508,34 +576,36 @@ impl LiveWallet {
         shares: Decimal,
         usdc: Decimal,
         side: Side,
-    ) -> Result<(String, Decimal, Decimal), String> {  // Returns (order_id, filled_shares, filled_usdc)
+    ) -> Result<(String, Decimal, Decimal), String> {
+        // Returns (order_id, filled_shares, filled_usdc)
         use polymarket_client_sdk::clob::types::Amount;
         for attempt in 0..3u32 {
             // For market orders:
             // - BUY: amount is USDC to spend (pre-rounded to 2 decimals for FOK)
             // - SELL: amount is shares to sell
             let amount_result = match side {
-                Side::Buy => Amount::usdc(usdc),     // Pre-rounded USDC amount for buys
+                Side::Buy => Amount::usdc(usdc), // Pre-rounded USDC amount for buys
                 Side::Sell => Amount::shares(shares), // Shares for sells
                 _ => return Err("Unsupported side".to_string()),
             };
-            
+
             let amount = match amount_result {
                 Ok(a) => a,
                 Err(e) => return Err(format!("Invalid amount: {}", e)),
             };
-            
+
             // Skip if amount is zero
             if amount.as_inner().is_zero() {
                 return Err("Amount is zero".to_string());
             }
-            
-            let order = clob.market_order()
+
+            let order = clob
+                .market_order()
                 .token_id(token_id)
                 .amount(amount)
                 .price(price)
                 .side(side.clone())
-                .order_type(OrderType::FAK)  // FAK = Fill-And-Kill (fills as much as possible, cancels rest)
+                .order_type(OrderType::FAK) // FAK = Fill-And-Kill (fills as much as possible, cancels rest)
                 .build()
                 .await
                 .map_err(|e| e.to_string())?;
@@ -554,14 +624,23 @@ impl LiveWallet {
                         _ => (r.taking_amount, r.making_amount),
                     };
                     return Ok((r.order_id.to_string(), filled_shares, filled_usdc));
-                },
+                }
                 Ok(r) => {
-                    let msg = r.error_msg.as_ref()
+                    let msg = r
+                        .error_msg
+                        .as_ref()
                         .map(|e| format!("CLOB rejected: {}", e))
-                        .unwrap_or_else(|| format!("Order failed: success={}, status={:?}", r.success, r.status));
+                        .unwrap_or_else(|| {
+                            format!("Order failed: success={}, status={:?}", r.success, r.status)
+                        });
                     warn!(attempt=attempt+1, error=%msg, "Order attempt failed");
-                    if attempt == 2 { return Err(msg); }
-                    tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64)).await;
+                    if attempt == 2 {
+                        return Err(msg);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        200 * (attempt + 1) as u64,
+                    ))
+                    .await;
                 }
                 Err(e) => {
                     let msg = format!("Network error: {}", e);
@@ -576,8 +655,13 @@ impl LiveWallet {
                         return Err(msg);
                     }
                     warn!(attempt=attempt+1, error=%msg, "Order network error");
-                    if attempt == 2 { return Err(msg); }
-                    tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64)).await;
+                    if attempt == 2 {
+                        return Err(msg);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        200 * (attempt + 1) as u64,
+                    ))
+                    .await;
                 }
             }
         }
@@ -610,54 +694,80 @@ impl LiveWallet {
         if self.starting_balance > 0.0 {
             let drawdown = (self.starting_balance - self.balance) / self.starting_balance;
             if drawdown > self.config.max_drawdown_pct {
-                return Err(format!("DRAWDOWN_EXCEEDED: {:.1}% > {:.1}%", drawdown * 100.0, self.config.max_drawdown_pct * 100.0));
+                return Err(format!(
+                    "DRAWDOWN_EXCEEDED: {:.1}% > {:.1}%",
+                    drawdown * 100.0,
+                    self.config.max_drawdown_pct * 100.0
+                ));
             }
         }
 
         // DAILY LOSS LIMIT: Stop if daily losses exceed threshold
         if self.daily_pnl < -self.config.max_daily_loss {
-            return Err(format!("DAILY_LOSS_LIMIT: ${:.2} < -${:.2}", self.daily_pnl, self.config.max_daily_loss));
+            return Err(format!(
+                "DAILY_LOSS_LIMIT: ${:.2} < -${:.2}",
+                self.daily_pnl, self.config.max_daily_loss
+            ));
         }
 
         // RATE LIMITING: Check orders per minute
         let now = std::time::Instant::now();
-        self.order_timestamps.retain(|t| now.duration_since(*t).as_secs() < 60);
+        self.order_timestamps
+            .retain(|t| now.duration_since(*t).as_secs() < 60);
         if self.order_timestamps.len() >= self.config.max_orders_per_minute as usize {
-            return Err(format!("RATE_LIMIT: {} orders/min exceeded", self.config.max_orders_per_minute));
+            return Err(format!(
+                "RATE_LIMIT: {} orders/min exceeded",
+                self.config.max_orders_per_minute
+            ));
         }
 
         // PER-MARKET EXPOSURE: Check total exposure in this market
-        let market_exposure: f64 = self.open_positions.iter()
+        let market_exposure: f64 = self
+            .open_positions
+            .iter()
             .filter(|p| p.symbol == symbol)
             .map(|p| p.position_size)
             .sum();
         let position_size_planned = self.balance * self.config.portfolio_pct;
         if market_exposure + position_size_planned > self.config.max_exposure_per_market {
-            return Err(format!("MARKET_EXPOSURE_LIMIT: ${:.2} + ${:.2} > ${:.2}", 
-                market_exposure, position_size_planned, self.config.max_exposure_per_market));
+            return Err(format!(
+                "MARKET_EXPOSURE_LIMIT: ${:.2} + ${:.2} > ${:.2}",
+                market_exposure, position_size_planned, self.config.max_exposure_per_market
+            ));
         }
 
         // SCALE LEVEL CHECK - matches paper.rs exactly
         // Clean up stale pending orders (older than 5 seconds = failed/stuck)
         let now = std::time::Instant::now();
-        self.pending_orders.retain(|p| now.duration_since(p.submitted_at).as_secs() < 5);
-        
+        self.pending_orders
+            .retain(|p| now.duration_since(p.submitted_at).as_secs() < 5);
+
         // Count existing positions + in-flight orders (matches paper.rs logic)
-        let existing: Vec<_> = self.open_positions.iter()
+        let existing: Vec<_> = self
+            .open_positions
+            .iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
             .collect();
-        let pending_same = self.pending_orders.iter()
+        let pending_same = self
+            .pending_orders
+            .iter()
             .filter(|p| p.symbol == symbol && p.direction == direction)
             .count();
         let scale_level = (existing.len() + pending_same) as u32 + 1;
 
         // In HOLD mode (allow_scaling=true), ignore MAX_SCALE_LEVEL to add to winning positions
-        if !allow_scaling && scale_level > 1 { 
+        if !allow_scaling && scale_level > 1 {
             // Log why we're rejecting - helps debug stuck pending orders
             if pending_same > 0 {
-                warn!("MAX_SCALE_LEVEL rejected: {} existing positions, {} pending orders for {} {}", existing.len(), pending_same, symbol, direction);
+                warn!(
+                    "MAX_SCALE_LEVEL rejected: {} existing positions, {} pending orders for {} {}",
+                    existing.len(),
+                    pending_same,
+                    symbol,
+                    direction
+                );
             }
-            return Err("MAX_SCALE_LEVEL".to_string()); 
+            return Err("MAX_SCALE_LEVEL".to_string());
         }
 
         // Mark this order as in-flight BEFORE any async operations to prevent race conditions
@@ -671,7 +781,11 @@ impl LiveWallet {
         // Helper macro to clean up pending order on early return
         macro_rules! cleanup_and_return {
             ($err:expr) => {{
-                self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
+                self.pending_orders.retain(|p| {
+                    !(p.symbol == symbol
+                        && p.direction == direction
+                        && p.submitted_at == pending_marker)
+                });
                 return Err($err);
             }};
         }
@@ -685,20 +799,26 @@ impl LiveWallet {
         let entry_price = self.get_share_price(symbol, direction);
 
         // ENTRY PRICE CHECKS - matches paper.rs exactly
-        if entry_price <= 0.0 { cleanup_and_return!("NO_PRICE_DATA".to_string()); }
-        if entry_price > self.config.max_entry_price { cleanup_and_return!("PRICE_TOO_HIGH".to_string()); }
-        if entry_price < self.config.min_entry_price { cleanup_and_return!("PRICE_TOO_LOW".to_string()); }
+        if entry_price <= 0.0 {
+            cleanup_and_return!("NO_PRICE_DATA".to_string());
+        }
+        if entry_price > self.config.max_entry_price {
+            cleanup_and_return!("PRICE_TOO_HIGH".to_string());
+        }
+        if entry_price < self.config.min_entry_price {
+            cleanup_and_return!("PRICE_TOO_LOW".to_string());
+        }
 
         // Position sizing based on share price tiers (matches paper.rs)
         // Cheaper shares = smaller position (higher risk), expensive shares = larger position
         let portfolio_pct = if entry_price < 0.20 {
-            0.10  // 10% for very cheap shares
+            0.10 // 10% for very cheap shares
         } else if entry_price < 0.50 {
-            0.15  // 15% for mid-range shares
+            0.15 // 15% for mid-range shares
         } else if entry_price < 0.75 {
-            0.20  // 20% for higher-priced shares
+            0.20 // 20% for higher-priced shares
         } else {
-            self.config.portfolio_pct  // config default for 75c+
+            self.config.portfolio_pct // config default for 75c+
         };
         let position_size = self.balance * portfolio_pct * (1.0 / scale_level as f64);
 
@@ -709,15 +829,20 @@ impl LiveWallet {
         let buy_fee = shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
 
         // Preliminary balance check (will recheck after rounding)
-        if (position_size + buy_fee) > self.balance { cleanup_and_return!("INSUFFICIENT_BALANCE".to_string()); }
+        if (position_size + buy_fee) > self.balance {
+            cleanup_and_return!("INSUFFICIENT_BALANCE".to_string());
+        }
 
         // ADDITIONAL SAFETY CHECKS for live trading
         if entry_price < 0.05 {
-            cleanup_and_return!(format!("CRITICAL_SAFETY: Entry price {:.3} < 0.05 (5 cents minimum)", entry_price));
+            cleanup_and_return!(format!(
+                "CRITICAL_SAFETY: Entry price {:.3} < 0.05 (5 cents minimum)",
+                entry_price
+            ));
         }
 
         let tick = 0.01f64;
-        
+
         // MARKET ORDER: For FAK buys, the price field is the worst-price limit (max we'll pay per share).
         // The SDK uses this price to calculate taker_amount (shares) and maker_amount (USDC) for the
         // on-chain order struct. Setting it too far from the actual ask causes mismatched amounts that
@@ -739,37 +864,44 @@ impl LiveWallet {
 
         info!(symbol=%symbol, direction=%direction, cached_ask=ask, limit_price=market_price,
               position_size=position_size, "Sending FAK buy order");
-        
+
         let rounded_price = Self::round_to_tick(market_price, tick);
-        
+
         // Round shares to 2 decimal places for Polymarket API
         // Polymarket requires: maker amount max 2 decimals, taker amount max 4 decimals
         let rounded_shares = (shares * 100.0).floor() / 100.0;
-        
+
         // Skip if rounded to 0 shares
         if rounded_shares < 0.01 {
-            cleanup_and_return!(format!("SHARES_TOO_SMALL: {:.4} shares rounds to 0", shares));
+            cleanup_and_return!(format!(
+                "SHARES_TOO_SMALL: {:.4} shares rounds to 0",
+                shares
+            ));
         }
-        
+
         // Recalculate actual cost with rounded shares
         let actual_position_size = rounded_shares * entry_price;
-        let actual_buy_fee = rounded_shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
-        
+        let actual_buy_fee =
+            rounded_shares * self.config.crypto_fee_rate * entry_price * (1.0 - entry_price);
+
         // Check minimum order size ($1 minimum on Polymarket)
         if actual_position_size < 1.0 {
-            cleanup_and_return!(format!("BELOW_MIN_ORDER_SIZE: ${:.2} < $1 minimum", actual_position_size));
+            cleanup_and_return!(format!(
+                "BELOW_MIN_ORDER_SIZE: ${:.2} < $1 minimum",
+                actual_position_size
+            ));
         }
-        
+
         // For FAK buys, the USDC amount is how much we want to SPEND, not shares × limit_price.
         // We want to spend our position_size worth of USDC at whatever price the book offers.
         // Round to 2 decimals as required by Polymarket API.
         let usdc_amount = (actual_position_size * 100.0).floor() / 100.0;
-        
+
         // Final balance check with actual amounts
         if (actual_position_size + actual_buy_fee) > self.balance {
             cleanup_and_return!("INSUFFICIENT_BALANCE_AFTER_ROUNDING".to_string());
         }
-        
+
         let price = match Decimal::try_from(rounded_price) {
             Ok(p) => p,
             Err(e) => cleanup_and_return!(e.to_string()),
@@ -784,11 +916,21 @@ impl LiveWallet {
         };
 
         // Place REAL market order on Polymarket CLOB - uses ask+buffer to ensure fill
-        let (order_id, filled_shares, filled_usdc) = match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, usdc, Side::Buy).await {
+        let (order_id, filled_shares, filled_usdc) = match Self::post_with_retry(
+            &self.clob,
+            &self.signer,
+            token_id,
+            price,
+            size,
+            usdc,
+            Side::Buy,
+        )
+        .await
+        {
             Ok(result) => result,
             Err(e) => cleanup_and_return!(e),
         };
-        
+
         // Use actual filled amounts (FAK may fill partially)
         let actual_shares: f64 = filled_shares.try_into().unwrap_or(rounded_shares);
         let actual_usdc: f64 = filled_usdc.try_into().unwrap_or(usdc_amount);
@@ -796,11 +938,15 @@ impl LiveWallet {
         // Guard against zero-fill FAK — don't create phantom positions
         // Note: balance has NOT been deducted yet (that happens at line 675), so we just clean up and exit
         if actual_shares <= 0.0 || actual_usdc <= 0.0 {
-            self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
+            self.pending_orders.retain(|p| {
+                !(p.symbol == symbol
+                    && p.direction == direction
+                    && p.submitted_at == pending_marker)
+            });
             warn!(symbol=%symbol, direction=%direction, "FAK got zero fill — no position created");
             return Err("FAK_NO_FILL".to_string());
         }
-        
+
         // Recalculate position size based on actual fill
         let final_position_size = actual_usdc;
         // Compute actual fill price from FAK response (may differ from cached WebSocket price due to book-walking)
@@ -809,24 +955,27 @@ impl LiveWallet {
         // CLOB deducts taker fee from conditional tokens on buys (not from USDC).
         // Polymarket docs: "Buy orders: fees are collected in shares"
         // The FAK response's `taking_amount` is gross (before fee). Calculate net shares.
-        let fee_in_shares = actual_shares * self.config.crypto_fee_rate * (1.0 - actual_entry_price);
+        let fee_in_shares =
+            actual_shares * self.config.crypto_fee_rate * (1.0 - actual_entry_price);
         let estimated_net = actual_shares - fee_in_shares;
 
         // Try to get ACTUAL on-chain balance to use instead of the estimate.
         // Only accept it if it's within 5% of our estimate (rejects stale dust from old trades).
         let net_shares = {
             use polymarket_client_sdk::clob::types::AssetType;
-            let update_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
-                .asset_type(AssetType::Conditional)
-                .token_id(token_id)
-                .build();
+            let update_req =
+                polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                    .asset_type(AssetType::Conditional)
+                    .token_id(token_id)
+                    .build();
             let _ = self.clob.update_balance_allowance(update_req).await;
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-            let query_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
-                .asset_type(AssetType::Conditional)
-                .token_id(token_id)
-                .build();
+            let query_req =
+                polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                    .asset_type(AssetType::Conditional)
+                    .token_id(token_id)
+                    .build();
             match self.clob.balance_allowance(query_req).await {
                 Ok(b) => {
                     let raw: f64 = b.balance.try_into().unwrap_or(0.0);
@@ -855,7 +1004,9 @@ impl LiveWallet {
               filled_usdc=actual_usdc, order_id=%order_id, "Live BUY filled (FAK)");
 
         // Order successfully placed - remove from pending orders
-        self.pending_orders.retain(|p| !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker));
+        self.pending_orders.retain(|p| {
+            !(p.symbol == symbol && p.direction == direction && p.submitted_at == pending_marker)
+        });
 
         // Track order timestamp for rate limiting
         self.order_timestamps.push(std::time::Instant::now());
@@ -865,7 +1016,7 @@ impl LiveWallet {
         // but FAK orders are already Filled/Killed (not "Live"), so tracking them
         // causes sync_from_clob to silently delete the position 200ms later.
         // The pending_order_ids map is only for resting limit orders (GTC).
-        
+
         // Reserve balance with actual filled amounts
         self.balance -= final_position_size + final_buy_fee;
 
@@ -876,7 +1027,7 @@ impl LiveWallet {
             direction: direction.to_string(),
             entry_price: Some(actual_entry_price),
             exit_price: None,
-            shares: net_shares,  // Net shares after CLOB fee deduction
+            shares: net_shares, // Net shares after CLOB fee deduction
             cost: final_position_size,
             pnl: None,
             cumulative_pnl: Some(self.cumulative_pnl),
@@ -900,7 +1051,7 @@ impl LiveWallet {
             direction: direction.to_string(),
             entry_price: actual_entry_price,
             avg_entry_price: actual_entry_price,
-            shares: net_shares,  // Net shares after CLOB fee deduction
+            shares: net_shares, // Net shares after CLOB fee deduction
             position_size: final_position_size,
             buy_fee: final_buy_fee,
             entry_spike: spike,
@@ -923,7 +1074,9 @@ impl LiveWallet {
     }
 
     pub async fn close_position_at(&mut self, idx: usize, _current_price: f64, reason: &str) {
-        if idx >= self.open_positions.len() { return; }
+        if idx >= self.open_positions.len() {
+            return;
+        }
 
         // Validate we CAN sell before removing the position
         let pos = &self.open_positions[idx];
@@ -939,11 +1092,18 @@ impl LiveWallet {
                 self.losses += 1;
                 self.total_fees_paid += pos.buy_fee;
                 self.trade_history.push(TradeRecord {
-                    symbol: pos.symbol.clone(), r#type: "exit".to_string(), question: String::new(),
-                    direction: pos.direction.clone(), entry_price: Some(pos.entry_price),
-                    exit_price: Some(0.0), shares: pos.shares, cost: pos.position_size,
-                    pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
-                    balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
+                    symbol: pos.symbol.clone(),
+                    r#type: "exit".to_string(),
+                    question: String::new(),
+                    direction: pos.direction.clone(),
+                    entry_price: Some(pos.entry_price),
+                    exit_price: Some(0.0),
+                    shares: pos.shares,
+                    cost: pos.position_size,
+                    pnl: Some(pnl),
+                    cumulative_pnl: Some(self.cumulative_pnl),
+                    balance_after: Some(self.balance),
+                    timestamp: chrono::Local::now().to_rfc3339(),
                     close_reason: Some(format!("{}_no_token", reason)),
                     btc_at_entry: Some(pos.entry_btc), price_to_beat_at_entry: None,
                     ptb_margin_at_entry: None, seconds_to_expiry_at_entry: None,
@@ -952,7 +1112,10 @@ impl LiveWallet {
                     ptb_margin_at_exit: None, exit_mode: Some("forced".to_string()),
                     favorable_ptb_at_exit: None,
                 });
-                error!("No token ID for {} {} — recorded loss", pos.symbol, pos.direction);
+                error!(
+                    "No token ID for {} {} — recorded loss",
+                    pos.symbol, pos.direction
+                );
                 return;
             }
         };
@@ -967,12 +1130,12 @@ impl LiveWallet {
         let market_price = if bid > 0.04 {
             (bid - 0.04).max(0.01)
         } else if bid > 0.0 {
-            0.01  // Very low bid — accept anything to exit
+            0.01 // Very low bid — accept anything to exit
         } else {
             0.0
         };
 
-        let can_sell = bid > 0.0 && pos.shares * bid >= 1.0;  // Use bid for min order check
+        let can_sell = bid > 0.0 && pos.shares * bid >= 1.0; // Use bid for min order check
 
         if !can_sell {
             // Can't sell — record exit as loss, restore nothing (shares are on-chain but unsellable)
@@ -984,11 +1147,18 @@ impl LiveWallet {
             self.losses += 1;
             self.total_fees_paid += pos.buy_fee;
             self.trade_history.push(TradeRecord {
-                symbol: pos.symbol.clone(), r#type: "exit".to_string(), question: String::new(),
-                direction: pos.direction.clone(), entry_price: Some(pos.entry_price),
-                exit_price: Some(0.0), shares: pos.shares, cost: pos.position_size,
-                pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
-                balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
+                symbol: pos.symbol.clone(),
+                r#type: "exit".to_string(),
+                question: String::new(),
+                direction: pos.direction.clone(),
+                entry_price: Some(pos.entry_price),
+                exit_price: Some(0.0),
+                shares: pos.shares,
+                cost: pos.position_size,
+                pnl: Some(pnl),
+                cumulative_pnl: Some(self.cumulative_pnl),
+                balance_after: Some(self.balance),
+                timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some(format!("{}_unsellable", reason)),
                 btc_at_entry: Some(pos.entry_btc), price_to_beat_at_entry: None,
                 ptb_margin_at_entry: None, seconds_to_expiry_at_entry: None,
@@ -997,7 +1167,13 @@ impl LiveWallet {
                 ptb_margin_at_exit: None, exit_mode: Some("forced".to_string()),
                 favorable_ptb_at_exit: None,
             });
-            warn!("Position unsellable: {} {} — bid={:.4}, value=${:.2}", pos.symbol, pos.direction, bid, pos.shares * bid);
+            warn!(
+                "Position unsellable: {} {} — bid={:.4}, value=${:.2}",
+                pos.symbol,
+                pos.direction,
+                bid,
+                pos.shares * bid
+            );
             return;
         }
 
@@ -1028,11 +1204,18 @@ impl LiveWallet {
                 self.trade_count += 1;
                 self.losses += 1;
                 self.trade_history.push(TradeRecord {
-                    symbol: pos.symbol.clone(), r#type: "exit".to_string(), question: String::new(),
-                    direction: pos.direction.clone(), entry_price: Some(pos.entry_price),
-                    exit_price: Some(0.0), shares: pos.shares, cost: pos.position_size,
-                    pnl: Some(pnl), cumulative_pnl: Some(self.cumulative_pnl),
-                    balance_after: Some(self.balance), timestamp: chrono::Local::now().to_rfc3339(),
+                    symbol: pos.symbol.clone(),
+                    r#type: "exit".to_string(),
+                    question: String::new(),
+                    direction: pos.direction.clone(),
+                    entry_price: Some(pos.entry_price),
+                    exit_price: Some(0.0),
+                    shares: pos.shares,
+                    cost: pos.position_size,
+                    pnl: Some(pnl),
+                    cumulative_pnl: Some(self.cumulative_pnl),
+                    balance_after: Some(self.balance),
+                    timestamp: chrono::Local::now().to_rfc3339(),
                     close_reason: Some(format!("{}_price_error", reason)),
                     btc_at_entry: Some(pos.entry_btc), price_to_beat_at_entry: None,
                     ptb_margin_at_entry: None, seconds_to_expiry_at_entry: None,
@@ -1062,7 +1245,17 @@ impl LiveWallet {
             };
             let usdc_for_sell = Decimal::ZERO;
 
-            match Self::post_with_retry(&self.clob, &self.signer, token_id, price, size, usdc_for_sell, Side::Sell).await {
+            match Self::post_with_retry(
+                &self.clob,
+                &self.signer,
+                token_id,
+                price,
+                size,
+                usdc_for_sell,
+                Side::Sell,
+            )
+            .await
+            {
                 Ok((id, filled_shares, filled_usdc)) => {
                     let fs: f64 = filled_shares.try_into().unwrap_or(0.0);
                     let fu: f64 = filled_usdc.try_into().unwrap_or(0.0);
@@ -1140,8 +1333,10 @@ impl LiveWallet {
                 }
                 Err(e) => {
                     // Final attempt exhausted — put position back for orphan retry
-                    error!("Sell order failed after all attempts: {} — putting position back ({} {})",
-                           e, pos.symbol, pos.direction);
+                    error!(
+                        "Sell order failed after all attempts: {} — putting position back ({} {})",
+                        e, pos.symbol, pos.direction
+                    );
                     self.open_positions.push(pos);
                     return;
                 }
@@ -1152,13 +1347,17 @@ impl LiveWallet {
             total_filled_usdc
         } else {
             // No fills at all — put position back
-            error!("All sell attempts got zero fills — putting position back ({} {})", pos.symbol, pos.direction);
+            error!(
+                "All sell attempts got zero fills — putting position back ({} {})",
+                pos.symbol, pos.direction
+            );
             self.open_positions.push(pos);
             return;
         };
 
         // If we reach here, the sell succeeded — safe to calculate PnL
-        let sell_fee = pos.shares * self.config.crypto_fee_rate * pos.entry_price * (1.0 - pos.entry_price);
+        let sell_fee =
+            pos.shares * self.config.crypto_fee_rate * pos.entry_price * (1.0 - pos.entry_price);
         let net_revenue = gross_revenue - sell_fee;
         let pnl = net_revenue - (pos.position_size + pos.buy_fee);
 
@@ -1166,7 +1365,11 @@ impl LiveWallet {
         self.cumulative_pnl += pnl;
         self.daily_pnl += pnl;
         self.trade_count += 1;
-        if pnl > 0.0 { self.wins += 1; } else { self.losses += 1; }
+        if pnl > 0.0 {
+            self.wins += 1;
+        } else {
+            self.losses += 1;
+        }
         self.total_fees_paid += pos.buy_fee + sell_fee;
         self.total_volume += pos.position_size + gross_revenue;
 
