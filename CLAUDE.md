@@ -31,7 +31,7 @@ The production dashboard is served from `web/dist` by Axum. Run `npm run build` 
 
 ## Running Modes
 
-- Paper trading: `PAPER_TRADING=true` in `.env`. Uses `PaperWallet`, simulated execution delay, order-book-aware fill estimation, and local state in `paper_wallet_state.json`.
+- Paper trading: `PAPER_TRADING=true` in `.env`. Uses `PaperWallet`, simulated execution delay, order-book-aware fill estimation, and local SQLite state in `lattice.db`.
 - Live trading: `PAPER_TRADING=false`. Requires `POLYMARKET_PRIVATE_KEY`, `POLYGON_RPC_URL`, funded Polygon wallet, and live CLOB access.
 - Multiple instances: use different env files or ports, for example `.env.paper` with `DASHBOARD_PORT=3001`.
 
@@ -90,4 +90,4 @@ Websocket snapshots include portfolio metrics, positions, trades, equity history
 
 ## Security
 
-Never commit `.env`, private keys, RPC secrets, generated `web/dist`, `target`, or `paper_wallet_state.json`. Treat live-trading changes as high risk and explicitly document validation steps.
+Never commit `.env`, private keys, RPC secrets, generated `web/dist`, `target`, or local SQLite files (`lattice.db`, `lattice.db-shm`, `lattice.db-wal`). Treat live-trading changes as high risk and explicitly document validation steps.

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a single Rust binary crate with a React dashboard. Rust source lives in `src/`: `main.rs` wires the async runtime, `arb/` contains the trading engine, `execution/` contains paper and live wallet implementations, `polymarket/` handles market discovery and CLOB data, `rtds/` handles price streams, `server/` serves the dashboard/API, and `config/` loads environment settings. The frontend lives in `web/` and builds into `web/dist`, which Axum serves in production. Runtime state such as `paper_wallet_state.json` is local data, not source.
+This is a single Rust binary crate with a React dashboard. Rust source lives in `src/`: `main.rs` wires the async runtime, `arb/` contains the trading engine, `execution/` contains paper and live wallet implementations, `polymarket/` handles market discovery and CLOB data, `rtds/` handles price streams, `server/` serves the dashboard/API, and `config/` loads environment settings. The frontend lives in `web/` and builds into `web/dist`, which Axum serves in production. Runtime state such as `lattice.db` is local data, not source.
 
 ## Build, Test, and Development Commands
 

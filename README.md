@@ -56,7 +56,7 @@ Important operational constraints:
 - `PAPER_TRADING=true` is the default and should be used for development.
 - `PAPER_TRADING=false` enables real execution.
 - `POLYMARKET_PRIVATE_KEY` must never be committed.
-- Paper state is stored locally in `paper_wallet_state.json`.
+- Paper state is stored locally in `lattice.db` using SQLite.
 - Dashboard settings write to `.env`.
 - The bot currently targets BTC 5-minute Up/Down markets.
 
@@ -337,7 +337,7 @@ Current test coverage is small and focused on config/server invariants. Paper tr
 ## Operational Files
 
 - `.env` contains secrets and runtime config. Do not commit it.
-- `paper_wallet_state.json` is local paper state. Do not commit it.
+- `lattice.db`, `lattice.db-shm`, and `lattice.db-wal` are local paper state. Do not commit them.
 - `web/dist` is generated frontend output. Do not commit it.
 - `target` is Rust build output. Do not commit it.
 
@@ -347,7 +347,7 @@ Current test coverage is small and focused on config/server invariants. Paper tr
 - If Vite cannot reach the backend, make sure `cargo run` is serving on `DASHBOARD_PORT=3000`.
 - If no market appears, the current 5-minute BTC market may not be available from Gamma yet; wait for the next window or check network access.
 - If live approvals fail, verify Polygon gas, `POLYGON_RPC_URL`, wallet type, and private key.
-- If paper state looks stale, stop the bot and remove `paper_wallet_state.json`.
+- If paper state looks stale, stop the bot and remove `lattice.db`, `lattice.db-shm`, and `lattice.db-wal`.
 
 ## License
 

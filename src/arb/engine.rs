@@ -390,7 +390,7 @@ impl ArbEngine {
         info!("Arb Engine V2 running");
 
         // Load saved paper wallet state
-        self.wallet.load_state();
+        self.wallet.load_state().await;
 
         // Push initial portfolio value (just cash)
         self.update_history(self.current_balance());
@@ -420,12 +420,12 @@ impl ArbEngine {
                         Some("stop") => {
                             self.running = false;
                             self.started_at = None;
-                            self.wallet.save_state();
+                            self.wallet.save_state().await;
                             info!("Bot stopped");
                         }
                         Some("reset") => {
                             // Only reset paper wallet, never live
-                            self.wallet.reset();
+                            self.wallet.reset().await;
                             self.signals.clear(); // Clear signal terminal
                             info!("Paper wallet reset");
                         }
@@ -837,7 +837,7 @@ impl ArbEngine {
                     }
                 }
                 _ = save_timer.tick() => {
-                    self.wallet.save_state();
+                    self.wallet.save_state().await;
                 }
                 else => break,
             }

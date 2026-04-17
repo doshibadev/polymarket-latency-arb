@@ -30,6 +30,7 @@ polymarket-client-sdk = { version = "0.4", features = ["clob", "ctf"] }
 k256 = "0.13.4"
 alloy = { version = "1.8.3", features = ["providers", "contract", "sol-types", "network", "signers", "signer-local"] }
 hex = "0.4.3"
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "chrono", "json"] }
 
 [dependencies.tokio-tungstenite]
 version = "0.26"

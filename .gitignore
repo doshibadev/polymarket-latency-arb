@@ -4,6 +4,9 @@ target/
 .vscode
 .idea
 paper_wallet_state.json
+lattice.db
+lattice.db-shm
+lattice.db-wal
 web/node_modules
 web/dist
 web/*.tsbuildinfo
