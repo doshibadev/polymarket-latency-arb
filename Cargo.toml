@@ -3,14 +3,20 @@ name = "lattice-terminal"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+mimalloc = ["dep:mimalloc"]
+
 [profile.dev]
 opt-level = 0
 debug = 0        # skip debug symbols = faster link
 
 [profile.release]
 opt-level = 3
-lto = "thin"     # faster than full LTO, still good optimization
+lto = "fat"
 codegen-units = 1
+panic = "abort"
+strip = true
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -31,6 +37,7 @@ k256 = "0.13.4"
 alloy = { version = "1.8.3", features = ["providers", "contract", "sol-types", "network", "signers", "signer-local"] }
 hex = "0.4.3"
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "chrono", "json"] }
+mimalloc = { version = "0.1", default-features = false, optional = true }
 
 [dependencies.tokio-tungstenite]
 version = "0.29"

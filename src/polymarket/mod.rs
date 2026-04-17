@@ -1,5 +1,5 @@
-pub mod market_data;
 pub mod clob_client;
+pub mod market_data;
 
-pub use market_data::{MarketData, fetch_current_market};
 pub use clob_client::{BookLevel, ClobClient, SharePriceUpdate};
+pub use market_data::{fetch_current_market, MarketData};

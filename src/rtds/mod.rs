@@ -1,3 +1,3 @@
 pub mod stream;
 
-pub use stream::{PriceUpdate, RtdsStream};
+pub use stream::{PriceSource, PriceUpdate, RtdsStream};

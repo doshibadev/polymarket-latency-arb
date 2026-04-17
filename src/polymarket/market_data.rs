@@ -11,6 +11,18 @@ pub struct MarketData {
     pub window_end_ts: u64,
 }
 
+fn gamma_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
 pub async fn fetch_current_market(symbol: &str) -> Option<MarketData> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -27,11 +39,7 @@ pub async fn fetch_current_market(symbol: &str) -> Option<MarketData> {
 
     tracing::info!("Fetching market for {}: {}", symbol, url);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-
+    let client = gamma_client()?;
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
         tracing::error!("API returned status: {}", resp.status());

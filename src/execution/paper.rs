@@ -1,11 +1,14 @@
 use crate::config::AppConfig;
 use crate::polymarket::BookLevel;
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqliteRow};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteRow, SqliteSynchronous,
+};
 use sqlx::{Pool, Row, Sqlite};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 use std::time::Instant;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 /// An open scalp position
@@ -249,11 +252,34 @@ pub struct PaperWallet {
     pub pending_entries: Vec<PendingEntry>,
     pub pending_closes: Vec<PendingClose>,
     pub trade_history: Vec<TradeRecord>,
-    pub history: Vec<HistoryPoint>, // Chart performance data
+    pub history: VecDeque<HistoryPoint>, // Chart performance data
     pub events: Vec<WalletEvent>,
     symbol_states: HashMap<String, SymbolMarketState>,
     config: AppConfig,
     db: Option<Pool<Sqlite>>,
+    db_writer: Option<mpsc::Sender<DbWriteCommand>>,
+    saved_trade_count: usize,
+    saved_history_count: usize,
+}
+
+#[derive(Clone)]
+struct WalletStateSnapshot {
+    balance: f64,
+    starting_balance: f64,
+    trade_count: u64,
+    wins: u64,
+    losses: u64,
+    total_fees_paid: f64,
+    total_volume: f64,
+}
+
+enum DbWriteCommand {
+    Save {
+        wallet: WalletStateSnapshot,
+        trades: Vec<TradeRecord>,
+        history: Vec<HistoryPoint>,
+    },
+    Reset,
 }
 
 impl PaperWallet {
@@ -273,11 +299,14 @@ impl PaperWallet {
             pending_entries: Vec::new(),
             pending_closes: Vec::new(),
             trade_history: Vec::new(),
-            history: Vec::new(),
+            history: VecDeque::new(),
             events: Vec::new(),
             symbol_states: HashMap::new(),
             config,
             db: None,
+            db_writer: None,
+            saved_trade_count: 0,
+            saved_history_count: 0,
         }
     }
 
@@ -286,11 +315,161 @@ impl PaperWallet {
             return Ok(db.clone());
         }
 
-        let options = SqliteConnectOptions::from_str(Self::DB_URL)?.create_if_missing(true);
+        let options = SqliteConnectOptions::from_str(Self::DB_URL)?
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(std::time::Duration::from_secs(5));
         let db = SqlitePool::connect_with(options).await?;
         Self::migrate(&db).await?;
         self.db = Some(db.clone());
+        self.ensure_db_writer(&db);
         Ok(db)
+    }
+
+    fn ensure_db_writer(&mut self, db: &Pool<Sqlite>) {
+        if self.db_writer.is_some() {
+            return;
+        }
+
+        let (tx, mut rx) = mpsc::channel(32);
+        let db = db.clone();
+        tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    DbWriteCommand::Save {
+                        wallet,
+                        trades,
+                        history,
+                    } => {
+                        let mut tx = match db.begin().await {
+                            Ok(tx) => tx,
+                            Err(err) => {
+                                warn!("Failed to start paper wallet save transaction: {err}");
+                                continue;
+                            }
+                        };
+
+                        let save_result = async {
+                            sqlx::query(
+                                r#"
+                                INSERT INTO paper_wallet_state (
+                                    id, balance, starting_balance, trade_count, wins, losses,
+                                    total_fees_paid, total_volume, updated_at
+                                )
+                                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ON CONFLICT(id) DO UPDATE SET
+                                    balance = excluded.balance,
+                                    starting_balance = excluded.starting_balance,
+                                    trade_count = excluded.trade_count,
+                                    wins = excluded.wins,
+                                    losses = excluded.losses,
+                                    total_fees_paid = excluded.total_fees_paid,
+                                    total_volume = excluded.total_volume,
+                                    updated_at = excluded.updated_at
+                                "#,
+                            )
+                            .bind(wallet.balance)
+                            .bind(wallet.starting_balance)
+                            .bind(wallet.trade_count as i64)
+                            .bind(wallet.wins as i64)
+                            .bind(wallet.losses as i64)
+                            .bind(wallet.total_fees_paid)
+                            .bind(wallet.total_volume)
+                            .bind(chrono::Local::now().to_rfc3339())
+                            .execute(&mut *tx)
+                            .await?;
+
+                            for trade in &trades {
+                                sqlx::query(
+                                    r#"
+                                    INSERT INTO paper_trades (
+                                        symbol, type, question, direction, entry_price, exit_price, shares, cost,
+                                        pnl, cumulative_pnl, balance_after, timestamp, close_reason, btc_at_entry,
+                                        price_to_beat_at_entry, ptb_margin_at_entry, seconds_to_expiry_at_entry,
+                                        spread_at_entry, round_trip_loss_pct_at_entry, signal_score,
+                                        ptb_margin_at_exit, exit_mode, favorable_ptb_at_exit, ptb_tier_at_entry,
+                                        ptb_tier_at_exit, entry_mode, exit_suppressed_count
+                                    )
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    "#,
+                                )
+                                .bind(&trade.symbol)
+                                .bind(&trade.r#type)
+                                .bind(&trade.question)
+                                .bind(&trade.direction)
+                                .bind(trade.entry_price)
+                                .bind(trade.exit_price)
+                                .bind(trade.shares)
+                                .bind(trade.cost)
+                                .bind(trade.pnl)
+                                .bind(trade.cumulative_pnl)
+                                .bind(trade.balance_after)
+                                .bind(&trade.timestamp)
+                                .bind(&trade.close_reason)
+                                .bind(trade.btc_at_entry)
+                                .bind(trade.price_to_beat_at_entry)
+                                .bind(trade.ptb_margin_at_entry)
+                                .bind(trade.seconds_to_expiry_at_entry.map(|value| value as i64))
+                                .bind(trade.spread_at_entry)
+                                .bind(trade.round_trip_loss_pct_at_entry)
+                                .bind(trade.signal_score)
+                                .bind(trade.ptb_margin_at_exit)
+                                .bind(&trade.exit_mode)
+                                .bind(trade.favorable_ptb_at_exit.map(i64::from))
+                                .bind(&trade.ptb_tier_at_entry)
+                                .bind(&trade.ptb_tier_at_exit)
+                                .bind(&trade.entry_mode)
+                                .bind(trade.exit_suppressed_count.map(|value| value as i64))
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+
+                            for point in &history {
+                                sqlx::query("INSERT INTO paper_equity_history (t, v) VALUES (?, ?)")
+                                    .bind(&point.t)
+                                    .bind(point.v)
+                                    .execute(&mut *tx)
+                                    .await?;
+                            }
+
+                            std::result::Result::<(), sqlx::Error>::Ok(())
+                        }
+                        .await;
+
+                        match save_result {
+                            Ok(()) => {
+                                if let Err(err) = tx.commit().await {
+                                    warn!("Failed to commit paper wallet state: {err}");
+                                }
+                            }
+                            Err(err) => {
+                                warn!("Failed to save paper wallet state: {err}");
+                                let _ = tx.rollback().await;
+                            }
+                        }
+                    }
+                    DbWriteCommand::Reset => {
+                        let result = async {
+                            sqlx::query("DELETE FROM paper_trades").execute(&db).await?;
+                            sqlx::query("DELETE FROM paper_equity_history")
+                                .execute(&db)
+                                .await?;
+                            sqlx::query("DELETE FROM paper_wallet_state")
+                                .execute(&db)
+                                .await?;
+                            std::result::Result::<(), sqlx::Error>::Ok(())
+                        }
+                        .await;
+
+                        if let Err(err) = result {
+                            warn!("Failed to clear paper wallet database: {err}");
+                        }
+                    }
+                }
+            }
+        });
+        self.db_writer = Some(tx);
     }
 
     async fn migrate(db: &Pool<Sqlite>) -> std::result::Result<(), sqlx::Error> {
@@ -464,22 +643,27 @@ impl PaperWallet {
         {
             Ok(rows) => {
                 self.trade_history = rows.iter().map(Self::trade_from_row).collect();
+                self.saved_trade_count = self.trade_history.len();
             }
             Err(err) => warn!("Failed to load paper trade history: {err}"),
         }
 
-        match sqlx::query("SELECT t, v FROM paper_equity_history ORDER BY id ASC")
+        match sqlx::query(
+            "SELECT t, v FROM paper_equity_history ORDER BY id DESC LIMIT 1000",
+        )
             .fetch_all(&db)
             .await
         {
             Ok(rows) => {
                 self.history = rows
                     .iter()
+                    .rev()
                     .map(|row| HistoryPoint {
                         t: row.get("t"),
                         v: row.get("v"),
                     })
                     .collect();
+                self.saved_history_count = self.history.len();
             }
             Err(err) => warn!("Failed to load paper equity history: {err}"),
         }
@@ -497,124 +681,46 @@ impl PaperWallet {
             return; // Never save state for live trading
         }
 
-        let db = match self.db().await {
-            Ok(db) => db,
+        match self.db().await {
+            Ok(_) => {}
             Err(err) => {
                 warn!("Failed to open paper wallet database for save: {err}");
                 return;
             }
-        };
-
-        let mut tx = match db.begin().await {
-            Ok(tx) => tx,
-            Err(err) => {
-                warn!("Failed to start paper wallet save transaction: {err}");
-                return;
-            }
-        };
-
-        let save_result = async {
-            sqlx::query("DELETE FROM paper_trades")
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM paper_equity_history")
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query(
-                r#"
-                INSERT INTO paper_wallet_state (
-                    id, balance, starting_balance, trade_count, wins, losses,
-                    total_fees_paid, total_volume, updated_at
-                )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    balance = excluded.balance,
-                    starting_balance = excluded.starting_balance,
-                    trade_count = excluded.trade_count,
-                    wins = excluded.wins,
-                    losses = excluded.losses,
-                    total_fees_paid = excluded.total_fees_paid,
-                    total_volume = excluded.total_volume,
-                    updated_at = excluded.updated_at
-                "#,
-            )
-            .bind(self.balance)
-            .bind(self.starting_balance)
-            .bind(self.trade_count as i64)
-            .bind(self.wins as i64)
-            .bind(self.losses as i64)
-            .bind(self.total_fees_paid)
-            .bind(self.total_volume)
-            .bind(chrono::Local::now().to_rfc3339())
-            .execute(&mut *tx)
-            .await?;
-
-            for trade in &self.trade_history {
-                sqlx::query(
-                    r#"
-                    INSERT INTO paper_trades (
-                        symbol, type, question, direction, entry_price, exit_price, shares, cost,
-                        pnl, cumulative_pnl, balance_after, timestamp, close_reason, btc_at_entry,
-                        price_to_beat_at_entry, ptb_margin_at_entry, seconds_to_expiry_at_entry,
-                        spread_at_entry, round_trip_loss_pct_at_entry, signal_score,
-                        ptb_margin_at_exit, exit_mode, favorable_ptb_at_exit, ptb_tier_at_entry,
-                        ptb_tier_at_exit, entry_mode, exit_suppressed_count
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    "#,
-                )
-                .bind(&trade.symbol)
-                .bind(&trade.r#type)
-                .bind(&trade.question)
-                .bind(&trade.direction)
-                .bind(trade.entry_price)
-                .bind(trade.exit_price)
-                .bind(trade.shares)
-                .bind(trade.cost)
-                .bind(trade.pnl)
-                .bind(trade.cumulative_pnl)
-                .bind(trade.balance_after)
-                .bind(&trade.timestamp)
-                .bind(&trade.close_reason)
-                .bind(trade.btc_at_entry)
-                .bind(trade.price_to_beat_at_entry)
-                .bind(trade.ptb_margin_at_entry)
-                .bind(trade.seconds_to_expiry_at_entry.map(|value| value as i64))
-                .bind(trade.spread_at_entry)
-                .bind(trade.round_trip_loss_pct_at_entry)
-                .bind(trade.signal_score)
-                .bind(trade.ptb_margin_at_exit)
-                .bind(&trade.exit_mode)
-                .bind(trade.favorable_ptb_at_exit.map(i64::from))
-                .bind(&trade.ptb_tier_at_entry)
-                .bind(&trade.ptb_tier_at_exit)
-                .bind(&trade.entry_mode)
-                .bind(trade.exit_suppressed_count.map(|value| value as i64))
-                .execute(&mut *tx)
-                .await?;
-            }
-
-            for point in &self.history {
-                sqlx::query("INSERT INTO paper_equity_history (t, v) VALUES (?, ?)")
-                    .bind(&point.t)
-                    .bind(point.v)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-
-            std::result::Result::<(), sqlx::Error>::Ok(())
         }
-        .await;
 
-        match save_result {
-            Ok(()) => {
-                if let Err(err) = tx.commit().await {
-                    warn!("Failed to commit paper wallet state: {err}");
+        let wallet = WalletStateSnapshot {
+            balance: self.balance,
+            starting_balance: self.starting_balance,
+            trade_count: self.trade_count,
+            wins: self.wins,
+            losses: self.losses,
+            total_fees_paid: self.total_fees_paid,
+            total_volume: self.total_volume,
+        };
+        let new_trades = self.trade_history[self.saved_trade_count..].to_vec();
+        let new_history = self.history.iter().skip(self.saved_history_count).cloned().collect();
+
+        if let Some(writer) = &self.db_writer {
+            match writer.try_send(DbWriteCommand::Save {
+                wallet,
+                trades: new_trades.clone(),
+                history: new_history,
+            }) {
+                Ok(()) => {
+                    self.saved_trade_count = self.trade_history.len();
+                    self.saved_history_count = self.history.len();
                 }
-            }
-            Err(err) => {
-                warn!("Failed to save paper wallet state: {err}");
-                let _ = tx.rollback().await;
+                Err(mpsc::error::TrySendError::Full(_)) if new_trades.is_empty() => {
+                    self.saved_history_count = self.history.len();
+                    warn!("Paper DB writer backed up, dropped nonessential equity history points");
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!("Paper DB writer backed up, retaining unsaved trades for retry");
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    warn!("Failed to queue paper wallet save: DB writer closed");
+                }
             }
         }
     }
@@ -635,24 +741,16 @@ impl PaperWallet {
         self.history.clear(); // Clear chart data
         self.events.clear();
         self.symbol_states.clear();
+        self.saved_trade_count = 0;
+        self.saved_history_count = 0;
 
         if self.config.paper_trading {
             match self.db().await {
-                Ok(db) => {
-                    let result = async {
-                        sqlx::query("DELETE FROM paper_trades").execute(&db).await?;
-                        sqlx::query("DELETE FROM paper_equity_history")
-                            .execute(&db)
-                            .await?;
-                        sqlx::query("DELETE FROM paper_wallet_state")
-                            .execute(&db)
-                            .await?;
-                        std::result::Result::<(), sqlx::Error>::Ok(())
-                    }
-                    .await;
-
-                    if let Err(err) = result {
-                        warn!("Failed to clear paper wallet database: {err}");
+                Ok(_) => {
+                    if let Some(writer) = &self.db_writer {
+                        if let Err(err) = writer.send(DbWriteCommand::Reset).await {
+                            warn!("Failed to queue paper wallet reset: {err}");
+                        }
                     }
                 }
                 Err(err) => warn!("Failed to open paper wallet database for reset: {err}"),
@@ -674,10 +772,10 @@ impl PaperWallet {
     /// Add a point to the performance history chart
     pub fn push_history(&mut self, value: f64) {
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.history.push(HistoryPoint { t: now, v: value });
+        self.history.push_back(HistoryPoint { t: now, v: value });
         // Keep last 1000 points (about 3 minutes at 200ms intervals)
         if self.history.len() > 1000 {
-            self.history.remove(0);
+            self.history.pop_front();
         }
     }
 
@@ -811,7 +909,7 @@ impl PaperWallet {
     pub fn update_hold_status(
         &mut self,
         symbol: &str,
-        btc_history: &[f64],
+        btc_history: &VecDeque<(f64, Instant)>,
         current_chainlink: f64,
         price_to_beat: Option<f64>,
         end_ts: Option<u64>,
@@ -837,8 +935,8 @@ impl PaperWallet {
         let current_btc = if current_chainlink > 0.0 {
             current_chainlink
         } else {
-            match btc_history.last() {
-                Some(&p) => p,
+            match btc_history.back() {
+                Some((p, _)) => *p,
                 None => return,
             }
         };
@@ -867,14 +965,18 @@ impl PaperWallet {
             }
 
             // Count crossings in btc_history
-            let crossings = btc_history
-                .windows(2)
-                .filter(|w| {
-                    let was_above = w[0] > ptb;
-                    let is_above = w[1] > ptb;
-                    was_above != is_above
-                })
-                .count();
+            let mut crossings = 0usize;
+            let mut iter = btc_history.iter().map(|(price, _)| *price);
+            if let Some(mut previous) = iter.next() {
+                for current in iter {
+                    let was_above = previous > ptb;
+                    let is_above = current > ptb;
+                    if was_above != is_above {
+                        crossings += 1;
+                    }
+                    previous = current;
+                }
+            }
 
             if crossings > hold_max_crossings {
                 pos.hold_to_resolution = false;
@@ -883,12 +985,20 @@ impl PaperWallet {
 
             // Check trend: BTC must be consistently on correct side AND accelerating away from ptb
             let trend_ok = if btc_history.len() >= 10 {
-                let recent = &btc_history[btc_history.len() - 10..];
+                let recent: Vec<f64> = btc_history
+                    .iter()
+                    .rev()
+                    .take(10)
+                    .map(|(price, _)| *price)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
                 // All recent ticks must be on the correct side of price-to-beat
                 let all_correct_side = if pos.direction == "UP" {
-                    recent.iter().all(|&p| p > ptb)
+                    recent.iter().all(|p| *p > ptb)
                 } else {
-                    recent.iter().all(|&p| p < ptb)
+                    recent.iter().all(|p| *p < ptb)
                 };
                 // Trend must be moving away from price-to-beat (not just sideways)
                 let slope = recent.last().unwrap() - recent.first().unwrap();
@@ -929,17 +1039,16 @@ impl PaperWallet {
         }
     }
 
-    fn get_book(&self, symbol: &str, direction: &str) -> (Vec<BookLevel>, Vec<BookLevel>) {
+    fn get_book(&self, symbol: &str, direction: &str) -> Option<(&[BookLevel], &[BookLevel])> {
         self.symbol_states
             .get(symbol)
             .map(|state| {
                 if direction == "UP" {
-                    (state.up_bids.clone(), state.up_asks.clone())
+                    (state.up_bids.as_slice(), state.up_asks.as_slice())
                 } else {
-                    (state.down_bids.clone(), state.down_asks.clone())
+                    (state.down_bids.as_slice(), state.down_asks.as_slice())
                 }
             })
-            .unwrap_or_default()
     }
 
     pub fn estimate_fak_buy(
@@ -949,15 +1058,13 @@ impl PaperWallet {
         usdc_budget: f64,
         limit_price: f64,
     ) -> Option<(f64, f64, f64)> {
-        let (_bids, mut asks) = self.get_book(symbol, direction);
+        let asks = match self.get_book(symbol, direction) {
+            Some((_bids, asks)) if !asks.is_empty() => asks,
+            _ => return None,
+        };
         if asks.is_empty() {
             return None;
         }
-        asks.sort_by(|a, b| {
-            a.price
-                .partial_cmp(&b.price)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
         let mut remaining = usdc_budget;
         let mut shares = 0.0;
         let mut spent = 0.0;
@@ -987,15 +1094,13 @@ impl PaperWallet {
         shares_to_sell: f64,
         limit_price: f64,
     ) -> Option<(f64, f64, f64)> {
-        let (mut bids, _asks) = self.get_book(symbol, direction);
+        let bids = match self.get_book(symbol, direction) {
+            Some((bids, _asks)) if !bids.is_empty() => bids,
+            _ => return None,
+        };
         if bids.is_empty() {
             return None;
         }
-        bids.sort_by(|a, b| {
-            b.price
-                .partial_cmp(&a.price)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
         let mut remaining = shares_to_sell;
         let mut sold = 0.0;
         let mut gross = 0.0;

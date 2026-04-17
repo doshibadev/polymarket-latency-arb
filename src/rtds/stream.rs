@@ -2,7 +2,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::time::Instant;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -17,21 +17,61 @@ struct RtdsPayload {
     value: f64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct BinanceTradeMessage {
+    #[serde(rename = "p")]
+    price: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BinanceBookTickerMessage {
+    #[serde(rename = "b")]
+    best_bid: String,
+    #[serde(rename = "a")]
+    best_ask: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BinanceCombinedStreamMessage {
+    stream: String,
+    data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceSource {
+    Binance,
+    Chainlink,
+}
+
 #[derive(Debug, Clone)]
 pub struct PriceUpdate {
-    pub symbol: String, // "BTC", "ETH", "SOL"
+    pub symbol: &'static str, // "BTC", "ETH", "SOL"
     pub price: f64,
     pub timestamp: Instant,
-    pub source: String, // "binance" or "chainlink"
+    pub source: PriceSource,
+}
+
+fn emit_price(
+    tx: &mpsc::Sender<PriceUpdate>,
+    symbol: &'static str,
+    price: f64,
+    source: PriceSource,
+) {
+    let _ = tx.try_send(PriceUpdate {
+        symbol,
+        price,
+        timestamp: Instant::now(),
+        source,
+    });
 }
 
 /// Direct Binance WebSocket for low-latency BTC price (~10ms updates vs RTDS relay ~50ms)
 async fn run_binance_direct(
     tx: mpsc::Sender<PriceUpdate>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let url = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade";
+    let url = "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@bookTicker";
     loop {
-        match connect_async(url).await {
+        match connect_async_tls_with_config(url, None, true, None).await {
             Ok((ws_stream, _)) => {
                 info!("Direct Binance WebSocket connected");
                 let (mut write, mut read) = ws_stream.split();
@@ -41,15 +81,21 @@ async fn run_binance_direct(
                         msg = read.next() => {
                             match msg {
                                 Some(Ok(Message::Text(text))) => {
-                                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                                        if let Some(price_str) = val.get("p").and_then(|v| v.as_str()) {
-                                            if let Ok(price) = price_str.parse::<f64>() {
-                                                let _ = tx.send(PriceUpdate {
-                                                    symbol: "BTC".to_string(),
-                                                    price,
-                                                    timestamp: Instant::now(),
-                                                    source: "binance".to_string(),
-                                                }).await;
+                                    if let Ok(msg) = serde_json::from_str::<BinanceCombinedStreamMessage>(&text) {
+                                        if msg.stream.ends_with("@trade") {
+                                            if let Ok(trade) = serde_json::from_value::<BinanceTradeMessage>(msg.data) {
+                                                if let Ok(price) = trade.price.parse::<f64>() {
+                                                    emit_price(&tx, "BTC", price, PriceSource::Binance);
+                                                }
+                                            }
+                                        } else if msg.stream.ends_with("@bookTicker") {
+                                            if let Ok(book) = serde_json::from_value::<BinanceBookTickerMessage>(msg.data) {
+                                                if let (Ok(best_bid), Ok(best_ask)) = (
+                                                    book.best_bid.parse::<f64>(),
+                                                    book.best_ask.parse::<f64>(),
+                                                ) {
+                                                    emit_price(&tx, "BTC", (best_bid + best_ask) / 2.0, PriceSource::Binance);
+                                                }
                                             }
                                         }
                                     }
@@ -118,7 +164,7 @@ impl RtdsStream {
         url: &str,
         tx: &mpsc::Sender<PriceUpdate>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let (mut ws_stream, _) = connect_async(url).await?;
+        let (mut ws_stream, _) = connect_async_tls_with_config(url, None, true, None).await?;
 
         // Binance subscriptions
         let binance_sub = serde_json::json!({
@@ -157,14 +203,13 @@ impl RtdsStream {
                                     _ => continue,
                                 };
 
-                                let source = if msg.topic == "crypto_prices" { "binance" } else { "chainlink" };
+                                let source = if msg.topic == "crypto_prices" {
+                                    PriceSource::Binance
+                                } else {
+                                    PriceSource::Chainlink
+                                };
 
-                                let _ = tx.send(PriceUpdate {
-                                    symbol: symbol.to_string(),
-                                    price: msg.payload.value,
-                                    timestamp: Instant::now(),
-                                    source: source.to_string(),
-                                }).await;
+                                emit_price(tx, symbol, msg.payload.value, source);
                             }
                         }
                         Some(Ok(Message::Close(_))) => break,

@@ -3,18 +3,20 @@ use std::str::FromStr;
 use std::time::Instant;
 
 use alloy::primitives::U256 as AlloyU256;
-use alloy::providers::ProviderBuilder;
+use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::sol;
-use chrono::Datelike;
+use chrono::{Datelike, SecondsFormat};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer as _};
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use polymarket_client_sdk::clob::{Client, Config};
+use polymarket_client_sdk::ctf::Client as CtfClient;
 use polymarket_client_sdk::types::{address, Address, Decimal, U256};
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
 use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
+use crate::execution::actor::LiveWalletSnapshot;
 use crate::execution::paper::{OpenPosition, TradeRecord};
 
 // Polygon mainnet contract addresses (from Polymarket docs + reference bot)
@@ -43,6 +45,44 @@ sol! {
 
 type K256Signer = LocalSigner<k256::ecdsa::SigningKey>;
 type AuthClient = Client<Authenticated<Normal>>;
+type RedeemClient = CtfClient<DynProvider>;
+
+#[derive(Clone, Copy)]
+enum RetryMode {
+    Entry,
+    Exit,
+}
+
+impl RetryMode {
+    fn max_attempts(self) -> u32 {
+        match self {
+            Self::Entry => 2,
+            Self::Exit => 3,
+        }
+    }
+
+    fn backoff_ms(self, attempt: u32) -> u64 {
+        match self {
+            Self::Entry => 100 * (attempt + 1) as u64,
+            Self::Exit => 200 * (attempt + 1) as u64,
+        }
+    }
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+async fn connect_redeem_client(
+    signer: &K256Signer,
+) -> Result<RedeemClient, Box<dyn std::error::Error + Send + Sync>> {
+    let provider = ProviderBuilder::new()
+        .wallet(signer.clone())
+        .connect(&rpc_url())
+        .await?
+        .erased();
+    Ok(CtfClient::new(provider, POLYGON)?)
+}
 
 /// Check and set required on-chain approvals — view calls are FREE (no gas)
 /// Only approve() and setApprovalForAll() cost gas, and only on first run
@@ -57,7 +97,6 @@ pub async fn ensure_approvals(
     let owner = signer.address();
 
     // Check POL balance first — write txs need gas
-    use alloy::providers::Provider;
     let pol_balance = provider.get_balance(owner).await.unwrap_or_default();
     let pol_f64 = pol_balance.to::<u128>() as f64 / 1e18;
     if pol_f64 < 0.001 {
@@ -156,6 +195,7 @@ pub struct LiveWallet {
     pending_orders: Vec<PendingOrder>, // Track in-flight orders to prevent race conditions
     price_cache: HashMap<String, SymbolPriceCache>, // Cache WebSocket prices (matches paper.rs)
     zero_balance_flags: HashMap<String, Instant>, // "symbol:direction" -> first zero-balance detection time
+    redeem_client: Option<RedeemClient>,
 }
 
 impl LiveWallet {
@@ -213,6 +253,8 @@ impl LiveWallet {
             }
         };
 
+        let redeem_client = connect_redeem_client(&signer).await.ok();
+
         Ok(Self {
             balance,
             starting_balance: balance,
@@ -236,11 +278,28 @@ impl LiveWallet {
             pending_orders: Vec::new(),
             price_cache: HashMap::new(),
             zero_balance_flags: HashMap::new(),
+            redeem_client,
         })
     }
 
     pub async fn ensure_approvals(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ensure_approvals(&self.signer).await
+    }
+
+    pub fn snapshot(&self) -> LiveWalletSnapshot {
+        LiveWalletSnapshot {
+            balance: self.balance,
+            starting_balance: self.starting_balance,
+            wins: self.wins,
+            losses: self.losses,
+            total_fees_paid: self.total_fees_paid,
+            total_volume: self.total_volume,
+            open_positions: self.open_positions.clone(),
+            trade_history: self.trade_history.clone(),
+            wallet_address: self.wallet_address.clone(),
+            cumulative_pnl: self.cumulative_pnl,
+            daily_pnl: self.daily_pnl,
+        }
     }
 
     /// Sync real balance + validate open positions against CLOB
@@ -384,7 +443,7 @@ impl LiveWallet {
                 pnl: Some(pnl),
                 cumulative_pnl: Some(self.cumulative_pnl),
                 balance_after: Some(self.balance),
-                timestamp: chrono::Local::now().to_rfc3339(),
+                timestamp: now_rfc3339(),
                 close_reason: Some("external_close".to_string()),
                 btc_at_entry: Some(pos.entry_btc),
                 price_to_beat_at_entry: None,
@@ -413,30 +472,19 @@ impl LiveWallet {
     }
 
     /// Auto-redeem winning tokens after market resolution (on-chain tx, costs gas)
-    pub async fn redeem_resolved_positions(&self, condition_id: &str) {
+    pub async fn redeem_resolved_positions(&mut self, condition_id: &str) {
         use alloy::primitives::B256;
         use polymarket_client_sdk::ctf::types::RedeemPositionsRequest;
-        use polymarket_client_sdk::ctf::Client as CtfClient;
 
-        let provider = match ProviderBuilder::new()
-            .wallet(self.signer.clone())
-            .connect(&rpc_url())
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                error!("RPC connect failed for redeem: {}", e);
-                return;
-            }
-        };
-
-        let ctf_client = match CtfClient::new(provider, POLYGON) {
-            Ok(c) => c,
-            Err(e) => {
-                error!("CTF client init failed: {}", e);
-                return;
-            }
-        };
+        if self.redeem_client.is_none() {
+            self.redeem_client = match connect_redeem_client(&self.signer).await {
+                Ok(client) => Some(client),
+                Err(e) => {
+                    error!("Redeem client init failed: {}", e);
+                    return;
+                }
+            };
+        }
 
         let condition_id_bytes = match B256::from_str(condition_id) {
             Ok(b) => b,
@@ -454,11 +502,19 @@ impl LiveWallet {
             .index_sets(vec![AlloyU256::from(1), AlloyU256::from(2)])
             .build();
 
+        let Some(ctf_client) = self.redeem_client.as_ref() else {
+            error!("Redeem client missing after init");
+            return;
+        };
+
         match ctf_client.redeem_positions(&request).await {
             Ok(r) => {
                 info!(condition_id=%condition_id, tx=%r.transaction_hash, "Positions redeemed")
             }
-            Err(e) => error!(condition_id=%condition_id, error=%e, "Redeem failed"),
+            Err(e) => {
+                self.redeem_client = None;
+                error!(condition_id=%condition_id, error=%e, "Redeem failed")
+            }
         }
     }
 
@@ -553,6 +609,65 @@ impl LiveWallet {
         }
     }
 
+    pub async fn verify_position_balance(&mut self, symbol: &str, direction: &str) {
+        use polymarket_client_sdk::clob::types::AssetType;
+
+        let Some(token_id) = self.get_token_id(symbol, direction) else {
+            return;
+        };
+
+        let update_req =
+            polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                .asset_type(AssetType::Conditional)
+                .token_id(token_id.clone())
+                .build();
+        let _ = self.clob.update_balance_allowance(update_req).await;
+
+        let query_req =
+            polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
+                .asset_type(AssetType::Conditional)
+                .token_id(token_id)
+                .build();
+
+        let Ok(balance) = self.clob.balance_allowance(query_req).await else {
+            return;
+        };
+
+        let raw: f64 = balance.balance.try_into().unwrap_or(0.0);
+        let on_chain = raw / 1_000_000.0;
+        if on_chain <= 0.0 {
+            return;
+        }
+
+        if let Some(pos) = self
+            .open_positions
+            .iter_mut()
+            .rev()
+            .find(|pos| pos.symbol == symbol && pos.direction == direction)
+        {
+            let estimated = pos.shares;
+            if on_chain > estimated * 0.95 && on_chain < estimated * 1.05 {
+                pos.shares = on_chain;
+                pos.on_chain_shares = Some(on_chain);
+
+                if let Some(trade) = self.trade_history.iter_mut().rev().find(|trade| {
+                    trade.r#type == "entry"
+                        && trade.symbol == symbol
+                        && trade.direction == direction
+                        && trade.exit_price.is_none()
+                }) {
+                    trade.shares = on_chain;
+                }
+
+                info!(symbol=%symbol, direction=%direction, estimated, on_chain,
+                      "Async share-balance verification confirmed live fill");
+            } else {
+                info!(symbol=%symbol, direction=%direction, estimated, on_chain,
+                      "Async share-balance verification mismatch, keeping estimated fill");
+            }
+        }
+    }
+
     fn get_token_id(&self, symbol: &str, direction: &str) -> Option<U256> {
         self.token_map
             .iter()
@@ -576,10 +691,12 @@ impl LiveWallet {
         shares: Decimal,
         usdc: Decimal,
         side: Side,
+        retry_mode: RetryMode,
     ) -> Result<(String, Decimal, Decimal), String> {
         // Returns (order_id, filled_shares, filled_usdc)
         use polymarket_client_sdk::clob::types::Amount;
-        for attempt in 0..3u32 {
+        let max_attempts = retry_mode.max_attempts();
+        for attempt in 0..max_attempts {
             // For market orders:
             // - BUY: amount is USDC to spend (pre-rounded to 2 decimals for FOK)
             // - SELL: amount is shares to sell
@@ -634,11 +751,11 @@ impl LiveWallet {
                             format!("Order failed: success={}, status={:?}", r.success, r.status)
                         });
                     warn!(attempt=attempt+1, error=%msg, "Order attempt failed");
-                    if attempt == 2 {
+                    if attempt + 1 >= max_attempts {
                         return Err(msg);
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(
-                        200 * (attempt + 1) as u64,
+                        retry_mode.backoff_ms(attempt),
                     ))
                     .await;
                 }
@@ -655,11 +772,11 @@ impl LiveWallet {
                         return Err(msg);
                     }
                     warn!(attempt=attempt+1, error=%msg, "Order network error");
-                    if attempt == 2 {
+                    if attempt + 1 >= max_attempts {
                         return Err(msg);
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(
-                        200 * (attempt + 1) as u64,
+                        retry_mode.backoff_ms(attempt),
                     ))
                     .await;
                 }
@@ -924,6 +1041,7 @@ impl LiveWallet {
             size,
             usdc,
             Side::Buy,
+            RetryMode::Entry,
         )
         .await
         {
@@ -961,40 +1079,7 @@ impl LiveWallet {
 
         // Try to get ACTUAL on-chain balance to use instead of the estimate.
         // Only accept it if it's within 5% of our estimate (rejects stale dust from old trades).
-        let net_shares = {
-            use polymarket_client_sdk::clob::types::AssetType;
-            let update_req =
-                polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
-                    .asset_type(AssetType::Conditional)
-                    .token_id(token_id)
-                    .build();
-            let _ = self.clob.update_balance_allowance(update_req).await;
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-            let query_req =
-                polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
-                    .asset_type(AssetType::Conditional)
-                    .token_id(token_id)
-                    .build();
-            match self.clob.balance_allowance(query_req).await {
-                Ok(b) => {
-                    let raw: f64 = b.balance.try_into().unwrap_or(0.0);
-                    let on_chain = raw / 1_000_000.0;
-                    // Sanity check: on-chain must be within 5% of our fee estimate
-                    // This rejects stale dust from previous trades
-                    if on_chain > estimated_net * 0.95 && on_chain < estimated_net * 1.05 {
-                        info!(symbol=%symbol, estimated=estimated_net, on_chain=on_chain,
-                              "Using verified on-chain balance as net shares");
-                        on_chain
-                    } else {
-                        info!(symbol=%symbol, estimated=estimated_net, on_chain=on_chain,
-                              "On-chain balance doesn't match estimate, using fee formula");
-                        estimated_net
-                    }
-                }
-                Err(_) => estimated_net,
-            }
-        };
+        let net_shares = estimated_net;
 
         // Fee already absorbed into fewer shares — don't double-count in USDC accounting
         let final_buy_fee = 0.0;
@@ -1032,7 +1117,7 @@ impl LiveWallet {
             pnl: None,
             cumulative_pnl: Some(self.cumulative_pnl),
             balance_after: Some(self.balance),
-            timestamp: chrono::Local::now().to_rfc3339(),
+            timestamp: now_rfc3339(),
             close_reason: None,
             btc_at_entry: Some(current_btc),
             price_to_beat_at_entry: None,
@@ -1071,7 +1156,7 @@ impl LiveWallet {
             spike_faded_since: None,
             trend_reversed_since: None,
             trailing_stop_activated: false,
-            on_chain_shares: None, // Set later by sync_from_clob with actual on-chain balance
+            on_chain_shares: None, // Async verification updates this after the realism delay
             ptb_tier_at_entry: None,
             entry_mode: Some(if allow_scaling { "ptb_hold" } else { "scalp" }.to_string()),
             exit_suppressed_count: 0,
@@ -1110,7 +1195,7 @@ impl LiveWallet {
                     pnl: Some(pnl),
                     cumulative_pnl: Some(self.cumulative_pnl),
                     balance_after: Some(self.balance),
-                    timestamp: chrono::Local::now().to_rfc3339(),
+                    timestamp: now_rfc3339(),
                     close_reason: Some(format!("{}_no_token", reason)),
                     btc_at_entry: Some(pos.entry_btc),
                     price_to_beat_at_entry: None,
@@ -1173,7 +1258,7 @@ impl LiveWallet {
                 pnl: Some(pnl),
                 cumulative_pnl: Some(self.cumulative_pnl),
                 balance_after: Some(self.balance),
-                timestamp: chrono::Local::now().to_rfc3339(),
+                timestamp: now_rfc3339(),
                 close_reason: Some(format!("{}_unsellable", reason)),
                 btc_at_entry: Some(pos.entry_btc),
                 price_to_beat_at_entry: None,
@@ -1238,7 +1323,7 @@ impl LiveWallet {
                     pnl: Some(pnl),
                     cumulative_pnl: Some(self.cumulative_pnl),
                     balance_after: Some(self.balance),
-                    timestamp: chrono::Local::now().to_rfc3339(),
+                    timestamp: now_rfc3339(),
                     close_reason: Some(format!("{}_price_error", reason)),
                     btc_at_entry: Some(pos.entry_btc),
                     price_to_beat_at_entry: None,
@@ -1284,6 +1369,7 @@ impl LiveWallet {
                 size,
                 usdc_for_sell,
                 Side::Sell,
+                RetryMode::Exit,
             )
             .await
             {
@@ -1416,7 +1502,7 @@ impl LiveWallet {
             pnl: Some(pnl),
             cumulative_pnl: Some(self.cumulative_pnl),
             balance_after: Some(self.balance),
-            timestamp: chrono::Local::now().to_rfc3339(),
+            timestamp: now_rfc3339(),
             close_reason: Some(reason.to_string()),
             btc_at_entry: Some(pos.entry_btc),
             price_to_beat_at_entry: None,

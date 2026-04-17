@@ -6,8 +6,13 @@ pub mod polymarket;
 pub mod rtds;
 pub mod server;
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use arb::ArbEngine;
 use config::AppConfig;
+use execution::spawn_live_execution;
 use polymarket::{fetch_current_market, ClobClient};
 use tokio::sync::{broadcast, mpsc};
 use tracing_subscriber::EnvFilter;
@@ -84,7 +89,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("LIVE TRADING MODE — initializing live wallet...");
         match execution::LiveWallet::new(config).await {
             Ok(lw) => {
-                engine.live_wallet = Some(lw);
+                let (handle, live_event_rx) = spawn_live_execution(lw);
+                engine.live_execution = Some(handle);
+                engine.live_event_rx = Some(live_event_rx);
                 tracing::info!("Live wallet ready");
             }
             Err(e) => {

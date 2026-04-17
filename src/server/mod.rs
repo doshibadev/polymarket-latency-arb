@@ -125,6 +125,8 @@ pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serd
 
         Router::new()
             .route("/ws", get(ws_handler))
+            .route("/ws/fast", get(ws_fast_handler))
+            .route("/ws/slow", get(ws_slow_handler))
             .route("/config", get(get_config))
             .route("/settings", post(update_settings))
             .route("/command", post(send_command))
@@ -142,6 +144,8 @@ pub async fn run_server(tx: broadcast::Sender<String>, cmd_tx: mpsc::Sender<serd
         Router::new()
             .route("/", get(frontend_setup_page))
             .route("/ws", get(ws_handler))
+            .route("/ws/fast", get(ws_fast_handler))
+            .route("/ws/slow", get(ws_slow_handler))
             .route("/config", get(get_config))
             .route("/settings", post(update_settings))
             .route("/command", post(send_command))
@@ -282,10 +286,24 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+    ws.on_upgrade(|socket| handle_socket(socket, state, None))
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
+async fn ws_fast_handler(
+    ws: WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_socket(socket, state, Some("fast")))
+}
+
+async fn ws_slow_handler(
+    ws: WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_socket(socket, state, Some("slow")))
+}
+
+async fn handle_socket(socket: WebSocket, state: Arc<ServerState>, kind_filter: Option<&'static str>) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.tx.subscribe();
 
@@ -297,6 +315,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
             broadcast_msg = rx.recv() => {
                 match broadcast_msg {
                     Ok(msg) => {
+                        if let Some(kind) = kind_filter {
+                            let expected = format!("\"_kind\":\"{kind}\"");
+                            if !msg.contains(&expected) {
+                                continue;
+                            }
+                        }
                         debug!("Sending state to dashboard ({} bytes)", msg.len());
                         if let Err(_) = sender.send(Message::Text(msg.into())).await {
                             // Standard disconnect, no need to log as ERROR

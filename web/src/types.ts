@@ -113,6 +113,18 @@ export type TerminalSnapshot = {
   config: Config;
 };
 
+export type FastSnapshotMessage = {
+  _kind: "fast";
+  snapshot: Partial<Omit<TerminalSnapshot, "trades" | "history" | "config" | "wallet_address">>;
+};
+
+export type SlowSnapshotMessage = {
+  _kind: "slow";
+  snapshot: Pick<TerminalSnapshot, "trades" | "history" | "config" | "wallet_address">;
+};
+
+export type SnapshotMessage = FastSnapshotMessage | SlowSnapshotMessage;
+
 export type FeedStatus = "connecting" | "live" | "offline";
 
 export type CommandPayload =

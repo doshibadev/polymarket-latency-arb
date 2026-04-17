@@ -1,12 +1,12 @@
+use crate::polymarket::{fetch_current_market, MarketData};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
-use std::collections::HashMap;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info};
-use crate::polymarket::{MarketData, fetch_current_market};
 
 static LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -27,6 +27,53 @@ pub struct SharePriceUpdate {
     pub bids: Vec<BookLevel>,
     pub asks: Vec<BookLevel>,
     pub timestamp: Instant,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ClobEnvelope {
+    Batch(Vec<ClobMessage>),
+    Single(ClobMessage),
+}
+
+#[derive(Debug, Deserialize)]
+struct ClobMessage {
+    #[serde(default)]
+    event_type: String,
+    #[serde(default)]
+    asset_id: Option<String>,
+    #[serde(default)]
+    bids: Vec<RawBookLevel>,
+    #[serde(default)]
+    asks: Vec<RawBookLevel>,
+    #[serde(default)]
+    price_changes: Vec<RawPriceChange>,
+    #[serde(default)]
+    best_bid: Option<String>,
+    #[serde(default)]
+    best_ask: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawBookLevel {
+    price: String,
+    size: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPriceChange {
+    #[serde(default)]
+    asset_id: Option<String>,
+    #[serde(default)]
+    price: Option<String>,
+    #[serde(default)]
+    size: Option<String>,
+    #[serde(default)]
+    side: Option<String>,
+    #[serde(default)]
+    best_bid: Option<String>,
+    #[serde(default)]
+    best_ask: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -58,7 +105,10 @@ impl ClobClient {
 
         for m in initial_markets {
             token_to_symbol.insert(m.up_token_id.clone(), (m.symbol.clone(), "UP".to_string()));
-            token_to_symbol.insert(m.down_token_id.clone(), (m.symbol.clone(), "DOWN".to_string()));
+            token_to_symbol.insert(
+                m.down_token_id.clone(),
+                (m.symbol.clone(), "DOWN".to_string()),
+            );
             market_ends.insert(m.symbol.clone(), m.window_end_ts);
             symbols.push(m.symbol);
         }
@@ -94,7 +144,7 @@ impl ClobClient {
     }
 
     async fn connect_and_stream(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let (mut ws_stream, _) = connect_async(&self.ws_url).await?;
+        let (mut ws_stream, _) = connect_async_tls_with_config(&self.ws_url, None, true, None).await?;
         info!("CLOB WebSocket connected");
 
         self.subscribe_all(&mut ws_stream).await?;
@@ -103,8 +153,18 @@ impl ClobClient {
         let (mut write, mut read) = ws_stream.split();
         let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
         let mut refresh_check = tokio::time::interval(Duration::from_secs(1));
+        let (prefetch_tx, mut prefetch_rx) = mpsc::channel::<(String, Option<MarketData>)>(16);
+        let mut prefetched_markets = HashMap::<String, MarketData>::new();
+        let mut inflight_prefetches = HashSet::<String>::new();
 
         loop {
+            while let Ok((symbol, prefetched)) = prefetch_rx.try_recv() {
+                inflight_prefetches.remove(&symbol);
+                if let Some(prefetched) = prefetched {
+                    prefetched_markets.insert(prefetched.symbol.clone(), prefetched);
+                }
+            }
+
             tokio::select! {
                 message = read.next() => {
                     match message {
@@ -128,11 +188,25 @@ impl ClobClient {
 
                     for symbol in &self.symbols {
                         if let Some(&end_ts) = self.market_ends.get(symbol) {
+                            if now >= end_ts.saturating_sub(10)
+                                && now < end_ts.saturating_sub(1)
+                                && !prefetched_markets
+                                    .get(symbol)
+                                    .is_some_and(|market| market.window_end_ts > end_ts)
+                                && inflight_prefetches.insert(symbol.clone())
+                            {
+                                let symbol_clone = symbol.clone();
+                                let prefetch_tx = prefetch_tx.clone();
+                                tokio::spawn(async move {
+                                    let next_market = fetch_current_market(&symbol_clone).await;
+                                    let _ = prefetch_tx.send((symbol_clone, next_market)).await;
+                                });
+                            }
+
                             if now >= end_ts.saturating_sub(1) {
-                                info!(symbol = %symbol, "Market window ending, refreshing...");
-                                if let Some(new_m) = fetch_current_market(symbol).await {
+                                if let Some(new_m) = prefetched_markets.remove(symbol) {
                                     if new_m.window_end_ts > end_ts {
-                                        // Unsubscribe old tokens
+                                        info!(symbol = %symbol, "Applying prefetched market refresh");
                                         let old_tokens: Vec<String> = self.token_to_symbol.keys().cloned().collect();
                                         if !old_tokens.is_empty() {
                                             let unsub_msg = serde_json::json!({
@@ -142,16 +216,13 @@ impl ClobClient {
                                             let _ = write.send(Message::Text(unsub_msg.to_string().into())).await;
                                         }
 
-                                        // Remove old token mappings for this symbol
                                         self.token_to_symbol.retain(|_, (sym, _)| sym != symbol);
-
-                                        // Insert new tokens
                                         self.token_to_symbol.insert(new_m.up_token_id.clone(), (new_m.symbol.clone(), "UP".to_string()));
                                         self.token_to_symbol.insert(new_m.down_token_id.clone(), (new_m.symbol.clone(), "DOWN".to_string()));
                                         self.market_ends.insert(symbol.clone(), new_m.window_end_ts);
 
                                         if let Some(market_tx) = &self.market_sender {
-                                            let _ = market_tx.send(new_m).await;
+                                            let _ = market_tx.try_send(new_m);
                                         }
                                         needs_refresh = true;
                                     }
@@ -170,7 +241,10 @@ impl ClobClient {
         Ok(())
     }
 
-    async fn subscribe_all<W>(&self, ws_stream: &mut W) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    async fn subscribe_all<W>(
+        &self,
+        ws_stream: &mut W,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     where
         W: SinkExt<Message> + Unpin,
         W::Error: std::error::Error + Send + Sync + 'static,
@@ -182,100 +256,185 @@ impl ClobClient {
             "custom_feature_enabled": true
         });
 
-        ws_stream.send(Message::Text(sub_msg.to_string().into())).await?;
+        ws_stream
+            .send(Message::Text(sub_msg.to_string().into()))
+            .await?;
         info!("CLOB subscribed to all active markets: {:?}", self.symbols);
         Ok(())
     }
 
     async fn handle_message(&mut self, text: &str) {
-        if let Ok(arr) = serde_json::from_str::<Vec<Value>>(text) {
-            for item in arr { self.process_item(&item).await; }
-        } else if let Ok(obj) = serde_json::from_str::<Value>(text) {
-            self.process_item(&obj).await;
+        if let Ok(message) = serde_json::from_str::<ClobEnvelope>(text) {
+            match message {
+                ClobEnvelope::Batch(messages) => {
+                    for item in messages {
+                        self.process_item(item).await;
+                    }
+                }
+                ClobEnvelope::Single(message) => {
+                    self.process_item(message).await;
+                }
+            }
         }
     }
 
-    fn parse_levels(value: Option<&Value>, ascending: bool) -> Vec<BookLevel> {
-        let mut levels = value.and_then(|v| v.as_array()).map(|arr| {
-            arr.iter().filter_map(|level| {
-                let price = level.get("price").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok())?;
-                let size = level.get("size").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok())?;
+    fn parse_levels(levels: &[RawBookLevel], ascending: bool) -> Vec<BookLevel> {
+        let mut levels = levels
+            .iter()
+            .filter_map(|level| {
+                let price = level.price.parse::<f64>().ok()?;
+                let size = level.size.parse::<f64>().ok()?;
                 (price > 0.0 && size > 0.0).then_some(BookLevel { price, size })
-            }).collect::<Vec<_>>()
-        }).unwrap_or_default();
+            })
+            .collect::<Vec<_>>();
         if ascending {
-            levels.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+            levels.sort_by(|a, b| {
+                a.price
+                    .partial_cmp(&b.price)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         } else {
-            levels.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+            levels.sort_by(|a, b| {
+                b.price
+                    .partial_cmp(&a.price)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
         levels
     }
 
     fn upsert_level(levels: &mut Vec<BookLevel>, price: f64, size: f64, ascending: bool) {
-        if let Some(existing) = levels.iter_mut().find(|level| (level.price - price).abs() < f64::EPSILON) {
-            existing.size = size;
-        } else {
-            levels.push(BookLevel { price, size });
-        }
-        levels.retain(|level| level.size > 0.0);
-        if ascending {
-            levels.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
-        } else {
-            levels.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+        let insert_at = levels.binary_search_by(|level| {
+            if ascending {
+                level
+                    .price
+                    .partial_cmp(&price)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                price
+                    .partial_cmp(&level.price)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }
+        });
+
+        match insert_at {
+            Ok(idx) => {
+                if size > 0.0 {
+                    levels[idx].size = size;
+                } else {
+                    levels.remove(idx);
+                }
+            }
+            Err(idx) if size > 0.0 => {
+                levels.insert(idx, BookLevel { price, size });
+            }
+            Err(_) => {}
         }
     }
 
-    async fn send_book_update(&self, asset_id: &str, best_bid: f64, best_ask: f64) {
+    fn parse_num(value: Option<&str>) -> f64 {
+        value.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)
+    }
+
+    fn send_book_update(&self, asset_id: &str, best_bid: f64, best_ask: f64, include_depth: bool) {
         if let Some((symbol, direction)) = self.token_to_symbol.get(asset_id) {
-            let book = self.books.get(asset_id).cloned().unwrap_or_default();
-            let bid = if best_bid > 0.0 { best_bid } else { book.bids.first().map(|l| l.price).unwrap_or(0.0) };
-            let ask = if best_ask > 0.0 { best_ask } else { book.asks.first().map(|l| l.price).unwrap_or(0.0) };
+            let book = self.books.get(asset_id);
+            let bid = if best_bid > 0.0 {
+                best_bid
+            } else {
+                book.and_then(|book| book.bids.first().map(|l| l.price))
+                    .unwrap_or(0.0)
+            };
+            let ask = if best_ask > 0.0 {
+                best_ask
+            } else {
+                book.and_then(|book| book.asks.first().map(|l| l.price))
+                    .unwrap_or(0.0)
+            };
             if bid > 0.0 || ask > 0.0 {
-                let mid_price = if bid > 0.0 && ask > 0.0 { (bid + ask) / 2.0 } else { 0.0 };
-                let _ = self.price_sender.send(SharePriceUpdate { symbol: symbol.clone(), direction: direction.clone(), best_bid: bid, best_ask: ask, mid_price, bids: book.bids, asks: book.asks, timestamp: Instant::now() }).await;
+                let mid_price = if bid > 0.0 && ask > 0.0 {
+                    (bid + ask) / 2.0
+                } else {
+                    0.0
+                };
+                let _ = self
+                    .price_sender
+                    .try_send(SharePriceUpdate {
+                        symbol: symbol.clone(),
+                        direction: direction.clone(),
+                        best_bid: bid,
+                        best_ask: ask,
+                        mid_price,
+                        bids: if include_depth {
+                            book.map(|book| book.bids.clone()).unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        },
+                        asks: if include_depth {
+                            book.map(|book| book.asks.clone()).unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        },
+                        timestamp: Instant::now(),
+                    });
             }
         }
     }
 
-    async fn process_item(&mut self, item: &Value) {
-        let event_type = item.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
+    async fn process_item(&mut self, item: ClobMessage) {
+        let event_type = item.event_type.as_str();
         if event_type == "book" {
-            if let Some(asset_id) = item.get("asset_id").and_then(|v| v.as_str()) {
-                self.books.insert(asset_id.to_string(), OrderBookCache { bids: Self::parse_levels(item.get("bids"), false), asks: Self::parse_levels(item.get("asks"), true) });
-                self.send_book_update(asset_id, 0.0, 0.0).await;
+            if let Some(asset_id) = item.asset_id.as_deref() {
+                self.books.insert(
+                    asset_id.to_string(),
+                    OrderBookCache {
+                        bids: Self::parse_levels(&item.bids, false),
+                        asks: Self::parse_levels(&item.asks, true),
+                    },
+                );
+                self.send_book_update(asset_id, 0.0, 0.0, true);
             }
             return;
         }
         if event_type == "price_change" {
-            if let Some(changes) = item.get("price_changes").and_then(|v| v.as_array()) {
-                for change in changes {
-                    let Some(asset_id) = change.get("asset_id").and_then(|v| v.as_str()).or_else(|| item.get("asset_id").and_then(|v| v.as_str())) else { continue; };
-                    let price = change.get("price").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok());
-                    let size = change.get("size").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok());
+            if !item.price_changes.is_empty() {
+                for change in item.price_changes {
+                    let Some(asset_id) = change.asset_id.as_deref().or(item.asset_id.as_deref()) else {
+                        continue;
+                    };
+                    let price = change.price.as_deref().and_then(|value| value.parse::<f64>().ok());
+                    let size = change.size.as_deref().and_then(|value| value.parse::<f64>().ok());
                     if let (Some(price), Some(size)) = (price, size) {
                         let book = self.books.entry(asset_id.to_string()).or_default();
-                        match change.get("side").and_then(|v| v.as_str()).unwrap_or("").to_ascii_uppercase().as_str() {
-                            "BUY" | "BID" | "BIDS" => Self::upsert_level(&mut book.bids, price, size, false),
-                            "SELL" | "ASK" | "ASKS" => Self::upsert_level(&mut book.asks, price, size, true),
+                        let side = change.side.as_deref().unwrap_or("");
+                        match side.to_ascii_uppercase().as_str() {
+                            "BUY" | "BID" | "BIDS" => {
+                                Self::upsert_level(&mut book.bids, price, size, false)
+                            }
+                            "SELL" | "ASK" | "ASKS" => {
+                                Self::upsert_level(&mut book.asks, price, size, true)
+                            }
                             _ => {}
                         }
                     }
-                    let best_bid = change.get("best_bid").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).or_else(|| item.get("best_bid").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok())).unwrap_or(0.0);
-                    let best_ask = change.get("best_ask").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).or_else(|| item.get("best_ask").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok())).unwrap_or(0.0);
-                    self.send_book_update(asset_id, best_bid, best_ask).await;
+                    let best_bid =
+                        Self::parse_num(change.best_bid.as_deref().or(item.best_bid.as_deref()));
+                    let best_ask =
+                        Self::parse_num(change.best_ask.as_deref().or(item.best_ask.as_deref()));
+                    self.send_book_update(asset_id, best_bid, best_ask, false);
                 }
-            } else if let Some(asset_id) = item.get("asset_id").and_then(|v| v.as_str()) {
-                let best_bid = item.get("best_bid").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-                let best_ask = item.get("best_ask").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-                self.send_book_update(asset_id, best_bid, best_ask).await;
+            } else if let Some(asset_id) = item.asset_id.as_deref() {
+                let best_bid = Self::parse_num(item.best_bid.as_deref());
+                let best_ask = Self::parse_num(item.best_ask.as_deref());
+                self.send_book_update(asset_id, best_bid, best_ask, false);
             }
             return;
         }
         if event_type == "best_bid_ask" {
-            if let Some(asset_id) = item.get("asset_id").and_then(|v| v.as_str()) {
-                let best_bid = item.get("best_bid").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-                let best_ask = item.get("best_ask").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-                self.send_book_update(asset_id, best_bid, best_ask).await;
+            if let Some(asset_id) = item.asset_id.as_deref() {
+                let best_bid = Self::parse_num(item.best_bid.as_deref());
+                let best_ask = Self::parse_num(item.best_ask.as_deref());
+                self.send_book_update(asset_id, best_bid, best_ask, false);
             }
         }
     }
