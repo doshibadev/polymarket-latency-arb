@@ -1235,6 +1235,9 @@ impl ArbEngine {
     }
 
     async fn handle_clob_update(&mut self, update: SharePriceUpdate) -> bool {
+        let live_bids = update.bids.clone();
+        let live_asks = update.asks.clone();
+        let live_timestamp = update.timestamp;
         self.wallet.update_share_price(
             &update.symbol,
             &update.direction,
@@ -1250,6 +1253,9 @@ impl ArbEngine {
                 direction: update.direction.clone(),
                 best_bid: update.best_bid,
                 best_ask: update.best_ask,
+                bids: live_bids,
+                asks: live_asks,
+                timestamp: live_timestamp,
             });
         }
         self.wallet.flush_pending();

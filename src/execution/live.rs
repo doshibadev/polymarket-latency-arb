@@ -22,10 +22,9 @@ use crate::config::AppConfig;
 use crate::execution::actor::LiveWalletSnapshot;
 use crate::execution::model::{OpenPosition, PendingEntry, TradeRecord};
 use crate::execution::shared::{
-    directional_bid_ask, share_mid_price, sync_position_price_state, update_btc_extrema,
-    update_directional_bid_ask,
+    share_mid_price, sync_position_price_state, update_btc_extrema,
 };
-use crate::polymarket::MarketData;
+use crate::polymarket::{BookLevel, MarketData};
 
 // Polygon mainnet contract addresses (from Polymarket docs + reference bot)
 const USDC: Address = address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
@@ -306,11 +305,133 @@ struct PendingOrder {
 
 /// Cache share prices from WebSocket
 #[derive(Clone, Default)]
+struct DirectionalQuoteCache {
+    pub bid: f64,
+    pub ask: f64,
+    pub bids: Vec<BookLevel>,
+    pub asks: Vec<BookLevel>,
+    pub updated_at: Option<Instant>,
+}
+
+#[derive(Clone, Default)]
 struct SymbolPriceCache {
-    pub up_bid: f64,
-    pub up_ask: f64,
-    pub down_bid: f64,
-    pub down_ask: f64,
+    pub up: DirectionalQuoteCache,
+    pub down: DirectionalQuoteCache,
+}
+
+#[derive(Clone)]
+struct LiveQuoteSnapshot {
+    bid: f64,
+    ask: f64,
+    bids: Vec<BookLevel>,
+    asks: Vec<BookLevel>,
+    age_ms: u64,
+}
+
+enum LiveSubmitSide {
+    Open,
+    Close,
+}
+
+fn validate_live_submit_against_quote(
+    config: &AppConfig,
+    quote: &LiveQuoteSnapshot,
+    side: LiveSubmitSide,
+    reference_price: f64,
+    planned_spread: Option<f64>,
+    notional_usdc: f64,
+    open_positions_after_submit: usize,
+    daily_pnl: f64,
+) -> Result<(), String> {
+    if config.live_max_order_usdc > 0.0 && notional_usdc > config.live_max_order_usdc {
+        return Err(format!(
+            "LIVE_MAX_ORDER_USDC_EXCEEDED({:.2}>{:.2})",
+            notional_usdc, config.live_max_order_usdc
+        ));
+    }
+
+    if config.live_max_session_loss_usdc > 0.0 && daily_pnl <= -config.live_max_session_loss_usdc {
+        return Err(format!("LIVE_MAX_SESSION_LOSS_REACHED({:.2})", daily_pnl));
+    }
+
+    if open_positions_after_submit > config.live_max_open_positions {
+        return Err(format!(
+            "LIVE_MAX_OPEN_POSITIONS_EXCEEDED({}>{})",
+            open_positions_after_submit, config.live_max_open_positions
+        ));
+    }
+
+    if quote.age_ms > config.live_max_quote_age_ms {
+        return Err(format!(
+            "LIVE_QUOTE_STALE({}ms>{}ms)",
+            quote.age_ms, config.live_max_quote_age_ms
+        ));
+    }
+    if quote.bid <= 0.0 || quote.ask <= 0.0 {
+        return Err("LIVE_QUOTE_EMPTY".to_string());
+    }
+
+    let slippage = (config.live_max_slippage_cents / 100.0).clamp(0.0, 0.10);
+    let current_spread = quote.ask - quote.bid;
+    if let Some(planned_spread) = planned_spread {
+        if current_spread > planned_spread + slippage {
+            return Err(format!(
+                "LIVE_SPREAD_WIDENED({:.4}>{:.4})",
+                current_spread,
+                planned_spread + slippage
+            ));
+        }
+    }
+
+    match side {
+        LiveSubmitSide::Open => {
+            if quote.ask > reference_price + slippage {
+                return Err(format!(
+                    "LIVE_ASK_SLIPPAGE({:.4}>{:.4})",
+                    quote.ask,
+                    reference_price + slippage
+                ));
+            }
+            if quote.asks.is_empty() {
+                return Err("LIVE_ASK_DEPTH_EMPTY".to_string());
+            }
+            let buy_limit = (quote.ask + slippage).min(0.99);
+            let (_, _, spend) =
+                crate::execution::planner::estimate_fak_buy(&quote.asks, notional_usdc, buy_limit)
+                    .ok_or_else(|| "LIVE_ENTRY_DEPTH_VANISHED".to_string())?;
+            if spend + 0.01 < notional_usdc {
+                return Err(format!(
+                    "LIVE_ENTRY_DEPTH_THIN({:.2}<{:.2})",
+                    spend, notional_usdc
+                ));
+            }
+        }
+        LiveSubmitSide::Close => {
+            if quote.bid + slippage < reference_price {
+                return Err(format!(
+                    "LIVE_BID_SLIPPAGE({:.4}<{:.4})",
+                    quote.bid,
+                    reference_price - slippage
+                ));
+            }
+            if quote.bids.is_empty() {
+                return Err("LIVE_BID_DEPTH_EMPTY".to_string());
+            }
+            let sell_limit = if quote.bid > slippage {
+                (quote.bid - slippage).max(0.01)
+            } else {
+                0.01
+            };
+            crate::execution::planner::estimate_fak_sell(
+                &quote.bids,
+                notional_usdc / reference_price.max(0.01),
+                sell_limit,
+            )
+            .ok_or_else(|| "LIVE_EXIT_DEPTH_VANISHED".to_string())?;
+        }
+    }
+
+    Ok(())
 }
 
 pub struct LiveWallet {
@@ -1376,17 +1497,31 @@ impl LiveWallet {
     }
 
     /// Update share prices from WebSocket
-    pub fn update_share_price(&mut self, symbol: &str, direction: &str, bid: f64, ask: f64) {
+    pub fn update_share_price(
+        &mut self,
+        symbol: &str,
+        direction: &str,
+        bid: f64,
+        ask: f64,
+        bids: Vec<BookLevel>,
+        asks: Vec<BookLevel>,
+        timestamp: Instant,
+    ) {
         let cache = self.price_cache.entry(symbol.to_string()).or_default();
-        update_directional_bid_ask(
-            &mut cache.up_bid,
-            &mut cache.up_ask,
-            &mut cache.down_bid,
-            &mut cache.down_ask,
-            direction,
-            bid,
-            ask,
-        );
+        let quote = if direction == "UP" {
+            &mut cache.up
+        } else {
+            &mut cache.down
+        };
+        quote.bid = bid;
+        quote.ask = ask;
+        if !bids.is_empty() {
+            quote.bids = bids;
+        }
+        if !asks.is_empty() {
+            quote.asks = asks;
+        }
+        quote.updated_at = Some(timestamp);
 
         sync_position_price_state(
             &mut self.open_positions,
@@ -1400,13 +1535,8 @@ impl LiveWallet {
     /// Get bid/ask from cache
     pub fn get_bid_ask(&self, symbol: &str, direction: &str) -> (f64, f64) {
         if let Some(cache) = self.price_cache.get(symbol) {
-            directional_bid_ask(
-                cache.up_bid,
-                cache.up_ask,
-                cache.down_bid,
-                cache.down_ask,
-                direction,
-            )
+            let quote = Self::directional_quote_cache(cache, direction);
+            (quote.bid, quote.ask)
         } else {
             (0.0, 0.0)
         }
@@ -1513,6 +1643,61 @@ impl LiveWallet {
         } else {
             (price / tick).round() * tick
         }
+    }
+
+    fn live_slippage_dollars(&self) -> f64 {
+        (self.config.live_max_slippage_cents / 100.0).clamp(0.0, 0.10)
+    }
+
+    fn directional_quote_cache<'a>(
+        cache: &'a SymbolPriceCache,
+        direction: &str,
+    ) -> &'a DirectionalQuoteCache {
+        if direction == "UP" {
+            &cache.up
+        } else {
+            &cache.down
+        }
+    }
+
+    fn current_quote(&self, symbol: &str, direction: &str) -> Option<LiveQuoteSnapshot> {
+        let cache = self.price_cache.get(symbol)?;
+        let quote = Self::directional_quote_cache(cache, direction);
+        let updated_at = quote.updated_at?;
+        let age_ms = Instant::now().duration_since(updated_at).as_millis() as u64;
+        Some(LiveQuoteSnapshot {
+            bid: quote.bid,
+            ask: quote.ask,
+            bids: quote.bids.clone(),
+            asks: quote.asks.clone(),
+            age_ms,
+        })
+    }
+
+    fn validate_live_submit_quote(
+        &self,
+        symbol: &str,
+        direction: &str,
+        side: LiveSubmitSide,
+        reference_price: f64,
+        planned_spread: Option<f64>,
+        notional_usdc: f64,
+        open_positions_after_submit: usize,
+    ) -> Result<LiveQuoteSnapshot, String> {
+        let quote = self
+            .current_quote(symbol, direction)
+            .ok_or_else(|| "LIVE_QUOTE_MISSING".to_string())?;
+        validate_live_submit_against_quote(
+            &self.config,
+            &quote,
+            side,
+            reference_price,
+            planned_spread,
+            notional_usdc,
+            open_positions_after_submit,
+            self.daily_pnl,
+        )?;
+        Ok(quote)
     }
 
     async fn post_with_retry(
@@ -1655,6 +1840,19 @@ impl LiveWallet {
         };
 
         let tick = 0.01f64;
+        let open_positions_after_submit = self.open_positions.len() + self.pending_orders.len();
+        let quote = match self.validate_live_submit_quote(
+            symbol,
+            direction,
+            LiveSubmitSide::Open,
+            planned_entry_price,
+            plan.spread_at_entry,
+            planned_position_size,
+            open_positions_after_submit,
+        ) {
+            Ok(quote) => quote,
+            Err(err) => cleanup_and_return!(err),
+        };
 
         // MARKET ORDER: For FAK buys, the price field is the worst-price limit (max we'll pay per share).
         // The SDK uses this price to calculate taker_amount (shares) and maker_amount (USDC) for the
@@ -1665,17 +1863,13 @@ impl LiveWallet {
         // - We'll fill at the actual ask (or better)
         // - Max overpay is 4 cents per share above the cached ask
         // - If the ask has moved more than 4 cents, we don't chase it
-        let (_bid, ask) = self.get_bid_ask(symbol, direction);
+        let ask = quote.ask;
 
-        // Validate ask price exists (if cache shows no ask, book is likely empty)
-        if ask <= 0.0 {
-            cleanup_and_return!("NO_ASK_PRICE".to_string());
-        }
+        // Max overpay: env-controlled slippage buffer above the current best ask.
+        let market_price = (ask + self.live_slippage_dollars()).min(0.99);
 
-        // Max overpay: 4 cents above the current best ask, capped at valid price range
-        let market_price = (ask + 0.04).min(0.99);
-
-        info!(symbol=%symbol, direction=%direction, cached_ask=ask, limit_price=market_price,
+        info!(symbol=%symbol, direction=%direction, cached_ask=ask, quote_age_ms=quote.age_ms,
+              limit_price=market_price, max_order_usdc=self.config.live_max_order_usdc,
               position_size=planned_position_size, "Sending FAK buy order");
 
         let rounded_price = Self::round_to_tick(market_price, tick);
@@ -1717,21 +1911,25 @@ impl LiveWallet {
             Err(e) => cleanup_and_return!(e.to_string()),
         };
 
-        // Place REAL market order on Polymarket CLOB - uses ask+buffer to ensure fill
-        let (order_id, filled_shares, filled_usdc) = match Self::post_with_retry(
-            &self.clob,
-            &self.signer,
-            token_id,
-            price,
-            size,
-            usdc,
-            Side::Buy,
-            RetryMode::Entry,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(e) => cleanup_and_return!(e),
+        let (order_id, filled_shares, filled_usdc) = if self.config.live_dry_run_orders {
+            info!(symbol=%symbol, direction=%direction, "LIVE_DRY_RUN_ORDERS enabled; skipping real buy submit");
+            (format!("dry-run-buy-{}", plan.position_id), size, usdc)
+        } else {
+            match Self::post_with_retry(
+                &self.clob,
+                &self.signer,
+                token_id,
+                price,
+                size,
+                usdc,
+                Side::Buy,
+                RetryMode::Entry,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => cleanup_and_return!(e),
+            }
         };
 
         // Use actual filled amounts (FAK may fill partially)
@@ -1909,15 +2107,31 @@ impl LiveWallet {
             }
         };
 
-        let (bid, _ask) = self.get_bid_ask(&pos.symbol, &pos.direction);
+        let quote = match self.validate_live_submit_quote(
+            &pos.symbol,
+            &pos.direction,
+            LiveSubmitSide::Close,
+            _current_price,
+            None,
+            pos.shares * _current_price,
+            self.open_positions.len(),
+        ) {
+            Ok(quote) => quote,
+            Err(err) => {
+                warn!(position_id=%pos.position_id, symbol=%pos.symbol, direction=%pos.direction, reason=%err, "Rejected live close before submit");
+                return;
+            }
+        };
+        let bid = quote.bid;
         let tick = 0.01f64;
 
         // If no bid price or position too small to sell, record as loss instead of silently dropping
         // For FAK sells, the price is the MINIMUM we'll accept per share.
-        // Use bid - 4 cents as our worst acceptable price (matching the buy-side 4c buffer).
+        // Use bid - configured slippage buffer as our worst acceptable price.
         // The CLOB fills at resting bid prices, so we typically get the actual bid.
-        let market_price = if bid > 0.04 {
-            (bid - 0.04).max(0.01)
+        let slippage = self.live_slippage_dollars();
+        let market_price = if bid > slippage {
+            (bid - slippage).max(0.01)
         } else if bid > 0.0 {
             0.01 // Very low bid — accept anything to exit
         } else {
@@ -2052,18 +2266,28 @@ impl LiveWallet {
             };
             let usdc_for_sell = Decimal::ZERO;
 
-            match Self::post_with_retry(
-                &self.clob,
-                &self.signer,
-                token_id,
-                price,
-                size,
-                usdc_for_sell,
-                Side::Sell,
-                RetryMode::Exit,
-            )
-            .await
-            {
+            let submit_result = if self.config.live_dry_run_orders {
+                info!(symbol=%pos.symbol, direction=%pos.direction, "LIVE_DRY_RUN_ORDERS enabled; skipping real sell submit");
+                Ok((
+                    format!("dry-run-sell-{}-{}", pos.position_id, sell_attempt + 1),
+                    size,
+                    Decimal::try_from(current_sell_shares * rounded).unwrap_or(Decimal::ZERO),
+                ))
+            } else {
+                Self::post_with_retry(
+                    &self.clob,
+                    &self.signer,
+                    token_id,
+                    price,
+                    size,
+                    usdc_for_sell,
+                    Side::Sell,
+                    RetryMode::Exit,
+                )
+                .await
+            };
+
+            match submit_result {
                 Ok((id, filled_shares, filled_usdc)) => {
                     let fs: f64 = filled_shares.try_into().unwrap_or(0.0);
                     let fu: f64 = filled_usdc.try_into().unwrap_or(0.0);
@@ -2216,7 +2440,12 @@ impl LiveWallet {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_markets, WalletKind};
+    use super::{
+        validate_live_submit_against_quote, validate_markets, LiveQuoteSnapshot, LiveSubmitSide,
+        WalletKind,
+    };
+    use crate::config::AppConfig;
+    use crate::polymarket::BookLevel;
     use crate::polymarket::MarketData;
 
     fn sample_market() -> MarketData {
@@ -2229,6 +2458,32 @@ mod tests {
             up_token_id: "up".to_string(),
             down_token_id: "down".to_string(),
             window_end_ts: 123,
+        }
+    }
+
+    fn test_config() -> AppConfig {
+        let mut config = AppConfig::load().expect("config should load");
+        config.live_max_order_usdc = 20.0;
+        config.live_max_session_loss_usdc = 25.0;
+        config.live_max_open_positions = 1;
+        config.live_max_slippage_cents = 4.0;
+        config.live_max_quote_age_ms = 1200;
+        config
+    }
+
+    fn quote() -> LiveQuoteSnapshot {
+        LiveQuoteSnapshot {
+            bid: 0.48,
+            ask: 0.52,
+            bids: vec![BookLevel {
+                price: 0.48,
+                size: 100.0,
+            }],
+            asks: vec![BookLevel {
+                price: 0.52,
+                size: 100.0,
+            }],
+            age_ms: 100,
         }
     }
 
@@ -2249,5 +2504,105 @@ mod tests {
         assert!(validate_markets(&[market]).is_err());
         assert!(validate_markets(&[]).is_err());
         assert!(validate_markets(&[sample_market()]).is_ok());
+    }
+
+    #[test]
+    fn live_submit_guard_rejects_stale_quotes() {
+        let config = test_config();
+        let mut live_quote = quote();
+        live_quote.age_ms = 5_000;
+
+        let err = validate_live_submit_against_quote(
+            &config,
+            &live_quote,
+            LiveSubmitSide::Open,
+            0.50,
+            Some(0.04),
+            10.0,
+            1,
+            0.0,
+        )
+        .expect_err("stale quote should fail");
+
+        assert!(err.starts_with("LIVE_QUOTE_STALE"));
+    }
+
+    #[test]
+    fn live_submit_guard_rejects_widened_spread() {
+        let config = test_config();
+        let mut live_quote = quote();
+        live_quote.bid = 0.40;
+        live_quote.ask = 0.52;
+
+        let err = validate_live_submit_against_quote(
+            &config,
+            &live_quote,
+            LiveSubmitSide::Open,
+            0.50,
+            Some(0.04),
+            10.0,
+            1,
+            0.0,
+        )
+        .expect_err("widened spread should fail");
+
+        assert!(err.starts_with("LIVE_SPREAD_WIDENED"));
+    }
+
+    #[test]
+    fn live_submit_guard_rejects_notional_over_cap() {
+        let config = test_config();
+
+        let err = validate_live_submit_against_quote(
+            &config,
+            &quote(),
+            LiveSubmitSide::Open,
+            0.50,
+            Some(0.04),
+            25.0,
+            1,
+            0.0,
+        )
+        .expect_err("notional cap should fail");
+
+        assert!(err.starts_with("LIVE_MAX_ORDER_USDC_EXCEEDED"));
+    }
+
+    #[test]
+    fn live_submit_guard_rejects_missing_entry_depth() {
+        let config = test_config();
+        let mut live_quote = quote();
+        live_quote.asks.clear();
+
+        let err = validate_live_submit_against_quote(
+            &config,
+            &live_quote,
+            LiveSubmitSide::Open,
+            0.50,
+            Some(0.04),
+            10.0,
+            1,
+            0.0,
+        )
+        .expect_err("missing depth should fail");
+
+        assert!(err.starts_with("LIVE_ASK_DEPTH_EMPTY"));
+    }
+
+    #[test]
+    fn live_submit_guard_accepts_valid_entry_quote() {
+        let config = test_config();
+
+        validate_live_submit_against_quote(
+            &config,
+            &quote(),
+            LiveSubmitSide::Open,
+            0.50,
+            Some(0.04),
+            10.0,
+            1,
+            0.0,
+        )
+        .expect("valid live quote should pass");
     }
 }

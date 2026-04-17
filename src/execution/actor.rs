@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::execution::model::{OpenPosition, PendingEntry, TradeRecord};
+use crate::polymarket::BookLevel;
 
 use super::live::LiveWallet;
 
@@ -47,6 +48,9 @@ pub enum LiveCommand {
         direction: String,
         best_bid: f64,
         best_ask: f64,
+        bids: Vec<BookLevel>,
+        asks: Vec<BookLevel>,
+        timestamp: Instant,
     },
     UpdateBtcTrailing {
         symbol: String,
@@ -148,8 +152,13 @@ pub fn spawn_live_execution(
                     direction,
                     best_bid,
                     best_ask,
+                    bids,
+                    asks,
+                    timestamp,
                 } => {
-                    wallet.update_share_price(&symbol, &direction, best_bid, best_ask);
+                    wallet.update_share_price(
+                        &symbol, &direction, best_bid, best_ask, bids, asks, timestamp,
+                    );
                 }
                 LiveCommand::UpdateBtcTrailing { symbol, price } => {
                     wallet.update_btc_trailing(&symbol, price);

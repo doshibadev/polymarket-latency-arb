@@ -46,6 +46,12 @@ pub struct AppConfig {
     pub ptb_max_counter_distance_usd: f64, // hard reject counter-ptb trades beyond this distance
     pub eth_ptb_max_counter_distance_usd: f64,
     pub trailing_stop_activation: f64, // % gain above entry to activate trailing stop (20 = 20%)
+    pub live_max_order_usdc: f64,
+    pub live_max_session_loss_usdc: f64,
+    pub live_max_open_positions: usize,
+    pub live_max_slippage_cents: f64,
+    pub live_max_quote_age_ms: u64,
+    pub live_dry_run_orders: bool,
 }
 
 impl AppConfig {
@@ -221,6 +227,30 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(20.0),
+            live_max_order_usdc: env::var("LIVE_MAX_ORDER_USDC")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20.0),
+            live_max_session_loss_usdc: env::var("LIVE_MAX_SESSION_LOSS_USDC")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(25.0),
+            live_max_open_positions: env::var("LIVE_MAX_OPEN_POSITIONS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1),
+            live_max_slippage_cents: env::var("LIVE_MAX_SLIPPAGE_CENTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4.0),
+            live_max_quote_age_ms: env::var("LIVE_MAX_QUOTE_AGE_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1200),
+            live_dry_run_orders: env::var("LIVE_DRY_RUN_ORDERS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
         })
     }
 
@@ -375,6 +405,27 @@ impl AppConfig {
         {
             self.eth_ptb_max_counter_distance_usd = v;
         }
+        if let Some(v) = json.get("live_max_order_usdc").and_then(|v| v.as_f64()) {
+            self.live_max_order_usdc = v;
+        }
+        if let Some(v) = json
+            .get("live_max_session_loss_usdc")
+            .and_then(|v| v.as_f64())
+        {
+            self.live_max_session_loss_usdc = v;
+        }
+        if let Some(v) = json.get("live_max_open_positions").and_then(|v| v.as_u64()) {
+            self.live_max_open_positions = v as usize;
+        }
+        if let Some(v) = json.get("live_max_slippage_cents").and_then(|v| v.as_f64()) {
+            self.live_max_slippage_cents = v;
+        }
+        if let Some(v) = json.get("live_max_quote_age_ms").and_then(|v| v.as_u64()) {
+            self.live_max_quote_age_ms = v;
+        }
+        if let Some(v) = json.get("live_dry_run_orders").and_then(|v| v.as_bool()) {
+            self.live_dry_run_orders = v;
+        }
         Ok(())
     }
 
@@ -473,7 +524,14 @@ mod tests {
                 "eth_trend_max_magnitude_usd": 8.5,
                 "ptb_neutral_zone_usd": 33.0,
                 "eth_ptb_neutral_zone_usd": 1.2,
-                "trailing_stop_activation": 18.0
+                "eth_ptb_max_counter_distance_usd": 11.0,
+                "trailing_stop_activation": 18.0,
+                "live_max_order_usdc": 9.0,
+                "live_max_session_loss_usdc": 14.0,
+                "live_max_open_positions": 2,
+                "live_max_slippage_cents": 3.0,
+                "live_max_quote_age_ms": 900,
+                "live_dry_run_orders": true
             }))
             .expect("json update should succeed");
 
@@ -489,6 +547,13 @@ mod tests {
         assert_eq!(config.eth_trend_max_magnitude_usd, 8.5);
         assert_eq!(config.ptb_neutral_zone_usd, 33.0);
         assert_eq!(config.eth_ptb_neutral_zone_usd, 1.2);
+        assert_eq!(config.eth_ptb_max_counter_distance_usd, 11.0);
         assert_eq!(config.trailing_stop_activation, 18.0);
+        assert_eq!(config.live_max_order_usdc, 9.0);
+        assert_eq!(config.live_max_session_loss_usdc, 14.0);
+        assert_eq!(config.live_max_open_positions, 2);
+        assert_eq!(config.live_max_slippage_cents, 3.0);
+        assert_eq!(config.live_max_quote_age_ms, 900);
+        assert!(config.live_dry_run_orders);
     }
 }
