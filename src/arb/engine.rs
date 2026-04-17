@@ -124,6 +124,12 @@ impl ArbEngine {
         self.wallet.push_history(total_val);
     }
 
+    fn drain_wallet_events_to_signals(&mut self) {
+        for event in self.wallet.drain_events() {
+            self.add_signal(&event.symbol, &event.direction, event.spike, &event.status, Some(event.reason));
+        }
+    }
+
     /// Helper to get current unix timestamp in seconds
     fn now_secs() -> u64 {
         std::time::SystemTime::now()
@@ -434,6 +440,20 @@ impl ArbEngine {
                         let should_sync = self.last_clob_sync.map_or(true, |t| t.elapsed().as_secs() >= 5);
                         if should_sync {
                             lw.sync_from_clob().await;
+                            let live_positions = lw.open_positions.clone();
+                            self.wallet.open_positions.retain(|paper_pos| {
+                                let exists_live = live_positions.iter().any(|live_pos| live_pos.symbol == paper_pos.symbol && live_pos.direction == paper_pos.direction);
+                                if !exists_live {
+                                    warn!(symbol=%paper_pos.symbol, direction=%paper_pos.direction, "Removing stale paper mirror position absent from live wallet");
+                                }
+                                exists_live
+                            });
+                            for paper_pos in &mut self.wallet.open_positions {
+                                if let Some(live_pos) = live_positions.iter().find(|live_pos| live_pos.symbol == paper_pos.symbol && live_pos.direction == paper_pos.direction) {
+                                    paper_pos.shares = live_pos.shares;
+                                    paper_pos.on_chain_shares = live_pos.on_chain_shares;
+                                }
+                            }
                             self.last_clob_sync = Some(Instant::now());
                         }
                     }
@@ -678,6 +698,7 @@ impl ArbEngine {
                         }
                     }
                     self.wallet.flush_pending();
+                    self.drain_wallet_events_to_signals();
                     // Clean up stale pending orders in live wallet
                     if let Some(lw) = &mut self.live_wallet {
                         lw.cleanup_pending_orders();
@@ -807,7 +828,9 @@ impl ArbEngine {
         }
 
         self.wallet.flush_pending();
+        self.drain_wallet_events_to_signals();
         let closed = self.wallet.try_close_position().await;
+        self.drain_wallet_events_to_signals();
 
         // Mirror closes to live wallet
         if closed {
@@ -818,13 +841,15 @@ impl ArbEngine {
     }
 
     async fn handle_clob_update(&mut self, update: SharePriceUpdate) -> bool {
-        self.wallet.update_share_price(&update.symbol, &update.direction, update.best_bid, update.best_ask);
+        self.wallet.update_share_price(&update.symbol, &update.direction, update.best_bid, update.best_ask, update.bids, update.asks);
         // Update live wallet price cache too (matches paper.rs)
         if let Some(lw) = &mut self.live_wallet {
             lw.update_share_price(&update.symbol, &update.direction, update.best_bid, update.best_ask);
         }
         self.wallet.flush_pending();
+        self.drain_wallet_events_to_signals();
         let closed = self.wallet.try_close_position().await;
+        self.drain_wallet_events_to_signals();
 
         // Mirror closes to live wallet (same as handle_price_update)
         if closed {

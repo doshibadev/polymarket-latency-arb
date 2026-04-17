@@ -3,6 +3,7 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::time::Instant;
 use crate::config::AppConfig;
+use crate::polymarket::BookLevel;
 
 /// An open scalp position
 #[derive(Clone, Serialize)]
@@ -76,6 +77,10 @@ struct SymbolMarketState {
     pub up_ask: f64,
     pub down_bid: f64,
     pub down_ask: f64,
+    pub up_bids: Vec<BookLevel>,
+    pub up_asks: Vec<BookLevel>,
+    pub down_bids: Vec<BookLevel>,
+    pub down_asks: Vec<BookLevel>,
     pub question: String,
     pub last_binance: f64,
     pub last_chainlink: f64,
@@ -96,6 +101,10 @@ impl Default for SymbolMarketState {
             up_ask: 0.0,
             down_bid: 0.0,
             down_ask: 0.0,
+            up_bids: Vec::new(),
+            up_asks: Vec::new(),
+            down_bids: Vec::new(),
+            down_asks: Vec::new(),
             question: String::new(),
             last_binance: 0.0,
             last_chainlink: 0.0,
@@ -138,6 +147,15 @@ pub struct PendingEntry {
     pub live_synced: bool, // true if synced from live fill — skip recalculation in flush_pending
 }
 
+#[derive(Clone)]
+pub struct WalletEvent {
+    pub symbol: String,
+    pub direction: String,
+    pub spike: f64,
+    pub status: String,
+    pub reason: String,
+}
+
 pub struct PaperWallet {
     pub balance: f64,
     pub starting_balance: f64,
@@ -152,6 +170,7 @@ pub struct PaperWallet {
     pub pending_closes: Vec<PendingClose>,
     pub trade_history: Vec<TradeRecord>,
     pub history: Vec<HistoryPoint>, // Chart performance data
+    pub events: Vec<WalletEvent>,
     symbol_states: HashMap<String, SymbolMarketState>,
     config: AppConfig,
 }
@@ -174,6 +193,7 @@ impl PaperWallet {
             pending_closes: Vec::new(),
             trade_history: Vec::new(),
             history: Vec::new(),
+            events: Vec::new(),
             symbol_states: HashMap::new(),
             config,
         }
@@ -239,11 +259,16 @@ impl PaperWallet {
         self.pending_closes.clear();
         self.trade_history.clear();
         self.history.clear(); // Clear chart data
+        self.events.clear();
         self.symbol_states.clear();
         
         // Delete saved state file
         let _ = std::fs::remove_file(Self::STATE_FILE);
         tracing::info!("Paper wallet reset to initial state");
+    }
+
+    pub fn drain_events(&mut self) -> Vec<WalletEvent> {
+        self.events.drain(..).collect()
     }
 
     pub fn update_config(&mut self, config: AppConfig) {
@@ -276,16 +301,22 @@ impl PaperWallet {
         if let Some(state) = self.symbol_states.get_mut(symbol) {
             state.up_bid = 0.0; state.up_ask = 0.0;
             state.down_bid = 0.0; state.down_ask = 0.0;
+            state.up_bids.clear(); state.up_asks.clear();
+            state.down_bids.clear(); state.down_asks.clear();
         }
     }
 
-    pub fn update_share_price(&mut self, symbol: &str, direction: &str, bid: f64, ask: f64) {
+    pub fn update_share_price(&mut self, symbol: &str, direction: &str, bid: f64, ask: f64, bids: Vec<BookLevel>, asks: Vec<BookLevel>) {
         let state = self.symbol_states.entry(symbol.to_string()).or_default();
         let mid_price = (bid + ask) / 2.0;
         if direction == "UP" {
             state.up_bid = bid; state.up_ask = ask;
+            if !bids.is_empty() { state.up_bids = bids; }
+            if !asks.is_empty() { state.up_asks = asks; }
         } else {
             state.down_bid = bid; state.down_ask = ask;
+            if !bids.is_empty() { state.down_bids = bids; }
+            if !asks.is_empty() { state.down_asks = asks; }
         }
 
         // Update best price for all positions of this symbol/direction
@@ -451,6 +482,52 @@ impl PaperWallet {
         if let Some(state) = self.symbol_states.get(symbol) {
             if direction == "UP" { (state.up_bid, state.up_ask) } else { (state.down_bid, state.down_ask) }
         } else { (0.0, 0.0) }
+    }
+
+    fn get_book(&self, symbol: &str, direction: &str) -> (Vec<BookLevel>, Vec<BookLevel>) {
+        self.symbol_states.get(symbol).map(|state| {
+            if direction == "UP" { (state.up_bids.clone(), state.up_asks.clone()) } else { (state.down_bids.clone(), state.down_asks.clone()) }
+        }).unwrap_or_default()
+    }
+
+    fn simulate_fak_buy(&self, symbol: &str, direction: &str, usdc_budget: f64, limit_price: f64) -> Option<(f64, f64, f64)> {
+        let (_bids, mut asks) = self.get_book(symbol, direction);
+        if asks.is_empty() {
+            return None;
+        }
+        asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+        let mut remaining = usdc_budget;
+        let mut shares = 0.0;
+        let mut spent = 0.0;
+        for level in asks {
+            if remaining <= 0.0 || level.price > limit_price { break; }
+            let spend = remaining.min(level.price * level.size);
+            if spend <= 0.0 { continue; }
+            spent += spend;
+            shares += spend / level.price;
+            remaining -= spend;
+        }
+        if shares > 0.0 && spent > 0.0 { Some((spent / shares, shares, spent)) } else { None }
+    }
+
+    fn simulate_fak_sell(&self, symbol: &str, direction: &str, shares_to_sell: f64, limit_price: f64) -> Option<(f64, f64, f64)> {
+        let (mut bids, _asks) = self.get_book(symbol, direction);
+        if bids.is_empty() {
+            return None;
+        }
+        bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+        let mut remaining = shares_to_sell;
+        let mut sold = 0.0;
+        let mut gross = 0.0;
+        for level in bids {
+            if remaining <= 0.0 || level.price < limit_price { break; }
+            let fill = remaining.min(level.size);
+            if fill <= 0.0 { continue; }
+            sold += fill;
+            gross += fill * level.price;
+            remaining -= fill;
+        }
+        if sold > 0.0 && gross > 0.0 { Some((gross / sold, sold, gross)) } else { None }
     }
 
     pub fn get_share_price(&self, symbol: &str, direction: &str) -> f64 {
@@ -764,29 +841,45 @@ impl PaperWallet {
         let mut closed = false;
         for (idx, reason) in to_close {
             let pos = self.open_positions.remove(idx);
-            
-            // USE ACTUAL SPREAD FROM ORDERBOOK (not simulated)
-            // For market SELL orders: we receive the BID price, not the mid
             let (bid, _ask) = self.get_bid_ask(&pos.symbol, &pos.direction);
-            
-            // If we have real orderbook data, use the bid price for sells
-            // Otherwise fall back to mid price
-            let fill_price = if bid > 0.0 {
-                bid // Market sell fills at bid
-            } else {
-                self.get_share_price(&pos.symbol, &pos.direction) // Fall back to mid
+
+            if bid <= 0.0 {
+                self.events.push(WalletEvent { symbol: pos.symbol.clone(), direction: pos.direction.clone(), spike: pos.entry_spike, status: "REJECTED".to_string(), reason: format!("EXIT_NO_BID_{}", reason) });
+                self.open_positions.push(pos);
+                continue;
+            }
+
+            let limit_price = if bid > 0.04 { (bid - 0.04).max(0.01) } else { 0.01 };
+            let Some((fill_price, sold_shares, gross_revenue)) = self.simulate_fak_sell(&pos.symbol, &pos.direction, pos.shares, limit_price) else {
+                self.events.push(WalletEvent { symbol: pos.symbol.clone(), direction: pos.direction.clone(), spike: pos.entry_spike, status: "REJECTED".to_string(), reason: format!("EXIT_NO_FAK_LIQUIDITY_{}", reason) });
+                self.open_positions.push(pos);
+                continue;
             };
-            
-            let sell_fee = self.calculate_fee(pos.shares, fill_price);
-            let net_revenue = (pos.shares * fill_price) - sell_fee;
-            let pnl = net_revenue - (pos.position_size + pos.buy_fee);
+
+            let fill_ratio = (sold_shares / pos.shares).clamp(0.0, 1.0);
+            let closed_cost = pos.position_size * fill_ratio;
+            let closed_buy_fee = pos.buy_fee * fill_ratio;
+            let sell_fee = self.calculate_fee(sold_shares, fill_price);
+            let net_revenue = gross_revenue - sell_fee;
+            let pnl = net_revenue - (closed_cost + closed_buy_fee);
             let state = self.symbol_states.get(&pos.symbol).cloned().unwrap_or_default();
+
+            if sold_shares + 0.000001 < pos.shares {
+                let mut remaining = pos.clone();
+                remaining.shares = pos.shares - sold_shares;
+                remaining.position_size = pos.position_size - closed_cost;
+                remaining.buy_fee = pos.buy_fee - closed_buy_fee;
+                self.open_positions.push(remaining);
+                self.events.push(WalletEvent { symbol: pos.symbol.clone(), direction: pos.direction.clone(), spike: pos.entry_spike, status: "EXIT".to_string(), reason: format!("{}_PARTIAL_FILL({:.2}/{:.2})", reason, sold_shares, pos.shares) });
+            } else {
+                self.events.push(WalletEvent { symbol: pos.symbol.clone(), direction: pos.direction.clone(), spike: pos.entry_spike, status: "EXIT".to_string(), reason: reason.to_string() });
+            }
 
             self.balance += net_revenue;
             self.trade_count += 1;
             if pnl > 0.0 { self.wins += 1; } else { self.losses += 1; }
-            self.total_fees_paid += pos.buy_fee + sell_fee;
-            self.total_volume += pos.position_size + (pos.shares * fill_price);
+            self.total_fees_paid += closed_buy_fee + sell_fee;
+            self.total_volume += closed_cost + gross_revenue;
             self.trade_history.push(TradeRecord {
                 symbol: pos.symbol.clone(),
                 r#type: "exit".to_string(),
@@ -794,15 +887,15 @@ impl PaperWallet {
                 direction: pos.direction.clone(),
                 entry_price: Some(pos.entry_price),
                 exit_price: Some(fill_price),
-                shares: pos.shares,
-                cost: pos.position_size,
+                shares: sold_shares,
+                cost: closed_cost,
                 pnl: Some(pnl),
                 cumulative_pnl: None,
                 balance_after: None,
                 timestamp: chrono::Local::now().to_rfc3339(),
                 close_reason: Some(reason.to_string()),
             });
-            info!(symbol=%pos.symbol, pnl=format!("${:.4}", pnl), reason=%reason, fill_price=fill_price, "Position closed at bid price");
+            info!(symbol=%pos.symbol, pnl=format!("${:.4}", pnl), reason=%reason, fill_price=fill_price, sold_shares=sold_shares, "Position closed with FAK bid-depth simulation");
             closed = true;
         }
         closed
@@ -932,45 +1025,53 @@ impl PaperWallet {
             let state = self.symbol_states.get(&p.symbol).cloned().unwrap_or_default();
 
             // If this entry was synced from a live fill, use exact values — no recalculation
-            let (fill_price, actual_shares, actual_fee) = if p.live_synced {
-                (p.entry_price, p.shares, p.buy_fee)
+            let (fill_price, actual_shares, actual_fee, actual_position_size) = if p.live_synced {
+                (p.entry_price, p.shares, p.buy_fee, p.position_size)
             } else {
-                // USE ACTUAL SPREAD FROM ORDERBOOK (not simulated)
-                // For market BUY orders: we pay the ASK price, not the mid
-                // This is real slippage from the actual orderbook
                 let (_bid, ask) = self.get_bid_ask(&p.symbol, &p.direction);
-
-                // If we have real orderbook data, use the ask price for buys
-                // Otherwise fall back to mid price
-                let fp = if ask > 0.0 {
-                    ask // Market buy fills at ask
-                } else {
-                    p.entry_price // Fall back to mid price
+                if ask <= 0.0 {
+                    self.balance += p.position_size + p.buy_fee;
+                    self.events.push(WalletEvent { symbol: p.symbol.clone(), direction: p.direction.clone(), spike: p.spike, status: "REJECTED".to_string(), reason: "ENTRY_NO_ASK_LIQUIDITY".to_string() });
+                    info!(symbol=%p.symbol, direction=%p.direction, "Entry killed at fill time — no ask liquidity");
+                    continue;
+                }
+                let limit_price = (ask + 0.04).min(0.99);
+                let Some((fp, shares, spent_usdc)) = self.simulate_fak_buy(&p.symbol, &p.direction, p.position_size, limit_price) else {
+                    self.balance += p.position_size + p.buy_fee;
+                    self.events.push(WalletEvent { symbol: p.symbol.clone(), direction: p.direction.clone(), spike: p.spike, status: "REJECTED".to_string(), reason: "ENTRY_NO_FAK_LIQUIDITY".to_string() });
+                    info!(symbol=%p.symbol, direction=%p.direction, ask=ask, limit=limit_price, "Entry killed at fill time — no orderbook liquidity within FAK limit");
+                    continue;
                 };
 
                 // Re-check price bounds at fill time — price may have moved during execution delay
                 // If fill price is now outside min/max, cancel the entry and refund balance
                 if fp < self.config.min_entry_price || fp > self.config.max_entry_price {
                     self.balance += p.position_size + p.buy_fee;
+                    self.events.push(WalletEvent { symbol: p.symbol.clone(), direction: p.direction.clone(), spike: p.spike, status: "REJECTED".to_string(), reason: "ENTRY_PRICE_MOVED_OUTSIDE_BOUNDS".to_string() });
                     info!(symbol=%p.symbol, direction=%p.direction, fill_price=fp,
                         min=self.config.min_entry_price, max=self.config.max_entry_price,
                         "Entry cancelled at fill time — price moved outside bounds");
                     continue;
                 }
 
-                // Recalculate shares at actual fill price
-                let shares = p.position_size / fp;
                 let fee = self.calculate_fee(shares, fp);
-
-                // Adjust balance if fee changed
-                let fee_diff = fee - p.buy_fee;
-                if fee_diff > 0.0 && self.balance >= fee_diff {
-                    self.balance -= fee_diff;
-                } else if fee_diff < 0.0 {
-                    self.balance -= fee_diff; // Add back savings
+                let reserved = p.position_size + p.buy_fee;
+                let actual_total = spent_usdc + fee;
+                if reserved >= actual_total {
+                    self.balance += reserved - actual_total;
+                } else {
+                    let extra = actual_total - reserved;
+                    if self.balance >= extra {
+                        self.balance -= extra;
+                    } else {
+                        self.balance += reserved;
+                        self.events.push(WalletEvent { symbol: p.symbol.clone(), direction: p.direction.clone(), spike: p.spike, status: "REJECTED".to_string(), reason: "ENTRY_INSUFFICIENT_FEE_BALANCE".to_string() });
+                        info!(symbol=%p.symbol, direction=%p.direction, extra=extra, "Entry killed at fill time — insufficient balance for FAK fee");
+                        continue;
+                    }
                 }
 
-                (fp, shares, fee)
+                (fp, shares, fee, spent_usdc)
             };
             
             self.trade_history.push(TradeRecord {
@@ -981,7 +1082,7 @@ impl PaperWallet {
                 entry_price: Some(fill_price),
                 exit_price: None,
                 shares: actual_shares,
-                cost: p.position_size,
+                cost: actual_position_size,
                 pnl: None,
                 cumulative_pnl: None,
                 balance_after: None,
@@ -1003,7 +1104,7 @@ impl PaperWallet {
                 entry_price: fill_price,
                 avg_entry_price: fill_price,
                 shares: actual_shares,
-                position_size: p.position_size,
+                position_size: actual_position_size,
                 buy_fee: actual_fee,
                 entry_spike: p.spike,
                 entry_time: Instant::now(),
@@ -1020,7 +1121,7 @@ impl PaperWallet {
                 trailing_stop_activated: false,
                 on_chain_shares: None,
             });
-            info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened at ask price");
+            info!(symbol=%sym, direction=%dir, requested_price=p.entry_price, fill_price=fill_price, spread_slippage=slippage, shares=actual_shares, level=level, "Position opened with FAK orderbook simulation");
         }
     }
 }
