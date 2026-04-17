@@ -304,11 +304,32 @@
             flex-direction: column;
             gap: 6px;
         }
+        .setting-section {
+            grid-column: 1 / -1;
+            margin-top: 4px;
+            padding-top: 10px;
+            border-top: 1px solid var(--border-dim);
+            font-size: 10px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            font-weight: 700;
+            letter-spacing: 0.04em;
+        }
         .setting-label {
             font-size: 10px;
             text-transform: uppercase;
             color: var(--text-dim);
             font-weight: 700;
+        }
+        .setting-check {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 40px;
+        }
+        .setting-check input {
+            width: 16px;
+            height: 16px;
         }
         .setting-input {
             background: var(--bg-accent);
@@ -375,6 +396,7 @@
                 <div style="cursor:pointer; color:var(--text-dim);" onclick="closeSettings()">✕</div>
             </div>
             <div class="settings-grid">
+                <div class="setting-section">Entry</div>
                 <div class="setting-group">
                     <label class="setting-label">Spike Threshold ($)</label>
                     <input type="number" id="set-threshold" class="setting-input" placeholder="e.g. 20">
@@ -385,36 +407,83 @@
                 </div>
                 <div class="setting-group">
                     <label class="setting-label">Max Entry Price</label>
-                    <input type="number" id="set-maxprice" class="setting-input" step="0.01" placeholder="e.g. 0.70">
+                    <input type="number" id="set-maxprice" class="setting-input" step="0.01" placeholder="e.g. 0.80">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Trailing Stop (%)</label>
-                    <input type="number" id="set-trailing" class="setting-input" step="0.1" placeholder="e.g. 10">
+                    <label class="setting-label">Min Entry Price</label>
+                    <input type="number" id="set-minprice" class="setting-input" step="0.01" placeholder="e.g. 0.05">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Spike Faded Threshold</label>
-                    <input type="number" id="set-spiked-faded" class="setting-input" step="0.01" placeholder="e.g. 0.25">
+                    <label class="setting-label">Trend Reversal (%)</label>
+                    <input type="number" id="set-trend-reversal" class="setting-input" step="1" placeholder="e.g. 50">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Profit Target (%)</label>
-                    <input type="number" id="set-profit" class="setting-input" step="0.1" placeholder="e.g. 0">
+                    <label class="setting-label">Trend Reversal Floor ($)</label>
+                    <input type="number" id="set-trend-reversal-threshold" class="setting-input" step="0.1" placeholder="e.g. 10">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Max Spread (BPS)</label>
-                    <input type="number" id="set-spread" class="setting-input" placeholder="e.g. 100">
+                    <label class="setting-label">Spike Faded (%)</label>
+                    <input type="number" id="set-spike-faded" class="setting-input" step="1" placeholder="e.g. 50">
                 </div>
                 <div class="setting-group">
-                    <label class="setting-label">Spike Scaling Factor</label>
-                    <input type="number" id="set-scaling" class="setting-input" step="0.0001" placeholder="e.g. 0.0001">
+                    <label class="setting-label">Spike Faded MS</label>
+                    <input type="number" id="set-spike-faded-ms" class="setting-input" placeholder="e.g. 200">
                 </div>
-                <div class="setting-group sim-only">
-                    <label class="setting-label">Fee Rate</label>
-                    <input type="number" id="set-fee" class="setting-input" step="0.001" placeholder="e.g. 0.072">
+                <div class="setting-group">
+                    <label class="setting-label">Min Hold MS</label>
+                    <input type="number" id="set-min-hold" class="setting-input" placeholder="e.g. 1500">
                 </div>
                 <div class="setting-group sim-only">
                     <label class="setting-label">Execution Delay (ms)</label>
                     <input type="number" id="set-delay" class="setting-input" placeholder="e.g. 300">
                 </div>
+                <div class="setting-group">
+                    <label class="setting-label">Spike Sustain (ms)</label>
+                    <input type="number" id="set-spike-sustain-ms" class="setting-input" placeholder="e.g. 50">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Min Price Distance</label>
+                    <input type="number" id="set-min-price-distance" class="setting-input" step="0.01" placeholder="e.g. 0.05">
+                </div>
+                <div class="setting-section">Exit</div>
+                <div class="setting-group">
+                    <label class="setting-label">Trailing Stop (%)</label>
+                    <input type="number" id="set-trailing-stop-pct" class="setting-input" step="0.1" placeholder="e.g. 10">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Trailing Activation (%)</label>
+                    <input type="number" id="set-trailing-stop-activation" class="setting-input" step="0.1" placeholder="e.g. 20">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Stop Loss (%)</label>
+                    <input type="number" id="set-stop-loss-pct" class="setting-input" step="0.1" placeholder="e.g. 30">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Early Exit Loss (%)</label>
+                    <input type="number" id="set-early-exit-loss-pct" class="setting-input" step="0.1" placeholder="e.g. 20">
+                </div>
+                <div class="setting-section">Hold Mode</div>
+                <div class="setting-group">
+                    <label class="setting-label">Hold Min Share Price</label>
+                    <input type="number" id="set-hold-min-share-price" class="setting-input" step="0.01" placeholder="e.g. 0.80">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Hold Safety Margin ($)</label>
+                    <input type="number" id="set-hold-safety-margin" class="setting-input" step="0.1" placeholder="e.g. 20">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Hold Margin / Sec ($)</label>
+                    <input type="number" id="set-hold-margin-per-second" class="setting-input" step="0.1" placeholder="e.g. 1.5">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Hold Max Seconds</label>
+                    <input type="number" id="set-hold-max-seconds" class="setting-input" placeholder="e.g. 90">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Hold Max Crossings</label>
+                    <input type="number" id="set-hold-max-crossings" class="setting-input" placeholder="e.g. 2">
+                </div>
+                <div class="setting-section">Risk</div>
                 <div class="setting-group">
                     <label class="setting-label">Max Orders/Min</label>
                     <input type="number" id="set-max-orders" class="setting-input" placeholder="e.g. 20">
@@ -430,6 +499,35 @@
                 <div class="setting-group">
                     <label class="setting-label">Max Drawdown (%)</label>
                     <input type="number" id="set-drawdown" class="setting-input" step="0.1" placeholder="e.g. 30">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Crypto Fee Rate</label>
+                    <input type="number" id="set-crypto-fee-rate" class="setting-input" step="0.001" placeholder="e.g. 0.072">
+                </div>
+                <div class="setting-section">Trend Filter</div>
+                <div class="setting-group setting-check">
+                    <input type="checkbox" id="set-trend-filter-enabled">
+                    <label class="setting-label" for="set-trend-filter-enabled">Trend Filter Enabled</label>
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Trend Min Magnitude ($)</label>
+                    <input type="number" id="set-trend-min-magnitude-usd" class="setting-input" step="0.1" placeholder="e.g. 30">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Counter Trend Multiplier</label>
+                    <input type="number" id="set-counter-trend-multiplier" class="setting-input" step="0.1" placeholder="e.g. 2.5">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Trend Max Magnitude ($)</label>
+                    <input type="number" id="set-trend-max-magnitude-usd" class="setting-input" step="1" placeholder="e.g. 150">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">PTB Neutral Zone ($)</label>
+                    <input type="number" id="set-ptb-neutral-zone-usd" class="setting-input" step="1" placeholder="e.g. 20">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">PTB Max Counter Distance ($)</label>
+                    <input type="number" id="set-ptb-max-counter-distance-usd" class="setting-input" step="1" placeholder="e.g. 200">
                 </div>
                 <button class="save-btn" onclick="saveSettings()">Save & Apply Changes</button>
             </div>
@@ -462,12 +560,10 @@
             <div class="metric-mini">
                 <div class="m-label">Portfolio Value</div>
                 <div class="m-value" id="v-portfolio">$0.00</div>
-                <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">Start: <span id="v-portfolio-start">$0.00</span></div>
             </div>
             <div class="metric-mini">
                 <div class="m-label">Wallet Balance</div>
                 <div class="m-value" id="v-balance">$0.00</div>
-                <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">Start: <span id="v-balance-start">$0.00</span></div>
             </div>
             <div class="metric-mini">
                 <div class="m-label">Total PnL</div>
@@ -487,8 +583,8 @@
                 <div style="font-size:10px; color:var(--text-muted); margin-top:2px;" id="v-trade-count">0 trades</div>
             </div>
             <div class="metric-mini">
-                <div class="m-label">Uptime</div>
-                <div class="m-value" id="v-uptime">0:00:00</div>
+                <div class="m-label">Total Volume</div>
+                <div class="m-value" id="v-volume">$0.00</div>
             </div>
             <div class="metric-mini">
                 <div class="m-label">Total Fees</div>
@@ -590,7 +686,7 @@
                 </div>
                 <div class="terminal-panel">
                     <div class="term-line term-header">
-                        <span>Time</span><span>Sym</span><span>Side</span><span>Spike</span><span>Price</span><span>Status</span><span>Reason</span>
+                        <span>Time</span><span>Sym</span><span>Side</span><span>Spike</span><span>Status</span><span>Reason</span>
                     </div>
                     <div id="signal-log" style="overflow-y:auto; flex:1;"></div>
                 </div>
@@ -605,7 +701,7 @@
                 <div class="list-container" id="list-trades"></div>
             </div>
             
-            <div class="panel" style="height: 440px;">
+            <div class="panel" style="height: 300px;">
                 <div class="panel-header">
                     <div class="panel-title">Recent Settled</div>
                 </div>
@@ -621,6 +717,17 @@
         
         // Mode display — driven by server broadcast, not port
         let currentMode = 'sim';
+
+        const setInputValue = (id, value, options = {}) => {
+            const el = document.getElementById(id);
+            if (!el || value === undefined) return;
+            if (el.type === 'checkbox') {
+                el.checked = Boolean(value);
+                return;
+            }
+            if (!options.force && document.activeElement === el) return;
+            el.value = value;
+        };
 
         const updateMode = (isLive) => {
             const btnSim = document.getElementById('btn-sim');
@@ -646,6 +753,7 @@
         let startingBalance = 27.0;
         const spikeHistory = { labels: [], data: [] };
         const MAX_SPIKE_POINTS = 120;
+        let wsMessageCount = 0; // Throttle chart updates
 
         // Position age timers
         let positionEntryTimes = []; // ms timestamps
@@ -738,20 +846,38 @@
                 const res = await fetch('/config');
                 if (res.ok) {
                     const c = await res.json();
-                    const set = (id, val) => { if (val !== undefined) document.getElementById(id).value = val; };
-                    set('set-threshold', (c.threshold_bps / 100).toFixed(0));
-                    set('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
-                    set('set-maxprice', c.max_entry_price);
-                    set('set-profit', (c.profit_target_pct * 100).toFixed(1));
-                    set('set-trailing', c.trailing_stop_pct);
-                    set('set-spiked-faded', c.spike_faded_pct);
-                    set('set-spread', c.max_spread_bps);
-                    set('set-scaling', c.spike_scaling_factor);
-                    set('set-delay', c.execution_delay_ms);
-                    set('set-max-orders', c.max_orders_per_minute);
-                    set('set-daily-loss', c.max_daily_loss);
-                    set('set-market-exposure', c.max_exposure_per_market);
-                    set('set-drawdown', c.max_drawdown_pct);
+                    setInputValue('set-threshold', (c.threshold_bps / 100).toFixed(0), { force: true });
+                    setInputValue('set-portfolio', (c.portfolio_pct * 100).toFixed(1), { force: true });
+                    setInputValue('set-maxprice', c.max_entry_price, { force: true });
+                    setInputValue('set-minprice', c.min_entry_price, { force: true });
+                    setInputValue('set-trend-reversal', c.trend_reversal_pct, { force: true });
+                    setInputValue('set-trend-reversal-threshold', c.trend_reversal_threshold, { force: true });
+                    setInputValue('set-spike-faded', c.spike_faded_pct, { force: true });
+                    setInputValue('set-spike-faded-ms', c.spike_faded_ms, { force: true });
+                    setInputValue('set-min-hold', c.min_hold_ms, { force: true });
+                    setInputValue('set-trailing-stop-pct', c.trailing_stop_pct, { force: true });
+                    setInputValue('set-trailing-stop-activation', c.trailing_stop_activation, { force: true });
+                    setInputValue('set-stop-loss-pct', c.stop_loss_pct, { force: true });
+                    setInputValue('set-hold-min-share-price', c.hold_min_share_price, { force: true });
+                    setInputValue('set-hold-safety-margin', c.hold_safety_margin, { force: true });
+                    setInputValue('set-early-exit-loss-pct', (c.early_exit_loss_pct * 100).toFixed(1), { force: true });
+                    setInputValue('set-hold-margin-per-second', c.hold_margin_per_second, { force: true });
+                    setInputValue('set-hold-max-seconds', c.hold_max_seconds, { force: true });
+                    setInputValue('set-hold-max-crossings', c.hold_max_crossings, { force: true });
+                    setInputValue('set-delay', c.execution_delay_ms, { force: true });
+                    setInputValue('set-spike-sustain-ms', c.spike_sustain_ms, { force: true });
+                    setInputValue('set-min-price-distance', c.min_price_distance, { force: true });
+                    setInputValue('set-max-orders', c.max_orders_per_minute, { force: true });
+                    setInputValue('set-daily-loss', c.max_daily_loss, { force: true });
+                    setInputValue('set-market-exposure', c.max_exposure_per_market, { force: true });
+                    setInputValue('set-drawdown', (c.max_drawdown_pct * 100).toFixed(1), { force: true });
+                    setInputValue('set-crypto-fee-rate', c.crypto_fee_rate, { force: true });
+                    setInputValue('set-trend-filter-enabled', c.trend_filter_enabled, { force: true });
+                    setInputValue('set-trend-min-magnitude-usd', c.trend_min_magnitude_usd, { force: true });
+                    setInputValue('set-counter-trend-multiplier', c.counter_trend_multiplier, { force: true });
+                    setInputValue('set-trend-max-magnitude-usd', c.trend_max_magnitude_usd, { force: true });
+                    setInputValue('set-ptb-neutral-zone-usd', c.ptb_neutral_zone_usd, { force: true });
+                    setInputValue('set-ptb-max-counter-distance-usd', c.ptb_max_counter_distance_usd, { force: true });
                 }
             } catch(e) {}
             document.getElementById('settings-modal').style.display = 'flex';
@@ -768,17 +894,36 @@
                 _type: 'settings',
                 threshold_bps: Math.round(parseFloat(document.getElementById('set-threshold').value) * 100),
                 portfolio_pct: parseFloat(document.getElementById('set-portfolio').value) / 100,
-                profit_target_pct: parseFloat(document.getElementById('set-profit').value) / 100,
-                trailing_stop_pct: parseFloat(document.getElementById('set-trailing').value),
-                spike_faded_pct: parseFloat(document.getElementById('set-spiked-faded').value),
-                max_spread_bps: parseInt(document.getElementById('set-spread').value),
                 max_entry_price: parseFloat(document.getElementById('set-maxprice').value),
-                spike_scaling_factor: parseFloat(document.getElementById('set-scaling').value),
+                min_entry_price: parseFloat(document.getElementById('set-minprice').value),
+                trend_reversal_pct: parseFloat(document.getElementById('set-trend-reversal').value),
+                trend_reversal_threshold: parseFloat(document.getElementById('set-trend-reversal-threshold').value),
+                spike_faded_pct: parseFloat(document.getElementById('set-spike-faded').value),
+                spike_faded_ms: parseInt(document.getElementById('set-spike-faded-ms').value),
+                min_hold_ms: parseInt(document.getElementById('set-min-hold').value),
+                trailing_stop_pct: parseFloat(document.getElementById('set-trailing-stop-pct').value),
+                trailing_stop_activation: parseFloat(document.getElementById('set-trailing-stop-activation').value),
+                stop_loss_pct: parseFloat(document.getElementById('set-stop-loss-pct').value),
+                hold_min_share_price: parseFloat(document.getElementById('set-hold-min-share-price').value),
+                hold_safety_margin: parseFloat(document.getElementById('set-hold-safety-margin').value),
+                early_exit_loss_pct: parseFloat(document.getElementById('set-early-exit-loss-pct').value) / 100,
+                hold_margin_per_second: parseFloat(document.getElementById('set-hold-margin-per-second').value),
+                hold_max_seconds: parseInt(document.getElementById('set-hold-max-seconds').value),
+                hold_max_crossings: parseInt(document.getElementById('set-hold-max-crossings').value),
                 execution_delay_ms: parseInt(document.getElementById('set-delay').value),
+                spike_sustain_ms: parseInt(document.getElementById('set-spike-sustain-ms').value),
+                min_price_distance: parseFloat(document.getElementById('set-min-price-distance').value),
                 max_orders_per_minute: parseInt(document.getElementById('set-max-orders').value),
                 max_daily_loss: parseFloat(document.getElementById('set-daily-loss').value),
                 max_exposure_per_market: parseFloat(document.getElementById('set-market-exposure').value),
-                max_drawdown_pct: parseFloat(document.getElementById('set-drawdown').value),
+                max_drawdown_pct: parseFloat(document.getElementById('set-drawdown').value) / 100,
+                crypto_fee_rate: parseFloat(document.getElementById('set-crypto-fee-rate').value),
+                trend_filter_enabled: document.getElementById('set-trend-filter-enabled').checked,
+                trend_min_magnitude_usd: parseFloat(document.getElementById('set-trend-min-magnitude-usd').value),
+                counter_trend_multiplier: parseFloat(document.getElementById('set-counter-trend-multiplier').value),
+                trend_max_magnitude_usd: parseFloat(document.getElementById('set-trend-max-magnitude-usd').value),
+                ptb_neutral_zone_usd: parseFloat(document.getElementById('set-ptb-neutral-zone-usd').value),
+                ptb_max_counter_distance_usd: parseFloat(document.getElementById('set-ptb-max-counter-distance-usd').value),
             };
 
             try {
@@ -837,238 +982,190 @@
 
         const updateUI = (sim) => {
             if (!sim) return;
-            
-            console.log('updateUI called with data:', sim);
-            
-            // Declare variables at function scope so they're accessible in all try-catch blocks
+            wsMessageCount++;
+            // Skip heavy DOM/chart updates when tab is hidden (browser backgrounded)
+            if (document.hidden) return;
             const totalVal = sim.total_portfolio_value || 0;
+            startingBalance = sim.starting_balance || 27.0;
             const totalPnL = sim.total_pnl || 0;
             const unrealized = sim.unrealized_pnl || 0;
-            const realized = sim.realized_pnl || 0;
             const posArr = sim.positions || [];
-            startingBalance = sim.starting_balance || 27.0;
+
+            // Update running state
+            if (typeof sim.running === 'boolean') {
+                botRunning = sim.running;
+                const btn = document.getElementById('toggle-btn');
+                if (botRunning) {
+                    btn.innerText = '■ STOP';
+                    btn.style.borderColor = 'var(--color-down)';
+                    btn.style.color = 'var(--color-down)';
+                } else {
+                    btn.innerText = '▶ START';
+                    btn.style.borderColor = 'var(--color-up)';
+                    btn.style.color = 'var(--color-up)';
+                }
+            }
+            if (typeof sim.is_live === 'boolean') {
+                updateMode(sim.is_live);
+                const addrEl = document.getElementById('wallet-address');
+                if (sim.is_live && sim.wallet_address) {
+                    const addr = sim.wallet_address;
+                    addrEl.innerText = addr.slice(0, 6) + '...' + addr.slice(-4);
+                    addrEl.style.display = 'block';
+                } else {
+                    addrEl.style.display = 'none';
+                }
+            }
+
+            if (sim.config) {
+                const c = sim.config;
+                setInputValue('set-threshold', (c.threshold_bps / 100).toFixed(0));
+                setInputValue('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
+                setInputValue('set-maxprice', c.max_entry_price);
+                setInputValue('set-minprice', c.min_entry_price);
+                setInputValue('set-trend-reversal', c.trend_reversal_pct);
+                setInputValue('set-trend-reversal-threshold', c.trend_reversal_threshold);
+                setInputValue('set-spike-faded', c.spike_faded_pct);
+                setInputValue('set-spike-faded-ms', c.spike_faded_ms);
+                setInputValue('set-min-hold', c.min_hold_ms);
+                setInputValue('set-trailing-stop-pct', c.trailing_stop_pct);
+                setInputValue('set-trailing-stop-activation', c.trailing_stop_activation);
+                setInputValue('set-stop-loss-pct', c.stop_loss_pct);
+                setInputValue('set-hold-min-share-price', c.hold_min_share_price);
+                setInputValue('set-hold-safety-margin', c.hold_safety_margin);
+                setInputValue('set-early-exit-loss-pct', (c.early_exit_loss_pct * 100).toFixed(1));
+                setInputValue('set-hold-margin-per-second', c.hold_margin_per_second);
+                setInputValue('set-hold-max-seconds', c.hold_max_seconds);
+                setInputValue('set-hold-max-crossings', c.hold_max_crossings);
+                setInputValue('set-delay', c.execution_delay_ms);
+                setInputValue('set-spike-sustain-ms', c.spike_sustain_ms);
+                setInputValue('set-min-price-distance', c.min_price_distance);
+                setInputValue('set-max-orders', c.max_orders_per_minute);
+                setInputValue('set-daily-loss', c.max_daily_loss);
+                setInputValue('set-market-exposure', c.max_exposure_per_market);
+                setInputValue('set-drawdown', (c.max_drawdown_pct * 100).toFixed(1));
+                setInputValue('set-crypto-fee-rate', c.crypto_fee_rate);
+                setInputValue('set-trend-filter-enabled', c.trend_filter_enabled);
+                setInputValue('set-trend-min-magnitude-usd', c.trend_min_magnitude_usd);
+                setInputValue('set-counter-trend-multiplier', c.counter_trend_multiplier);
+                setInputValue('set-trend-max-magnitude-usd', c.trend_max_magnitude_usd);
+                setInputValue('set-ptb-neutral-zone-usd', c.ptb_neutral_zone_usd);
+                setInputValue('set-ptb-max-counter-distance-usd', c.ptb_max_counter_distance_usd);
+            }
+
+            document.getElementById('v-portfolio').innerText = formatMoney(totalVal);
+            document.getElementById('v-balance').innerText = formatMoney(sim.balance || 0);
+            document.getElementById('v-total-pnl').innerText = formatMoneySigned(totalPnL);
+            document.getElementById('v-total-pnl').className = 'm-value ' + (totalPnL >= 0 ? 'val-up' : 'val-down');
+            document.getElementById('v-unrealized').innerText = formatMoneySigned(unrealized);
+            document.getElementById('v-unrealized').className = 'm-value ' + (unrealized >= 0 ? 'val-up' : 'val-down');
+            const realized = sim.realized_pnl || 0;
+            document.getElementById('v-realized').innerText = formatMoneySigned(realized);
+            document.getElementById('v-realized').className = 'm-value ' + (realized >= 0 ? 'val-up' : 'val-down');
             
-            try {
-                // Update running state
-                if (typeof sim.running === 'boolean') {
-                    botRunning = sim.running;
-                    const btn = document.getElementById('toggle-btn');
-                    if (botRunning) {
-                        btn.innerText = '■ STOP';
-                        btn.style.borderColor = 'var(--color-down)';
-                        btn.style.color = 'var(--color-down)';
-                    } else {
-                        btn.innerText = '▶ START';
-                        btn.style.borderColor = 'var(--color-up)';
-                        btn.style.color = 'var(--color-up)';
-                    }
-                }
-                if (typeof sim.is_live === 'boolean') {
-                    updateMode(sim.is_live);
-                    const addrEl = document.getElementById('wallet-address');
-                    if (sim.is_live && sim.wallet_address) {
-                        const addr = sim.wallet_address;
-                        addrEl.innerText = addr.slice(0, 6) + '...' + addr.slice(-4);
-                        addrEl.style.display = 'block';
-                    } else {
-                        addrEl.style.display = 'none';
-                    }
-                }
-            } catch (err) {
-                console.error('Error updating bot state:', err);
+            const wins = sim.wins || 0, losses = sim.losses || 0;
+            const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100).toFixed(1) : '0.0';
+            document.getElementById('v-winrate').innerText = wr + '%';
+            document.getElementById('v-trade-count').innerText = (wins + losses) + ' trades';
+            document.getElementById('v-volume').innerText = formatMoney(sim.total_volume || 0);
+            document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
+
+            let marketData = {};
+            if (sim.markets) {
+                marketData = sim.markets.BTC || sim.markets[Object.keys(sim.markets)[0]] || {};
+            }
+            const m = marketData;
+
+            document.getElementById('m-question').innerText = (m.question || 'AWAITING DATA...').toUpperCase();
+            document.getElementById('m-binance').innerText = '$' + (m.binance || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+            document.getElementById('m-chainlink').innerText = '$' + (m.chainlink || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+            if (m.price_to_beat) {
+                const margin = (m.chainlink || 0) - m.price_to_beat;
+                const sign = margin >= 0 ? '+' : '';
+                document.getElementById('m-ptb').innerText = '$' + m.price_to_beat.toLocaleString(undefined, {minimumFractionDigits: 2}) + ' (' + sign + '$' + margin.toFixed(2) + ')';
+                document.getElementById('m-ptb').style.color = margin >= 0 ? 'var(--color-up)' : 'var(--color-down)';
+            }
+            document.getElementById('m-up').innerText = (m.up_price || 0).toFixed(4);
+            document.getElementById('m-down').innerText = (m.down_price || 0).toFixed(4);
+            document.getElementById('m-spike').innerText = (m.spike || 0).toFixed(2);
+             
+            const spikeMag = Math.min(Math.abs(m.spike || 0) / 100, 1) * 50;
+            const bar = document.getElementById('m-spike-fill');
+            bar.style.width = spikeMag + '%';
+            bar.style.left = m.spike >= 0 ? '50%' : (50 - spikeMag) + '%';
+            bar.style.background = m.spike >= 0 ? 'var(--color-up)' : 'var(--color-down)';
+
+            // Threshold markers
+            if (sim.config) {
+                const threshUsd = sim.config.threshold_bps / 100;
+                const threshPct = Math.min(threshUsd / 100, 1) * 50;
+                document.getElementById('spike-threshold-pos').style.left = (50 + threshPct) + '%';
+                document.getElementById('spike-threshold-neg').style.left = (50 - threshPct) + '%';
             }
 
-            try {
-
-                if (sim.config) {
-                    const c = sim.config;
-                    const setIfNotFocused = (id, val) => {
-                        const el = document.getElementById(id);
-                        if (el && document.activeElement !== el) el.value = val;
-                    };
-                    setIfNotFocused('set-threshold', (c.threshold_bps / 100).toFixed(0));
-                    setIfNotFocused('set-portfolio', (c.portfolio_pct * 100).toFixed(1));
-                    setIfNotFocused('set-profit', (c.profit_target_pct * 100).toFixed(1));
-                    setIfNotFocused('set-trailing', c.trailing_stop_pct);
-                    setIfNotFocused('set-spiked-faded', c.spike_faded_pct);
-                    setIfNotFocused('set-spread', c.max_spread_bps);
-                    setIfNotFocused('set-maxprice', c.max_entry_price);
-                    setIfNotFocused('set-scaling', c.spike_scaling_factor);
-                    setIfNotFocused('set-delay', c.execution_delay_ms);
+            // Spike mini-chart (throttled to ~1/sec with main chart)
+            if (spikeChart) {
+                const now = new Date().toLocaleTimeString([], {hour12:false});
+                spikeHistory.labels.push(now);
+                spikeHistory.data.push(m.spike || 0);
+                if (spikeHistory.labels.length > MAX_SPIKE_POINTS) {
+                    spikeHistory.labels.shift();
+                    spikeHistory.data.shift();
                 }
-            } catch (err) {
-                console.error('Error updating config:', err);
-            }
-
-            try {
-
-                document.getElementById('v-portfolio').innerText = formatMoney(totalVal);
-                document.getElementById('v-balance').innerText = formatMoney(sim.balance || 0);
-                document.getElementById('v-portfolio-start').innerText = formatMoney(sim.starting_portfolio_value || 0);
-                document.getElementById('v-balance-start').innerText = formatMoney(sim.starting_wallet_balance || 0);
-                document.getElementById('v-total-pnl').innerText = formatMoneySigned(totalPnL);
-                document.getElementById('v-total-pnl').className = 'm-value ' + (totalPnL >= 0 ? 'val-up' : 'val-down');
-                document.getElementById('v-unrealized').innerText = formatMoneySigned(unrealized);
-                document.getElementById('v-unrealized').className = 'm-value ' + (unrealized >= 0 ? 'val-up' : 'val-down');
-                document.getElementById('v-realized').innerText = formatMoneySigned(realized);
-                document.getElementById('v-realized').className = 'm-value ' + (realized >= 0 ? 'val-up' : 'val-down');
-                
-                // Uptime
-                if (sim.uptime_seconds !== undefined) {
-                    const hours = Math.floor(sim.uptime_seconds / 3600);
-                    const mins = Math.floor((sim.uptime_seconds % 3600) / 60);
-                    const secs = sim.uptime_seconds % 60;
-                    document.getElementById('v-uptime').innerText = `${hours}:${mins.toString().padStart(2,'0')}:${secs.toString().padStart(2,'0')}`;
-                }
-                
-                const wins = sim.wins || 0, losses = sim.losses || 0;
-                const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100).toFixed(1) : '0.0';
-                document.getElementById('v-winrate').innerText = wr + '%';
-                document.getElementById('v-trade-count').innerText = (wins + losses) + ' trades';
-                document.getElementById('v-fees').innerText = formatMoney(sim.total_fees || 0);
-            } catch (err) {
-                console.error('Error updating metrics:', err);
-            }
-
-            try {
-
-                let marketData = {};
-                if (sim.markets) {
-                    if (Object.keys(sim.markets).length > 0) {
-                        // Get first market (usually BTC)
-                        const firstKey = Object.keys(sim.markets)[0];
-                        marketData = sim.markets[firstKey] || {};
-                    }
-                }
-                const m = marketData;
-
-                // Use symbol name as fallback if question is empty
-                const questionText = m.question && m.question.trim() !== '' 
-                    ? m.question 
-                    : (Object.keys(sim.markets || {}).length > 0 ? `${Object.keys(sim.markets)[0]} 5-MINUTE MARKET` : 'FETCHING MARKET DATA...');
-                
-                document.getElementById('m-question').innerText = questionText;
-                document.getElementById('m-binance').innerText = '$' + (m.binance || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
-                document.getElementById('m-chainlink').innerText = '$' + (m.chainlink || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
-                if (m.price_to_beat) {
-                    const margin = (m.chainlink || 0) - m.price_to_beat;
-                    const sign = margin >= 0 ? '+' : '';
-                    document.getElementById('m-ptb').innerText = '$' + m.price_to_beat.toLocaleString(undefined, {minimumFractionDigits: 2}) + ' (' + sign + '$' + margin.toFixed(2) + ')';
-                    document.getElementById('m-ptb').style.color = margin >= 0 ? 'var(--color-up)' : 'var(--color-down)';
-                }
-                document.getElementById('m-up').innerText = (m.up_price || 0).toFixed(4);
-                document.getElementById('m-down').innerText = (m.down_price || 0).toFixed(4);
-                document.getElementById('m-spike').innerText = (m.spike || 0).toFixed(2);
-                 
-                const spikeMag = Math.min(Math.abs(m.spike || 0) / 100, 1) * 50;
-                const bar = document.getElementById('m-spike-fill');
-                bar.style.width = spikeMag + '%';
-                bar.style.left = m.spike >= 0 ? '50%' : (50 - spikeMag) + '%';
-                bar.style.background = m.spike >= 0 ? 'var(--color-up)' : 'var(--color-down)';
-
-                // Threshold markers
-                if (sim.config) {
-                    const threshUsd = sim.config.threshold_bps / 100;
-                    const threshPct = Math.min(threshUsd / 100, 1) * 50;
-                    document.getElementById('spike-threshold-pos').style.left = (50 + threshPct) + '%';
-                    document.getElementById('spike-threshold-neg').style.left = (50 - threshPct) + '%';
-                }
-
-                // Spike mini-chart
-                if (spikeChart) {
-                    const now = new Date().toLocaleTimeString([], {hour12:false});
-                    spikeHistory.labels.push(now);
-                    spikeHistory.data.push(m.spike || 0);
-                    if (spikeHistory.labels.length > MAX_SPIKE_POINTS) {
-                        spikeHistory.labels.shift();
-                        spikeHistory.data.shift();
-                    }
+                if (wsMessageCount % 5 === 0) {
                     spikeChart.data.labels = spikeHistory.labels;
                     spikeChart.data.datasets[0].data = spikeHistory.data;
                     spikeChart.update();
                 }
-
-                if (m.end_ts) {
-                    const remaining = Math.max(0, m.end_ts - Math.floor(Date.now() / 1000));
-                    const mins = Math.floor(remaining / 60), secs = remaining % 60;
-                    document.getElementById('m-timer').innerText = `${mins}:${secs.toString().padStart(2, '0')}`;
-                }
-            } catch (err) {
-                console.error('Error updating market data:', err);
             }
 
-            try {
+            if (m.end_ts) {
+                const remaining = Math.max(0, m.end_ts - Math.floor(Date.now() / 1000));
+                const mins = Math.floor(remaining / 60), secs = remaining % 60;
+                document.getElementById('m-timer').innerText = `${mins}:${secs.toString().padStart(2, '0')}`;
+            }
 
-                document.getElementById('count-open').innerText = posArr.length;
-                positionEntryTimes = posArr.map(p => Date.now() - (p.held_ms || 0));
-                document.getElementById('list-open').innerHTML = posArr.map((p, idx) => `
-                    <div class="pos-item">
-                        <div class="pos-top">
-                            <span style="font-family:var(--font-mono); font-size:11px; font-weight:700;">BTC 5M ${p.side}</span>
-                            <span class="pos-pnl ${p.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(p.pnl)}</span>
-                        </div>
-                        <div style="font-size:10px; color:var(--text-dim);">${p.shares.toFixed(2)} SH @ ${p.entry_price.toFixed(4)} · NOW ${p.current_price.toFixed(4)}</div>
-                        <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">LVL ${p.level || 1} · <span class="pos-age" data-idx="${idx}">${formatMs(p.held_ms || 0)}</span>${p.hold_to_resolution ? ' · <span style="color:var(--color-gold);font-weight:700;">⚓ HOLD</span>' : ''}</div>
-                        <button class="pos-close-btn" onclick="closePosition(${idx})">CLOSE</button>
+            document.getElementById('count-open').innerText = posArr.length;
+            positionEntryTimes = posArr.map(p => Date.now() - (p.held_ms || 0));
+            document.getElementById('list-open').innerHTML = posArr.map((p, idx) => `
+                <div class="pos-item">
+                    <div class="pos-top">
+                        <span style="font-family:var(--font-mono); font-size:11px; font-weight:700;">BTC 5M ${p.side}</span>
+                        <span class="pos-pnl ${p.pnl>=0?'val-up':'val-down'}">${formatMoneySigned(p.pnl)}</span>
                     </div>
-                `).join('');
-            } catch (err) {
-                console.error('Error updating positions:', err);
-            }
+                    <div style="font-size:10px; color:var(--text-dim);">${p.shares.toFixed(2)} SH @ ${p.entry_price.toFixed(4)} · NOW ${p.current_price.toFixed(4)}</div>
+                    <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">LVL ${p.level || 1} · <span class="pos-age" data-idx="${idx}">${formatMs(p.held_ms || 0)}</span>${p.hold_to_resolution ? ' · <span style="color:var(--color-gold);font-weight:700;">⚓ HOLD</span>' : ''}</div>
+                    <button class="pos-close-btn" onclick="closePosition(${idx})">CLOSE</button>
+                </div>
+            `).join('');
 
-            try {
+            // Trade stats
+            const exits = (sim.trades || []).filter(t => t.type === 'exit');
+            const winTrades = exits.filter(t => t.pnl > 0);
+            const lossTrades = exits.filter(t => t.pnl <= 0);
+            const avgWin = winTrades.length ? winTrades.reduce((s,t) => s + t.pnl, 0) / winTrades.length : null;
+            const avgLoss = lossTrades.length ? lossTrades.reduce((s,t) => s + t.pnl, 0) / lossTrades.length : null;
+            const grossWin = winTrades.reduce((s,t) => s + t.pnl, 0);
+            const grossLoss = Math.abs(lossTrades.reduce((s,t) => s + t.pnl, 0));
+            const pf = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? '∞' : '—';
+            document.getElementById('stat-avg-win').innerText = avgWin !== null ? formatMoneySigned(avgWin) : '—';
+            document.getElementById('stat-avg-loss').innerText = avgLoss !== null ? formatMoneySigned(avgLoss) : '—';
+            document.getElementById('stat-pf').innerText = pf;
+            document.getElementById('stat-pf').className = 'stat-value ' + (parseFloat(pf) >= 1 ? 'val-up' : 'val-down');
 
-                // Trade stats
-                const exits = (sim.trades || []).filter(t => t.type === 'exit');
-                const winTrades = exits.filter(t => t.pnl > 0);
-                const lossTrades = exits.filter(t => t.pnl <= 0);
-                const avgWin = winTrades.length ? winTrades.reduce((s,t) => s + t.pnl, 0) / winTrades.length : null;
-                const avgLoss = lossTrades.length ? lossTrades.reduce((s,t) => s + t.pnl, 0) / lossTrades.length : null;
-                const grossWin = winTrades.reduce((s,t) => s + t.pnl, 0);
-                const grossLoss = Math.abs(lossTrades.reduce((s,t) => s + t.pnl, 0));
-                const pf = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? '∞' : '—';
-                
-                // Calculate average hold time from exits
-                const avgHoldMs = exits.length > 0 
-                    ? exits.reduce((sum, t) => {
-                        // Calculate hold time from entry to exit timestamps
-                        const entryTrade = (sim.trades || []).find(tr => 
-                            tr.type === 'entry' && 
-                            tr.symbol === t.symbol && 
-                            tr.direction === t.direction &&
-                            new Date(tr.timestamp) < new Date(t.timestamp)
-                        );
-                        if (entryTrade) {
-                            const holdMs = new Date(t.timestamp) - new Date(entryTrade.timestamp);
-                            return sum + holdMs;
-                        }
-                        return sum;
-                    }, 0) / exits.length
-                    : null;
-                
-                document.getElementById('stat-avg-win').innerText = avgWin !== null ? formatMoneySigned(avgWin) : '—';
-                document.getElementById('stat-avg-loss').innerText = avgLoss !== null ? formatMoneySigned(avgLoss) : '—';
-                document.getElementById('stat-pf').innerText = pf;
-                document.getElementById('stat-pf').className = 'stat-value ' + (parseFloat(pf) >= 1 ? 'val-up' : 'val-down');
-                document.getElementById('stat-hold').innerText = avgHoldMs !== null ? formatMs(avgHoldMs) : '—';
+            // PnL breakdown bar
+            const realizedAbs = Math.abs(realized);
+            const unrealizedAbs = Math.abs(unrealized);
+            const total = realizedAbs + unrealizedAbs || 1;
+            document.getElementById('pnl-bar-r').style.width = (realizedAbs / total * 100) + '%';
+            document.getElementById('pnl-bar-u').style.width = (unrealizedAbs / total * 100) + '%';
+            document.getElementById('pnl-realized-label').innerText = formatMoneySigned(realized);
+            document.getElementById('pnl-unrealized-label').innerText = formatMoneySigned(unrealized);
+            const feeDrag = (sim.total_volume || 0) > 0 ? ((sim.total_fees || 0) / (sim.total_volume || 1) * 100).toFixed(3) : '0.000';
+            document.getElementById('stat-fee-drag').innerText = feeDrag + '%';
 
-                // PnL breakdown bar
-                const realizedAbs = Math.abs(realized);
-                const unrealizedAbs = Math.abs(unrealized);
-                const total = realizedAbs + unrealizedAbs || 1;
-                document.getElementById('pnl-bar-r').style.width = (realizedAbs / total * 100) + '%';
-                document.getElementById('pnl-bar-u').style.width = (unrealizedAbs / total * 100) + '%';
-                document.getElementById('pnl-realized-label').innerText = formatMoneySigned(realized);
-                document.getElementById('pnl-unrealized-label').innerText = formatMoneySigned(unrealized);
-                const feeDrag = (sim.total_volume || 0) > 0 ? ((sim.total_fees || 0) / (sim.total_volume || 1) * 100).toFixed(3) : '0.000';
-                document.getElementById('stat-fee-drag').innerText = feeDrag + '%';
-            } catch (err) {
-                console.error('Error updating trade stats:', err);
-            }
-
-            try {
-                const trades = (sim.trades || []).slice().reverse().slice(0, 30);
-                document.getElementById('list-trades').innerHTML = trades.map(t => {
+            const trades = (sim.trades || []).slice(-30).reverse();
+            document.getElementById('list-trades').innerHTML = trades.map(t => {
                 const isExit = t.type === 'exit';
                 const pnlClass = isExit ? (t.pnl >= 0 ? 'val-up' : 'val-down') : '';
                 let priceInfo = '';
@@ -1093,32 +1190,23 @@
                             <div style="font-size:9px; font-weight:400; color:var(--text-muted);">${new Date(t.timestamp).toLocaleTimeString([], {hour12:false})}</div>
                         </div>
                     </div>
-                    `;
-                }).join('');
-            } catch (err) {
-                console.error('Error updating trades:', err);
-            }
+                `;
+            }).join('');
 
-            try {
-                const signals = (sim.signals || []).slice().reverse();
+            const signals = (sim.signals || []).slice(-50).reverse();
             document.getElementById('signal-log').innerHTML = signals.map(s => `
                 <div class="term-line">
                     <span style="color:var(--text-muted)">${s.t}</span>
                     <span>${s.s}</span>
                     <span class="${s.d==='UP'?'val-up':'val-down'}">${s.d}</span>
                     <span class="sig-val">${s.v.toFixed(2)}</span>
-                    <span style="color:var(--text-dim)">${s.p ? s.p.toFixed(4) : '—'}</span>
                     <span class="${s.st==='EXECUTED'?'st-exec':'st-rej'}">${s.st}</span>
                     <span style="font-size:10px; color:var(--text-dim)">${s.r || ''}</span>
                 </div>
             `).join('');
-            } catch (err) {
-                console.error('Error updating signals:', err);
-            }
 
-            try {
-                const settled = (sim.trades || []).filter(t => t.type === 'exit').slice().reverse();
-                document.getElementById('list-settled').innerHTML = settled.map(t => {
+            const settled = (sim.trades || []).filter(t => t.type === 'exit').slice(-30).reverse();
+            document.getElementById('list-settled').innerHTML = settled.map(t => {
                 const pnlPct = t.entry_price && t.exit_price
                     ? ((t.exit_price - t.entry_price) / t.entry_price * 100 * (t.direction === 'DOWN' ? -1 : 1)).toFixed(2)
                     : '0.00';
@@ -1135,19 +1223,13 @@
                         <div style="font-size:9px; font-weight:400;">${pnlPct}%</div>
                     </div>
                 </div>`;
-                }).join('');
-            } catch (err) {
-                console.error('Error updating settled trades:', err);
-            }
+            }).join('');
 
-            try {
-                if (sim.history && sim.history.length > 0) {
-                    myChart.data.labels = sim.history.map(h => h.t);
-                    myChart.data.datasets[0].data = sim.history.map(h => h.v);
-                    myChart.update();
-                }
-            } catch (err) {
-                console.error('Error updating chart:', err);
+            // Throttle main chart update to ~1/sec (every 5th WS message at 200ms interval)
+            if (sim.history && sim.history.length > 0 && wsMessageCount % 5 === 0) {
+                myChart.data.labels = sim.history.map(h => h.t);
+                myChart.data.datasets[0].data = sim.history.map(h => h.v);
+                myChart.update();
             }
         };
 
@@ -1160,7 +1242,6 @@
             ws.onmessage = (e) => {
                 try {
                     const data = JSON.parse(e.data);
-                    console.log('WS message received:', data);
                     updateUI(data);
                 } catch (err) {
                     console.error('Failed to parse WS message:', err);
