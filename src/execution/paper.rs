@@ -1341,14 +1341,18 @@ impl PaperWallet {
 
     /// Call on every tick — promotes pending entries to open positions after execution delay
     pub fn flush_pending(&mut self) {
-        let delay = if self.config.paper_trading {
-            std::time::Duration::from_millis(self.config.execution_delay_ms)
-        } else {
-            std::time::Duration::ZERO
-        };
+        let paper_delay = std::time::Duration::from_millis(self.config.execution_delay_ms);
         let mut promoted = Vec::new();
         self.pending_entries.retain(|p| {
-            if p.submitted_at.elapsed() >= delay {
+            let ready = if self.config.paper_trading {
+                p.submitted_at.elapsed() >= paper_delay
+            } else {
+                // Live mode must never simulate a fill. The mirror only opens after
+                // the live execution actor confirms the real CLOB fill and marks it synced.
+                p.live_synced
+            };
+
+            if ready {
                 promoted.push(p.clone());
                 false
             } else {
@@ -1521,37 +1525,46 @@ mod tests {
 
     use super::{PaperWallet, PendingEntry};
 
+    fn test_config(paper_trading: bool) -> AppConfig {
+        let mut config = AppConfig::load().expect("config");
+        config.paper_trading = paper_trading;
+        config.execution_delay_ms = 300;
+        config
+    }
+
+    fn pending_entry(submitted_at: Instant) -> PendingEntry {
+        PendingEntry {
+            symbol: "BTC-1".to_string(),
+            direction: "UP".to_string(),
+            spike: 10.0,
+            entry_price: 0.40,
+            scale_level: 1,
+            position_size: 4.0,
+            shares: 10.0,
+            buy_fee: 0.1,
+            submitted_at,
+            entry_btc: 100000.0,
+            live_synced: false,
+            price_to_beat_at_entry: None,
+            ptb_margin_at_entry: None,
+            seconds_to_expiry_at_entry: None,
+            spread_at_entry: None,
+            round_trip_loss_pct_at_entry: None,
+            signal_score: None,
+            ptb_tier_at_entry: None,
+            entry_mode: Some("scalp".to_string()),
+        }
+    }
+
     #[test]
     fn sync_pending_to_live_fill_targets_exact_pending_entry() {
-        let mut config = AppConfig::load().expect("config");
-        config.paper_trading = true;
-        let mut wallet = PaperWallet::new(config);
+        let mut wallet = PaperWallet::new(test_config(true));
 
         let first_submitted_at = Instant::now() - Duration::from_millis(20);
         let second_submitted_at = Instant::now() - Duration::from_millis(10);
 
         wallet.pending_entries = vec![
-            PendingEntry {
-                symbol: "BTC-1".to_string(),
-                direction: "UP".to_string(),
-                spike: 10.0,
-                entry_price: 0.40,
-                scale_level: 1,
-                position_size: 4.0,
-                shares: 10.0,
-                buy_fee: 0.1,
-                submitted_at: first_submitted_at,
-                entry_btc: 100000.0,
-                live_synced: false,
-                price_to_beat_at_entry: None,
-                ptb_margin_at_entry: None,
-                seconds_to_expiry_at_entry: None,
-                spread_at_entry: None,
-                round_trip_loss_pct_at_entry: None,
-                signal_score: None,
-                ptb_tier_at_entry: None,
-                entry_mode: Some("scalp".to_string()),
-            },
+            pending_entry(first_submitted_at),
             PendingEntry {
                 symbol: "BTC-1".to_string(),
                 direction: "UP".to_string(),
@@ -1584,5 +1597,48 @@ mod tests {
         assert_eq!(wallet.pending_entries[1].shares, 11.0);
         assert_eq!(wallet.pending_entries[1].position_size, 5.61);
         assert!(wallet.pending_entries[1].live_synced);
+    }
+
+    #[test]
+    fn live_flush_does_not_promote_unsynced_pending_entry() {
+        let mut wallet = PaperWallet::new(test_config(false));
+        wallet.balance = 95.9;
+        let original_balance = wallet.balance;
+        wallet.pending_entries = vec![pending_entry(Instant::now() - Duration::from_secs(60))];
+
+        wallet.flush_pending();
+
+        assert_eq!(wallet.pending_entries.len(), 1);
+        assert_eq!(wallet.open_positions.len(), 0);
+        assert_eq!(wallet.trade_history.len(), 0);
+        assert_eq!(wallet.balance, original_balance);
+        assert!(!wallet.pending_entries[0].live_synced);
+    }
+
+    #[test]
+    fn live_flush_promotes_only_synced_live_fill() {
+        let mut wallet = PaperWallet::new(test_config(false));
+        wallet.pending_entries = vec![pending_entry(Instant::now() - Duration::from_secs(60))];
+        wallet.sync_pending_to_live_fill(
+            "BTC-1",
+            "UP",
+            wallet.pending_entries[0].submitted_at,
+            0.51,
+            11.0,
+            5.61,
+            0.0,
+        );
+
+        wallet.flush_pending();
+
+        assert!(wallet.pending_entries.is_empty());
+        assert_eq!(wallet.open_positions.len(), 1);
+        assert_eq!(wallet.trade_history.len(), 1);
+
+        let pos = &wallet.open_positions[0];
+        assert_eq!(pos.entry_price, 0.51);
+        assert_eq!(pos.shares, 11.0);
+        assert_eq!(pos.position_size, 5.61);
+        assert_eq!(pos.buy_fee, 0.0);
     }
 }
