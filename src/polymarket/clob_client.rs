@@ -1,4 +1,4 @@
-use crate::polymarket::{fetch_current_market, MarketData};
+use crate::polymarket::{fetch_current_market, fetch_market_for_window, MarketData};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -144,7 +144,8 @@ impl ClobClient {
     }
 
     async fn connect_and_stream(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let (mut ws_stream, _) = connect_async_tls_with_config(&self.ws_url, None, true, None).await?;
+        let (mut ws_stream, _) =
+            connect_async_tls_with_config(&self.ws_url, None, true, None).await?;
         info!("CLOB WebSocket connected");
 
         self.subscribe_all(&mut ws_stream).await?;
@@ -153,15 +154,17 @@ impl ClobClient {
         let (mut write, mut read) = ws_stream.split();
         let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
         let mut refresh_check = tokio::time::interval(Duration::from_secs(1));
-        let (prefetch_tx, mut prefetch_rx) = mpsc::channel::<(String, Option<MarketData>)>(16);
+        let (prefetch_tx, mut prefetch_rx) = mpsc::channel::<(String, u64, Option<MarketData>)>(16);
         let mut prefetched_markets = HashMap::<String, MarketData>::new();
         let mut inflight_prefetches = HashSet::<String>::new();
 
         loop {
-            while let Ok((symbol, prefetched)) = prefetch_rx.try_recv() {
+            while let Ok((symbol, expected_start_ts, prefetched)) = prefetch_rx.try_recv() {
                 inflight_prefetches.remove(&symbol);
                 if let Some(prefetched) = prefetched {
-                    prefetched_markets.insert(prefetched.symbol.clone(), prefetched);
+                    if prefetched.window_end_ts > expected_start_ts {
+                        prefetched_markets.insert(prefetched.symbol.clone(), prefetched);
+                    }
                 }
             }
 
@@ -196,36 +199,50 @@ impl ClobClient {
                                 && inflight_prefetches.insert(symbol.clone())
                             {
                                 let symbol_clone = symbol.clone();
+                                let next_window_start_ts = end_ts;
                                 let prefetch_tx = prefetch_tx.clone();
                                 tokio::spawn(async move {
-                                    let next_market = fetch_current_market(&symbol_clone).await;
-                                    let _ = prefetch_tx.send((symbol_clone, next_market)).await;
+                                    let next_market =
+                                        fetch_market_for_window(&symbol_clone, next_window_start_ts)
+                                            .await;
+                                    let _ = prefetch_tx
+                                        .send((symbol_clone, next_window_start_ts, next_market))
+                                        .await;
                                 });
                             }
 
                             if now >= end_ts.saturating_sub(1) {
-                                if let Some(new_m) = prefetched_markets.remove(symbol) {
-                                    if new_m.window_end_ts > end_ts {
-                                        info!(symbol = %symbol, "Applying prefetched market refresh");
-                                        let old_tokens: Vec<String> = self.token_to_symbol.keys().cloned().collect();
-                                        if !old_tokens.is_empty() {
-                                            let unsub_msg = serde_json::json!({
-                                                "assets_ids": old_tokens,
-                                                "operation": "unsubscribe",
-                                            });
-                                            let _ = write.send(Message::Text(unsub_msg.to_string().into())).await;
-                                        }
-
-                                        self.token_to_symbol.retain(|_, (sym, _)| sym != symbol);
-                                        self.token_to_symbol.insert(new_m.up_token_id.clone(), (new_m.symbol.clone(), "UP".to_string()));
-                                        self.token_to_symbol.insert(new_m.down_token_id.clone(), (new_m.symbol.clone(), "DOWN".to_string()));
-                                        self.market_ends.insert(symbol.clone(), new_m.window_end_ts);
-
-                                        if let Some(market_tx) = &self.market_sender {
-                                            let _ = market_tx.try_send(new_m);
-                                        }
-                                        needs_refresh = true;
+                                let mut next_market = prefetched_markets.remove(symbol);
+                                if next_market.as_ref().is_none_or(|market| market.window_end_ts <= end_ts) {
+                                    next_market = fetch_market_for_window(symbol, end_ts).await;
+                                    if next_market.as_ref().is_none_or(|market| market.window_end_ts <= end_ts) {
+                                        next_market = fetch_current_market(symbol).await;
                                     }
+                                }
+
+                                if let Some(new_m) = next_market.filter(|market| market.window_end_ts > end_ts) {
+                                    info!(symbol = %symbol, new_end_ts = new_m.window_end_ts, "Applying market refresh");
+                                    let old_tokens: Vec<String> = self.token_to_symbol.keys().cloned().collect();
+                                    if !old_tokens.is_empty() {
+                                        let unsub_msg = serde_json::json!({
+                                            "assets_ids": old_tokens,
+                                            "operation": "unsubscribe",
+                                        });
+                                        let _ = write.send(Message::Text(unsub_msg.to_string().into())).await;
+                                    }
+
+                                    self.token_to_symbol.retain(|_, (sym, _)| sym != symbol);
+                                    self.token_to_symbol.insert(new_m.up_token_id.clone(), (new_m.symbol.clone(), "UP".to_string()));
+                                    self.token_to_symbol.insert(new_m.down_token_id.clone(), (new_m.symbol.clone(), "DOWN".to_string()));
+                                    self.market_ends.insert(symbol.clone(), new_m.window_end_ts);
+
+                                    if let Some(market_tx) = &self.market_sender {
+                                        let _ = market_tx.send(new_m).await;
+                                    }
+                                    needs_refresh = true;
+                                } else {
+                                    inflight_prefetches.remove(symbol);
+                                    error!(symbol = %symbol, current_end_ts = end_ts, "Market refresh failed; will retry");
                                 }
                             }
                         }
@@ -357,26 +374,24 @@ impl ClobClient {
                 } else {
                     0.0
                 };
-                let _ = self
-                    .price_sender
-                    .try_send(SharePriceUpdate {
-                        symbol: symbol.clone(),
-                        direction: direction.clone(),
-                        best_bid: bid,
-                        best_ask: ask,
-                        mid_price,
-                        bids: if include_depth {
-                            book.map(|book| book.bids.clone()).unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        },
-                        asks: if include_depth {
-                            book.map(|book| book.asks.clone()).unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        },
-                        timestamp: Instant::now(),
-                    });
+                let _ = self.price_sender.try_send(SharePriceUpdate {
+                    symbol: symbol.clone(),
+                    direction: direction.clone(),
+                    best_bid: bid,
+                    best_ask: ask,
+                    mid_price,
+                    bids: if include_depth {
+                        book.map(|book| book.bids.clone()).unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
+                    asks: if include_depth {
+                        book.map(|book| book.asks.clone()).unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
+                    timestamp: Instant::now(),
+                });
             }
         }
     }
@@ -399,11 +414,18 @@ impl ClobClient {
         if event_type == "price_change" {
             if !item.price_changes.is_empty() {
                 for change in item.price_changes {
-                    let Some(asset_id) = change.asset_id.as_deref().or(item.asset_id.as_deref()) else {
+                    let Some(asset_id) = change.asset_id.as_deref().or(item.asset_id.as_deref())
+                    else {
                         continue;
                     };
-                    let price = change.price.as_deref().and_then(|value| value.parse::<f64>().ok());
-                    let size = change.size.as_deref().and_then(|value| value.parse::<f64>().ok());
+                    let price = change
+                        .price
+                        .as_deref()
+                        .and_then(|value| value.parse::<f64>().ok());
+                    let size = change
+                        .size
+                        .as_deref()
+                        .and_then(|value| value.parse::<f64>().ok());
                     if let (Some(price), Some(size)) = (price, size) {
                         let book = self.books.entry(asset_id.to_string()).or_default();
                         let side = change.side.as_deref().unwrap_or("");
@@ -421,12 +443,12 @@ impl ClobClient {
                         Self::parse_num(change.best_bid.as_deref().or(item.best_bid.as_deref()));
                     let best_ask =
                         Self::parse_num(change.best_ask.as_deref().or(item.best_ask.as_deref()));
-                    self.send_book_update(asset_id, best_bid, best_ask, false);
+                    self.send_book_update(asset_id, best_bid, best_ask, true);
                 }
             } else if let Some(asset_id) = item.asset_id.as_deref() {
                 let best_bid = Self::parse_num(item.best_bid.as_deref());
                 let best_ask = Self::parse_num(item.best_ask.as_deref());
-                self.send_book_update(asset_id, best_bid, best_ask, false);
+                self.send_book_update(asset_id, best_bid, best_ask, true);
             }
             return;
         }
@@ -434,7 +456,7 @@ impl ClobClient {
             if let Some(asset_id) = item.asset_id.as_deref() {
                 let best_bid = Self::parse_num(item.best_bid.as_deref());
                 let best_ask = Self::parse_num(item.best_ask.as_deref());
-                self.send_book_update(asset_id, best_bid, best_ask, false);
+                self.send_book_update(asset_id, best_bid, best_ask, true);
             }
         }
     }

@@ -29,6 +29,10 @@ pub async fn fetch_current_market(symbol: &str) -> Option<MarketData> {
         .ok()?
         .as_secs();
     let window_ts = now - (now % 300);
+    fetch_market_for_window(symbol, window_ts).await
+}
+
+pub async fn fetch_market_for_window(symbol: &str, window_ts: u64) -> Option<MarketData> {
     let symbol_slug = symbol.to_lowercase();
     let slug = format!("{}-updown-5m-{}", symbol_slug, window_ts);
 
