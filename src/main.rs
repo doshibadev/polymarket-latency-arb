@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::load()?;
 
     // Fetch initial markets for all symbols
-    let symbols = vec!["BTC"];
+    let symbols = vec!["BTC", "ETH"];
     let mut initial_markets = Vec::new();
     for symbol in &symbols {
         if let Some(market) = fetch_current_market(symbol).await {
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // RTDS Stream
     tokio::spawn(async move {
-        let mut stream = crate::rtds::RtdsStream::new();
+        let mut stream = crate::rtds::RtdsStream::new(vec!["BTC", "ETH"]);
         if let Err(e) = stream.run(price_tx).await {
             tracing::error!(error = %e, "RTDS stream error");
         }

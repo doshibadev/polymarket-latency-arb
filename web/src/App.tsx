@@ -164,6 +164,10 @@ function activeMarket(markets: Record<string, MarketSnapshot>) {
   return markets.BTC || markets[Object.keys(markets)[0]] || null;
 }
 
+function activeMarketSymbol(markets: Record<string, MarketSnapshot>) {
+  return Object.prototype.hasOwnProperty.call(markets, "BTC") ? "BTC" : Object.keys(markets)[0] || null;
+}
+
 function displayValue(config: Config, field: SettingsField) {
   const raw = config[field.key];
   if (typeof raw !== "number") return "";
@@ -722,9 +726,17 @@ export function App() {
   const [spikeSeries, setSpikeSeries] = useState<number[]>([]);
   const [chartMode, setChartMode] = useState<ChartMode>("line");
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("trade");
+  const [selectedMarketSymbol, setSelectedMarketSymbol] = useState<string>("BTC");
   const positionEntryTimesRef = useRef<number[]>([]);
 
-  const market = useMemo(() => activeMarket(snapshot.markets), [snapshot.markets]);
+  const marketSymbols = useMemo(() => Object.keys(snapshot.markets).sort(), [snapshot.markets]);
+  const market = useMemo(
+    () => snapshot.markets[selectedMarketSymbol] || activeMarket(snapshot.markets),
+    [snapshot.markets, selectedMarketSymbol],
+  );
+  const displayMarketSymbol = marketSymbols.includes(selectedMarketSymbol)
+    ? selectedMarketSymbol
+    : activeMarketSymbol(snapshot.markets) || "BTC";
   const openPositions = snapshot.positions || [];
   const exits = useMemo(() => snapshot.trades.filter((trade) => trade.type === "exit"), [snapshot.trades]);
   const recentTrades = useMemo(() => snapshot.trades.slice().reverse().slice(0, 30), [snapshot.trades]);
@@ -783,6 +795,13 @@ export function App() {
     const nextSpike = market?.spike ?? 0;
     setSpikeSeries((current) => [...current, nextSpike].slice(-120));
   }, [market?.spike]);
+
+  useEffect(() => {
+    if (marketSymbols.length === 0) return;
+    if (!marketSymbols.includes(selectedMarketSymbol)) {
+      setSelectedMarketSymbol(activeMarketSymbol(snapshot.markets) || marketSymbols[0]);
+    }
+  }, [marketSymbols, selectedMarketSymbol, snapshot.markets]);
 
   async function openSettings() {
     const config = await fetchConfig().catch(() => normalizeConfig(snapshot.config ?? EMPTY_CONFIG));
@@ -932,13 +951,26 @@ export function App() {
           {activeTab === "trade" ? (
             <div className="workspace-grid workspace-grid-trade">
               <div className="panel fixed-panel">
-                <div className="panel-header"><div className="panel-title">Active Market</div></div>
+                <div className="panel-header">
+                  <div className="panel-title">Active Market</div>
+                  <div className="top-tabs" style={{ flex: "0 0 auto", minWidth: 0, justifyContent: "flex-end" }}>
+                    {marketSymbols.map((symbol) => (
+                      <button
+                        key={symbol}
+                        className={`top-tab ${displayMarketSymbol === symbol ? "top-tab-active" : ""}`}
+                        onClick={() => setSelectedMarketSymbol(symbol)}
+                      >
+                        {symbol}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className="market-summary">
                   <div className="m-question">{(market?.question || "FETCHING MARKET DATA...").toUpperCase()}</div>
                   <div className="m-timer">{formatTimer(market?.end_ts)}</div>
                   <div className="market-summary-grid">
-                    <div className="market-mini"><span className="p-label">BINANCE BTC</span><span className="p-val">{formatMoney(market?.binance || 0)}</span></div>
-                    <div className="market-mini"><span className="p-label">CHAINLINK BTC</span><span className="p-val">{formatMoney(market?.chainlink || 0)}</span></div>
+                    <div className="market-mini"><span className="p-label">{`BINANCE ${displayMarketSymbol}`}</span><span className="p-val">{formatMoney(market?.binance || 0)}</span></div>
+                    <div className="market-mini"><span className="p-label">{`CHAINLINK ${displayMarketSymbol}`}</span><span className="p-val">{formatMoney(market?.chainlink || 0)}</span></div>
                     <div className="market-mini"><span className="p-label">ORACLE BASIS</span><span className={`p-val ${marketBasis >= 0 ? "val-up" : "val-down"}`}>{formatMoneySigned(marketBasis)}</span></div>
                     <div className="market-mini"><span className="p-label">PTB GAP</span><span className={`p-val ${marketPtbGap != null && marketPtbGap >= 0 ? "val-up" : "val-down"}`}>{marketPtbGap == null ? "—" : formatMoneySigned(marketPtbGap)}</span></div>
                   </div>
@@ -989,7 +1021,20 @@ export function App() {
             <div className="workspace-grid workspace-grid-two">
               <MarketScanner markets={snapshot.markets} />
               <div className="panel fixed-panel">
-                <div className="panel-header"><div className="panel-title">Active Market Detail</div></div>
+                <div className="panel-header">
+                  <div className="panel-title">Active Market Detail</div>
+                  <div className="top-tabs" style={{ flex: "0 0 auto", minWidth: 0, justifyContent: "flex-end" }}>
+                    {marketSymbols.map((symbol) => (
+                      <button
+                        key={symbol}
+                        className={`top-tab ${displayMarketSymbol === symbol ? "top-tab-active" : ""}`}
+                        onClick={() => setSelectedMarketSymbol(symbol)}
+                      >
+                        {symbol}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className="market-summary market-summary-spacious">
                   <div className="m-question">{(market?.question || "FETCHING MARKET DATA...").toUpperCase()}</div>
                   <div className="market-summary-grid">
@@ -997,8 +1042,8 @@ export function App() {
                     <div className="market-mini"><span className="p-label">SPIKE DELTA</span><span className={`p-val ${market && market.spike >= 0 ? "val-up" : "val-down"}`}>{formatSigned(market?.spike || 0)}</span></div>
                     <div className="market-mini"><span className="p-label">UP MID</span><span className="p-val val-up">{(market?.up_price || 0).toFixed(4)}</span></div>
                     <div className="market-mini"><span className="p-label">DOWN MID</span><span className="p-val val-down">{(market?.down_price || 0).toFixed(4)}</span></div>
-                    <div className="market-mini"><span className="p-label">BINANCE</span><span className="p-val">{formatMoney(market?.binance || 0)}</span></div>
-                    <div className="market-mini"><span className="p-label">CHAINLINK</span><span className="p-val">{formatMoney(market?.chainlink || 0)}</span></div>
+                    <div className="market-mini"><span className="p-label">{`BINANCE ${displayMarketSymbol}`}</span><span className="p-val">{formatMoney(market?.binance || 0)}</span></div>
+                    <div className="market-mini"><span className="p-label">{`CHAINLINK ${displayMarketSymbol}`}</span><span className="p-val">{formatMoney(market?.chainlink || 0)}</span></div>
                   </div>
                 </div>
               </div>

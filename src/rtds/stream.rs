@@ -5,6 +5,13 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{error, info};
 
+#[derive(Clone, Copy)]
+struct FeedSymbol {
+    app_symbol: &'static str,
+    binance_symbol: &'static str,
+    chainlink_symbol: &'static str,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct RtdsMessage {
     topic: String,
@@ -65,15 +72,48 @@ fn emit_price(
     });
 }
 
+fn feed_symbol(symbol: &'static str) -> Option<FeedSymbol> {
+    match symbol {
+        "BTC" => Some(FeedSymbol {
+            app_symbol: "BTC",
+            binance_symbol: "btcusdt",
+            chainlink_symbol: "btc/usd",
+        }),
+        "ETH" => Some(FeedSymbol {
+            app_symbol: "ETH",
+            binance_symbol: "ethusdt",
+            chainlink_symbol: "eth/usd",
+        }),
+        "SOL" => Some(FeedSymbol {
+            app_symbol: "SOL",
+            binance_symbol: "solusdt",
+            chainlink_symbol: "sol/usd",
+        }),
+        "XRP" => Some(FeedSymbol {
+            app_symbol: "XRP",
+            binance_symbol: "xrpusdt",
+            chainlink_symbol: "xrp/usd",
+        }),
+        _ => None,
+    }
+}
+
 /// Direct Binance WebSocket for low-latency BTC price (~10ms updates vs RTDS relay ~50ms)
 async fn run_binance_direct(
+    symbol: FeedSymbol,
     tx: mpsc::Sender<PriceUpdate>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let url = "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@bookTicker";
+    let url = format!(
+        "wss://stream.binance.com:9443/stream?streams={}@trade/{}@bookTicker",
+        symbol.binance_symbol, symbol.binance_symbol
+    );
     loop {
-        match connect_async_tls_with_config(url, None, true, None).await {
+        match connect_async_tls_with_config(&url, None, true, None).await {
             Ok((ws_stream, _)) => {
-                info!("Direct Binance WebSocket connected");
+                info!(
+                    symbol = symbol.app_symbol,
+                    "Direct Binance WebSocket connected"
+                );
                 let (mut write, mut read) = ws_stream.split();
                 let mut ping_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
                 loop {
@@ -85,7 +125,7 @@ async fn run_binance_direct(
                                         if msg.stream.ends_with("@trade") {
                                             if let Ok(trade) = serde_json::from_value::<BinanceTradeMessage>(msg.data) {
                                                 if let Ok(price) = trade.price.parse::<f64>() {
-                                                    emit_price(&tx, "BTC", price, PriceSource::Binance);
+                                                    emit_price(&tx, symbol.app_symbol, price, PriceSource::Binance);
                                                 }
                                             }
                                         } else if msg.stream.ends_with("@bookTicker") {
@@ -94,7 +134,12 @@ async fn run_binance_direct(
                                                     book.best_bid.parse::<f64>(),
                                                     book.best_ask.parse::<f64>(),
                                                 ) {
-                                                    emit_price(&tx, "BTC", (best_bid + best_ask) / 2.0, PriceSource::Binance);
+                                                    emit_price(
+                                                        &tx,
+                                                        symbol.app_symbol,
+                                                        (best_bid + best_ask) / 2.0,
+                                                        PriceSource::Binance,
+                                                    );
                                                 }
                                             }
                                         }
@@ -113,10 +158,13 @@ async fn run_binance_direct(
                         }
                     }
                 }
-                error!("Direct Binance WebSocket disconnected, reconnecting in 1s...");
+                error!(
+                    symbol = symbol.app_symbol,
+                    "Direct Binance WebSocket disconnected, reconnecting in 1s..."
+                );
             }
             Err(e) => {
-                error!("Direct Binance connect failed: {}, retrying in 3s", e);
+                error!(symbol = symbol.app_symbol, error = %e, "Direct Binance connect failed, retrying in 3s");
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             }
         }
@@ -124,71 +172,101 @@ async fn run_binance_direct(
     }
 }
 
-pub struct RtdsStream {}
+pub struct RtdsStream {
+    symbols: Vec<FeedSymbol>,
+}
 
 impl RtdsStream {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(symbols: Vec<&'static str>) -> Self {
+        let symbols = symbols.into_iter().filter_map(feed_symbol).collect();
+        Self { symbols }
     }
 
     pub async fn run(
         &mut self,
         tx: mpsc::Sender<PriceUpdate>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = "wss://ws-live-data.polymarket.com";
-        info!("Connecting to Polymarket RTDS: {}", url);
+        for symbol in self.symbols.clone() {
+            let tx_binance = tx.clone();
+            tokio::spawn(async move {
+                let _ = run_binance_direct(symbol, tx_binance).await;
+            });
 
-        // Spawn direct Binance stream once — it manages its own reconnects
-        let tx_binance = tx.clone();
-        tokio::spawn(async move {
-            let _ = run_binance_direct(tx_binance).await;
-        });
-
-        let mut backoff_secs = 3u64;
-        loop {
-            match self.connect_and_stream(&url, &tx).await {
-                Ok(_) => {
-                    backoff_secs = 3;
+            let tx_rtds = tx.clone();
+            tokio::spawn(async move {
+                let url = "wss://ws-live-data.polymarket.com";
+                info!(
+                    symbol = symbol.app_symbol,
+                    url, "Connecting to Polymarket RTDS"
+                );
+                let mut backoff_secs = 3u64;
+                loop {
+                    match Self::connect_and_stream(url, symbol, &tx_rtds).await {
+                        Ok(_) => {
+                            backoff_secs = 3;
+                        }
+                        Err(e) => {
+                            error!(
+                                symbol = symbol.app_symbol,
+                                error = %e,
+                                backoff = backoff_secs,
+                                "RTDS WebSocket error, reconnecting..."
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs))
+                                .await;
+                            backoff_secs = (backoff_secs * 2).min(60);
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!(error = %e, backoff = backoff_secs, "RTDS WebSocket error, reconnecting...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
-                    backoff_secs = (backoff_secs * 2).min(60); // max 60s backoff
-                }
-            }
+            });
         }
+
+        futures_util::future::pending::<()>().await;
+        #[allow(unreachable_code)]
+        Ok(())
     }
 
     async fn connect_and_stream(
-        &mut self,
         url: &str,
+        symbol: FeedSymbol,
         tx: &mpsc::Sender<PriceUpdate>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (mut ws_stream, _) = connect_async_tls_with_config(url, None, true, None).await?;
 
-        // Binance subscriptions
         let binance_sub = serde_json::json!({
             "action": "subscribe",
             "subscriptions": [
-                { "topic": "crypto_prices", "type": "update", "filters": "{\"symbol\":\"btcusdt\"}" }
+                {
+                    "topic": "crypto_prices",
+                    "type": "update",
+                    "filters": format!("{{\"symbol\":\"{}\"}}", symbol.binance_symbol)
+                }
             ]
         });
         ws_stream
             .send(Message::Text(binance_sub.to_string().into()))
             .await?;
 
-        // Chainlink subscriptions
         let chainlink_sub = serde_json::json!({
             "action": "subscribe",
             "subscriptions": [
-                { "topic": "crypto_prices_chainlink", "type": "*", "filters": "{\"symbol\":\"btc/usd\"}" }
+                {
+                    "topic": "crypto_prices_chainlink",
+                    "type": "*",
+                    "filters": format!("{{\"symbol\":\"{}\"}}", symbol.chainlink_symbol)
+                }
             ]
         });
         ws_stream
             .send(Message::Text(chainlink_sub.to_string().into()))
             .await?;
 
-        info!("RTDS connected, subscribed to BTC (Binance & Chainlink)");
+        info!(
+            symbol = symbol.app_symbol,
+            binance_symbol = symbol.binance_symbol,
+            chainlink_symbol = symbol.chainlink_symbol,
+            "RTDS connected"
+        );
         let (mut write, mut read) = ws_stream.split();
         let mut heartbeat = tokio::time::interval(tokio::time::Duration::from_secs(5));
 
@@ -198,10 +276,11 @@ impl RtdsStream {
                     match message {
                         Some(Ok(Message::Text(text))) => {
                             if let Ok(msg) = serde_json::from_str::<RtdsMessage>(&text) {
-                                let symbol = match msg.payload.symbol.to_lowercase().as_str() {
-                                    "btcusdt" | "btc/usd" => "BTC",
-                                    _ => continue,
-                                };
+                                if msg.payload.symbol.to_lowercase() != symbol.binance_symbol
+                                    && msg.payload.symbol.to_lowercase() != symbol.chainlink_symbol
+                                {
+                                    continue;
+                                }
 
                                 let source = if msg.topic == "crypto_prices" {
                                     PriceSource::Binance
@@ -209,7 +288,7 @@ impl RtdsStream {
                                     PriceSource::Chainlink
                                 };
 
-                                emit_price(tx, symbol, msg.payload.value, source);
+                                emit_price(tx, symbol.app_symbol, msg.payload.value, source);
                             }
                         }
                         Some(Ok(Message::Close(_))) => break,

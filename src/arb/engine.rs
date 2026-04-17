@@ -304,6 +304,26 @@ impl ArbEngine {
         }
     }
 
+    fn rejection_key(reason: &str) -> String {
+        reason
+            .split_once('(')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or(reason)
+            .to_string()
+    }
+
+    fn should_emit_rejection(state: &mut SymbolState, reason: &str, cooldown_secs: u64) -> bool {
+        let key = Self::rejection_key(reason);
+        let should_emit = state
+            .last_rejection
+            .as_ref()
+            .is_none_or(|(last, at)| last != &key || at.elapsed().as_secs() >= cooldown_secs);
+        if should_emit {
+            state.last_rejection = Some((key, Instant::now()));
+        }
+        should_emit
+    }
+
     fn update_history(&mut self, total_val: f64) {
         self.wallet.push_history(total_val);
     }
@@ -1610,11 +1630,8 @@ impl ArbEngine {
 
         if bid <= 0.0 || ask <= 0.0 {
             let state = self.symbol_states.get_mut(symbol).unwrap();
-            let should_log = state.last_rejection.as_ref().map_or(true, |(r, t)| {
-                r != "NO_POL_LIQUIDITY" || t.elapsed().as_secs() >= 5
-            });
+            let should_log = Self::should_emit_rejection(state, "NO_POL_LIQUIDITY", 5);
             if should_log {
-                state.last_rejection = Some(("NO_POL_LIQUIDITY".to_string(), Instant::now()));
                 self.add_signal(
                     symbol,
                     direction,
@@ -1630,11 +1647,8 @@ impl ArbEngine {
             let now = Self::now_secs();
             if now >= end_ts.saturating_sub(2) {
                 let state = self.symbol_states.get_mut(symbol).unwrap();
-                let should_log = state.last_rejection.as_ref().map_or(true, |(r, t)| {
-                    r != "MARKET_ENDING" || t.elapsed().as_secs() >= 5
-                });
+                let should_log = Self::should_emit_rejection(state, "MARKET_ENDING", 5);
                 if should_log {
-                    state.last_rejection = Some(("MARKET_ENDING".to_string(), Instant::now()));
                     self.add_signal(
                         symbol,
                         direction,
@@ -1670,12 +1684,8 @@ impl ArbEngine {
             if same_market_direction_losses >= 2 && abs_spike < threshold_usd * 1.5 {
                 let state = self.symbol_states.get_mut(symbol).unwrap();
                 let reason = "MARKET_DIRECTION_COOLDOWN".to_string();
-                let should_log = state
-                    .last_rejection
-                    .as_ref()
-                    .map_or(true, |(r, t)| r != &reason || t.elapsed().as_secs() >= 5);
+                let should_log = Self::should_emit_rejection(state, &reason, 5);
                 if should_log {
-                    state.last_rejection = Some((reason.clone(), Instant::now()));
                     self.add_signal(
                         symbol,
                         direction,
@@ -1758,12 +1768,8 @@ impl ArbEngine {
                 }
                 Err(reason) => {
                     let state = self.symbol_states.get_mut(symbol).unwrap();
-                    let should_log = state
-                        .last_rejection
-                        .as_ref()
-                        .map_or(true, |(r, t)| r != &reason || t.elapsed().as_secs() >= 3);
+                    let should_log = Self::should_emit_rejection(state, &reason, 3);
                     if should_log {
-                        state.last_rejection = Some((reason.clone(), Instant::now()));
                         self.add_signal(
                             symbol,
                             direction,
@@ -1832,12 +1838,8 @@ impl ArbEngine {
                         self.wallet.rollback_pending_entry(&symbol, &direction);
                         if let Some(state) = self.symbol_states.get_mut(&symbol) {
                             let live_reason = format!("LIVE:{}", err);
-                            let should_log =
-                                state.last_rejection.as_ref().map_or(true, |(r, t)| {
-                                    r != &live_reason || t.elapsed().as_secs() >= 3
-                                });
+                            let should_log = Self::should_emit_rejection(state, &live_reason, 3);
                             if should_log {
-                                state.last_rejection = Some((live_reason.clone(), Instant::now()));
                                 self.add_signal(
                                     &symbol,
                                     match direction.as_str() {
