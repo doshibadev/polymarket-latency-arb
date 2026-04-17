@@ -1,5 +1,5 @@
 [package]
-name = "polymarket-latency-arb"
+name = "lattice-terminal"
 version = "0.1.0"
 edition = "2021"
 
