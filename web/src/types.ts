@@ -58,12 +58,14 @@ export type MarketSnapshot = {
 
 export type Config = {
   threshold_bps: number;
+  eth_threshold_bps: number;
   portfolio_pct: number;
   crypto_fee_rate: number;
   max_entry_price: number;
   min_entry_price: number;
   trend_reversal_pct: number;
   trend_reversal_threshold: number;
+  eth_trend_reversal_threshold: number;
   spike_faded_pct: number;
   spike_faded_ms: number;
   min_hold_ms: number;
@@ -72,8 +74,10 @@ export type Config = {
   stop_loss_pct: number;
   hold_min_share_price: number;
   hold_safety_margin: number;
+  eth_hold_safety_margin: number;
   early_exit_loss_pct: number;
   hold_margin_per_second: number;
+  eth_hold_margin_per_second: number;
   hold_max_seconds: number;
   hold_max_crossings: number;
   spike_sustain_ms: number;
@@ -85,10 +89,14 @@ export type Config = {
   max_drawdown_pct: number;
   trend_filter_enabled: boolean;
   trend_min_magnitude_usd: number;
+  eth_trend_min_magnitude_usd: number;
   counter_trend_multiplier: number;
   trend_max_magnitude_usd: number;
+  eth_trend_max_magnitude_usd: number;
   ptb_neutral_zone_usd: number;
+  eth_ptb_neutral_zone_usd: number;
   ptb_max_counter_distance_usd: number;
+  eth_ptb_max_counter_distance_usd: number;
 };
 
 export type TerminalSnapshot = {
@@ -141,12 +149,14 @@ export type ConfigField =
   | keyof Pick<
       Config,
       | "threshold_bps"
+      | "eth_threshold_bps"
       | "portfolio_pct"
       | "crypto_fee_rate"
       | "max_entry_price"
       | "min_entry_price"
       | "trend_reversal_pct"
       | "trend_reversal_threshold"
+      | "eth_trend_reversal_threshold"
       | "spike_faded_pct"
       | "spike_faded_ms"
       | "min_hold_ms"
@@ -155,8 +165,10 @@ export type ConfigField =
       | "stop_loss_pct"
       | "hold_min_share_price"
       | "hold_safety_margin"
+      | "eth_hold_safety_margin"
       | "early_exit_loss_pct"
       | "hold_margin_per_second"
+      | "eth_hold_margin_per_second"
       | "hold_max_seconds"
       | "hold_max_crossings"
       | "spike_sustain_ms"
@@ -168,20 +180,26 @@ export type ConfigField =
       | "max_drawdown_pct"
       | "trend_filter_enabled"
       | "trend_min_magnitude_usd"
+      | "eth_trend_min_magnitude_usd"
       | "counter_trend_multiplier"
       | "trend_max_magnitude_usd"
+      | "eth_trend_max_magnitude_usd"
       | "ptb_neutral_zone_usd"
+      | "eth_ptb_neutral_zone_usd"
       | "ptb_max_counter_distance_usd"
+      | "eth_ptb_max_counter_distance_usd"
     >;
 
 export const EMPTY_CONFIG: Config = {
   threshold_bps: 0,
+  eth_threshold_bps: 0,
   portfolio_pct: 0,
   crypto_fee_rate: 0,
   max_entry_price: 0,
   min_entry_price: 0,
   trend_reversal_pct: 0,
   trend_reversal_threshold: 0,
+  eth_trend_reversal_threshold: 0,
   spike_faded_pct: 0,
   spike_faded_ms: 0,
   min_hold_ms: 0,
@@ -190,8 +208,10 @@ export const EMPTY_CONFIG: Config = {
   stop_loss_pct: 0,
   hold_min_share_price: 0,
   hold_safety_margin: 0,
+  eth_hold_safety_margin: 0,
   early_exit_loss_pct: 0,
   hold_margin_per_second: 0,
+  eth_hold_margin_per_second: 0,
   hold_max_seconds: 0,
   hold_max_crossings: 0,
   spike_sustain_ms: 0,
@@ -203,10 +223,14 @@ export const EMPTY_CONFIG: Config = {
   max_drawdown_pct: 0,
   trend_filter_enabled: false,
   trend_min_magnitude_usd: 0,
+  eth_trend_min_magnitude_usd: 0,
   counter_trend_multiplier: 0,
   trend_max_magnitude_usd: 0,
+  eth_trend_max_magnitude_usd: 0,
   ptb_neutral_zone_usd: 0,
+  eth_ptb_neutral_zone_usd: 0,
   ptb_max_counter_distance_usd: 0,
+  eth_ptb_max_counter_distance_usd: 0,
 };
 
 export const EMPTY_SNAPSHOT: TerminalSnapshot = {

@@ -75,12 +75,17 @@ const FRONTEND_SETUP_PAGE: &str = r#"<!doctype html>
 
 const NUMERIC_CONFIG_FIELDS: &[(&str, &str)] = &[
     ("THRESHOLD_BPS", "threshold_bps"),
+    ("ETH_THRESHOLD_BPS", "eth_threshold_bps"),
     ("PORTFOLIO_PCT", "portfolio_pct"),
     ("CRYPTO_FEE_RATE", "crypto_fee_rate"),
     ("MAX_ENTRY_PRICE", "max_entry_price"),
     ("MIN_ENTRY_PRICE", "min_entry_price"),
     ("TREND_REVERSAL_PCT", "trend_reversal_pct"),
     ("TREND_REVERSAL_THRESHOLD", "trend_reversal_threshold"),
+    (
+        "ETH_TREND_REVERSAL_THRESHOLD",
+        "eth_trend_reversal_threshold",
+    ),
     ("SPIKE_FADED_PCT", "spike_faded_pct"),
     ("SPIKE_FADED_MS", "spike_faded_ms"),
     ("MIN_HOLD_MS", "min_hold_ms"),
@@ -89,8 +94,10 @@ const NUMERIC_CONFIG_FIELDS: &[(&str, &str)] = &[
     ("STOP_LOSS_PCT", "stop_loss_pct"),
     ("HOLD_MIN_SHARE_PRICE", "hold_min_share_price"),
     ("HOLD_SAFETY_MARGIN", "hold_safety_margin"),
+    ("ETH_HOLD_SAFETY_MARGIN", "eth_hold_safety_margin"),
     ("EARLY_EXIT_LOSS_PCT", "early_exit_loss_pct"),
     ("HOLD_MARGIN_PER_SECOND", "hold_margin_per_second"),
+    ("ETH_HOLD_MARGIN_PER_SECOND", "eth_hold_margin_per_second"),
     ("HOLD_MAX_SECONDS", "hold_max_seconds"),
     ("HOLD_MAX_CROSSINGS", "hold_max_crossings"),
     ("SPIKE_SUSTAIN_MS", "spike_sustain_ms"),
@@ -101,12 +108,19 @@ const NUMERIC_CONFIG_FIELDS: &[(&str, &str)] = &[
     ("MAX_EXPOSURE_PER_MARKET", "max_exposure_per_market"),
     ("MAX_DRAWDOWN_PCT", "max_drawdown_pct"),
     ("TREND_MIN_MAGNITUDE_USD", "trend_min_magnitude_usd"),
+    ("ETH_TREND_MIN_MAGNITUDE_USD", "eth_trend_min_magnitude_usd"),
     ("COUNTER_TREND_MULTIPLIER", "counter_trend_multiplier"),
     ("TREND_MAX_MAGNITUDE_USD", "trend_max_magnitude_usd"),
+    ("ETH_TREND_MAX_MAGNITUDE_USD", "eth_trend_max_magnitude_usd"),
     ("PTB_NEUTRAL_ZONE_USD", "ptb_neutral_zone_usd"),
+    ("ETH_PTB_NEUTRAL_ZONE_USD", "eth_ptb_neutral_zone_usd"),
     (
         "PTB_MAX_COUNTER_DISTANCE_USD",
         "ptb_max_counter_distance_usd",
+    ),
+    (
+        "ETH_PTB_MAX_COUNTER_DISTANCE_USD",
+        "eth_ptb_max_counter_distance_usd",
     ),
 ];
 

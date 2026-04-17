@@ -651,12 +651,14 @@ impl ArbEngine {
         };
         self.slow_snapshot_cache.config = json!({
             "threshold_bps": self.config.threshold_bps,
+            "eth_threshold_bps": self.config.eth_threshold_bps,
             "portfolio_pct": self.config.portfolio_pct,
             "crypto_fee_rate": self.config.crypto_fee_rate,
             "max_entry_price": self.config.max_entry_price,
             "min_entry_price": self.config.min_entry_price,
             "trend_reversal_pct": self.config.trend_reversal_pct,
             "trend_reversal_threshold": self.config.trend_reversal_threshold,
+            "eth_trend_reversal_threshold": self.config.eth_trend_reversal_threshold,
             "spike_faded_pct": self.config.spike_faded_pct,
             "spike_faded_ms": self.config.spike_faded_ms,
             "min_hold_ms": self.config.min_hold_ms,
@@ -665,8 +667,10 @@ impl ArbEngine {
             "stop_loss_pct": self.config.stop_loss_pct,
             "hold_min_share_price": self.config.hold_min_share_price,
             "hold_safety_margin": self.config.hold_safety_margin,
+            "eth_hold_safety_margin": self.config.eth_hold_safety_margin,
             "early_exit_loss_pct": self.config.early_exit_loss_pct,
             "hold_margin_per_second": self.config.hold_margin_per_second,
+            "eth_hold_margin_per_second": self.config.eth_hold_margin_per_second,
             "hold_max_seconds": self.config.hold_max_seconds,
             "hold_max_crossings": self.config.hold_max_crossings,
             "spike_sustain_ms": self.config.spike_sustain_ms,
@@ -678,10 +682,14 @@ impl ArbEngine {
             "max_drawdown_pct": self.config.max_drawdown_pct,
             "trend_filter_enabled": self.config.trend_filter_enabled,
             "trend_min_magnitude_usd": self.config.trend_min_magnitude_usd,
+            "eth_trend_min_magnitude_usd": self.config.eth_trend_min_magnitude_usd,
             "counter_trend_multiplier": self.config.counter_trend_multiplier,
             "trend_max_magnitude_usd": self.config.trend_max_magnitude_usd,
+            "eth_trend_max_magnitude_usd": self.config.eth_trend_max_magnitude_usd,
             "ptb_neutral_zone_usd": self.config.ptb_neutral_zone_usd,
+            "eth_ptb_neutral_zone_usd": self.config.eth_ptb_neutral_zone_usd,
             "ptb_max_counter_distance_usd": self.config.ptb_max_counter_distance_usd,
+            "eth_ptb_max_counter_distance_usd": self.config.eth_ptb_max_counter_distance_usd,
         });
         self.slow_snapshot_cache.updated_at = Some(Instant::now());
         true
@@ -1195,7 +1203,7 @@ impl ArbEngine {
                 chainlink,
                 ptb,
                 end_ts,
-                self.config.hold_margin_per_second,
+                self.config.hold_margin_per_second_for(symbol),
                 self.config.hold_max_seconds,
                 self.config.hold_max_crossings,
             );
@@ -1359,7 +1367,7 @@ impl ArbEngine {
         // Use fast spike for direction/magnitude, slow spike for confirmation
         let adjusted_spike = fast_spike;
         let abs_spike = adjusted_spike.abs();
-        let threshold_usd = self.config.threshold_bps as f64 / 100.0;
+        let threshold_usd = self.config.threshold_usd_for(symbol);
         let confirmed =
             slow_spike.signum() == fast_spike.signum() && slow_spike.abs() >= threshold_usd * 0.5;
 
@@ -1414,10 +1422,12 @@ impl ArbEngine {
 
             // Gate 1: Trend-based dynamic threshold
             // If entering against the trend, require a bigger spike proportional to trend strength
-            if is_counter_trend && trend_abs >= self.config.trend_min_magnitude_usd {
-                let t = ((trend_abs - self.config.trend_min_magnitude_usd)
-                    / (self.config.trend_max_magnitude_usd - self.config.trend_min_magnitude_usd))
-                    .clamp(0.0, 1.0);
+            let trend_min_magnitude = self.config.trend_min_magnitude_usd_for(symbol);
+            let trend_max_magnitude = self.config.trend_max_magnitude_usd_for(symbol);
+            if is_counter_trend && trend_abs >= trend_min_magnitude {
+                let t = ((trend_abs - trend_min_magnitude)
+                    / (trend_max_magnitude - trend_min_magnitude).max(0.01))
+                .clamp(0.0, 1.0);
                 let multiplier = 1.0 + t * (self.config.counter_trend_multiplier - 1.0);
                 let required_spike = threshold_usd * multiplier;
 
@@ -1449,17 +1459,18 @@ impl ArbEngine {
             if let Some(price_to_beat) = ptb {
                 let ptb_distance = binance - price_to_beat; // positive = BTC above ptb
                 let trade_is_up = spike_direction > 0.0;
+                let ptb_neutral_zone = self.config.ptb_neutral_zone_usd_for(symbol);
+                let ptb_max_counter_distance = self.config.ptb_max_counter_distance_usd_for(symbol);
 
                 // Counter-PTB: buying UP when BTC is well below ptb, or DOWN when well above
-                let is_counter_ptb = (trade_is_up
-                    && ptb_distance < -self.config.ptb_neutral_zone_usd)
-                    || (!trade_is_up && ptb_distance > self.config.ptb_neutral_zone_usd);
+                let is_counter_ptb = (trade_is_up && ptb_distance < -ptb_neutral_zone)
+                    || (!trade_is_up && ptb_distance > ptb_neutral_zone);
 
                 if is_counter_ptb {
                     let ptb_abs = ptb_distance.abs();
 
                     // Hard reject: too far from ptb for this direction to win
-                    if ptb_abs > self.config.ptb_max_counter_distance_usd {
+                    if ptb_abs > ptb_max_counter_distance {
                         let state = self.symbol_states.get_mut(symbol).unwrap();
                         let should_log = state
                             .last_rejection
@@ -1475,7 +1486,7 @@ impl ArbEngine {
                                 SignalStatus::Rejected,
                                 Some(format!(
                                     "PTB_TOO_FAR(dist={:.0},max={:.0})",
-                                    ptb_distance, self.config.ptb_max_counter_distance_usd
+                                    ptb_distance, ptb_max_counter_distance
                                 )),
                             );
                         }
@@ -1483,10 +1494,9 @@ impl ArbEngine {
                     }
 
                     // Soft penalty: scale threshold up based on distance from ptb
-                    let ptb_t = ((ptb_abs - self.config.ptb_neutral_zone_usd)
-                        / (self.config.ptb_max_counter_distance_usd
-                            - self.config.ptb_neutral_zone_usd))
-                        .clamp(0.0, 1.0);
+                    let ptb_t = ((ptb_abs - ptb_neutral_zone)
+                        / (ptb_max_counter_distance - ptb_neutral_zone).max(0.01))
+                    .clamp(0.0, 1.0);
                     let ptb_multiplier = 1.0 + ptb_t; // 1.0 to 2.0
                     let required_spike = threshold_usd * ptb_multiplier;
 

@@ -55,16 +55,18 @@ pub fn ptb_margin(direction: &str, current_btc: f64, price_to_beat: Option<f64>)
     })
 }
 
-fn ptb_factor(margin: Option<f64>) -> f64 {
+fn ptb_factor(margin: Option<f64>, config: &AppConfig, symbol: &str) -> f64 {
     let margin = margin.unwrap_or(0.0);
-    if margin > 50.0 {
+    let favorable = config.ptb_favorable_margin_for(symbol);
+    let ramp_end = favorable + config.ptb_neutral_zone_usd_for(symbol);
+    if margin > ramp_end {
         1.5
-    } else if margin > 30.0 {
-        1.0 + (margin - 30.0) / 20.0 * 0.5
-    } else if margin < -50.0 {
+    } else if margin > favorable {
+        1.0 + (margin - favorable) / (ramp_end - favorable).max(0.01) * 0.5
+    } else if margin < -ramp_end {
         0.6
-    } else if margin < -30.0 {
-        1.0 - ((-margin) - 30.0) / 20.0 * 0.4
+    } else if margin < -favorable {
+        1.0 - ((-margin) - favorable) / (ramp_end - favorable).max(0.01) * 0.4
     } else {
         1.0
     }
@@ -81,7 +83,7 @@ fn trend_reversed_hit(
     }
 
     let reversal_threshold = (pos.entry_spike.abs() * (config.trend_reversal_pct / 100.0))
-        .max(config.trend_reversal_threshold)
+        .max(config.trend_reversal_threshold_for(&pos.symbol))
         * factor;
     if pos.direction == "UP" {
         current_btc < (pos.entry_btc - reversal_threshold)
@@ -130,11 +132,13 @@ pub fn evaluate_position_exit(
         .last_market_end_ts
         .and_then(|end| (end > now_secs).then_some(end - now_secs));
     let margin = ptb_margin(&pos.direction, ctx.current_btc, ctx.last_price_to_beat);
-    let factor = ptb_factor(margin);
+    let factor = ptb_factor(margin, config, &pos.symbol);
+    let favorable_margin = config.ptb_favorable_margin_for(&pos.symbol);
+    let hold_safety_margin = config.hold_safety_margin_for(&pos.symbol);
 
     let trend_reversed_raw = trend_reversed_hit(pos, ctx.current_btc, config, factor);
     let trend_confirmation_ms =
-        if ctx.current_price < pos.entry_price && margin.is_some_and(|m| m > 30.0) {
+        if ctx.current_price < pos.entry_price && margin.is_some_and(|m| m > favorable_margin) {
             700
         } else {
             200
@@ -160,14 +164,14 @@ pub fn evaluate_position_exit(
         && ctx.current_price <= pos.highest_price * (1.0 - config.trailing_stop_pct / 100.0);
     let near_end = held_ms > 295_000;
 
-    let ptb_tier = PtbTier::from_margin(margin);
+    let ptb_tier = PtbTier::from_margin(margin, config, &pos.symbol);
     let ptb_hold_active = ptb_tier.is_ptb_hold()
         || pos.entry_mode.as_deref() == Some("ptb_hold")
-        || (pos.hold_to_resolution && margin.is_some_and(|m| m > config.hold_safety_margin));
+        || (pos.hold_to_resolution && margin.is_some_and(|m| m > hold_safety_margin));
 
     if ptb_hold_active {
         let margin = margin.unwrap_or(0.0);
-        if margin <= config.hold_safety_margin {
+        if margin <= hold_safety_margin {
             return PositionExitDecision {
                 reason: Some("hold_safety_exit"),
                 suppressed_reason: None,
@@ -179,7 +183,7 @@ pub fn evaluate_position_exit(
                 suppressed_reason: None,
             };
         }
-        if trend_reversed && margin < 30.0 {
+        if trend_reversed && margin < favorable_margin {
             return PositionExitDecision {
                 reason: Some("trend_reversed"),
                 suppressed_reason: None,
@@ -203,7 +207,10 @@ pub fn evaluate_position_exit(
         };
     }
 
-    if trend_reversed && ctx.current_price < pos.entry_price && margin.is_some_and(|m| m > 30.0) {
+    if trend_reversed
+        && ctx.current_price < pos.entry_price
+        && margin.is_some_and(|m| m > favorable_margin)
+    {
         return PositionExitDecision {
             reason: None,
             suppressed_reason: Some("trend_reversed"),
@@ -321,6 +328,7 @@ pub fn evaluate_hold_to_resolution(input: HoldEvaluationInput<'_>) -> Option<boo
 }
 
 pub fn exit_mode_for(
+    symbol: &str,
     reason: &str,
     ptb_margin_at_exit: Option<f64>,
     remaining_secs: Option<u64>,
@@ -333,12 +341,14 @@ pub fn exit_mode_for(
     let required_exit_margin = remaining_secs
         .map(|t| {
             config
-                .hold_safety_margin
-                .max(config.hold_margin_per_second * t as f64)
+                .hold_safety_margin_for(symbol)
+                .max(config.hold_margin_per_second_for(symbol) * t as f64)
         })
-        .unwrap_or(config.hold_safety_margin);
+        .unwrap_or(config.hold_safety_margin_for(symbol));
 
-    if ptb_margin_at_exit.is_some_and(|m| m >= 100.0 || m >= required_exit_margin) {
+    if ptb_margin_at_exit
+        .is_some_and(|m| m >= config.ptb_strong_margin_for(symbol) || m >= required_exit_margin)
+    {
         "ptb_conviction"
     } else {
         "scalp"

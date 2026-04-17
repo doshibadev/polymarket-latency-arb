@@ -1135,8 +1135,15 @@ impl PaperWallet {
                 let now = now_unix_secs();
                 (end > now).then_some(end - now)
             });
-            let exit_mode = exit_mode_for(reason, ptb_margin_at_exit, remaining_secs, &self.config);
-            let ptb_tier_at_exit = PtbTier::from_margin(ptb_margin_at_exit);
+            let exit_mode = exit_mode_for(
+                &pos.symbol,
+                reason,
+                ptb_margin_at_exit,
+                remaining_secs,
+                &self.config,
+            );
+            let ptb_tier_at_exit =
+                PtbTier::from_margin(ptb_margin_at_exit, &self.config, &pos.symbol);
 
             if sold_shares + 0.000001 < pos.shares {
                 let mut remaining = pos.clone();

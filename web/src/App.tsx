@@ -56,6 +56,7 @@ type CursorProps = {
 
 const SETTINGS_FIELDS: SettingsField[] = [
   { key: "threshold_bps", label: "Spike Threshold ($)", step: "1", kind: "threshold", group: "entry" },
+  { key: "eth_threshold_bps", label: "ETH Spike Threshold ($)", step: "0.1", kind: "threshold", group: "entry" },
   { key: "portfolio_pct", label: "Portfolio Per Trade (%)", step: "0.1", kind: "percent", group: "entry" },
   { key: "max_entry_price", label: "Max Entry Price", step: "0.01", group: "entry" },
   { key: "min_entry_price", label: "Min Entry Price", step: "0.01", group: "entry" },
@@ -72,16 +73,23 @@ const SETTINGS_FIELDS: SettingsField[] = [
   { key: "min_hold_ms", label: "Min Hold (ms)", step: "1", group: "hold" },
   { key: "hold_min_share_price", label: "Hold Min Share Price", step: "0.01", group: "hold" },
   { key: "hold_safety_margin", label: "Hold Safety Margin", step: "0.01", group: "hold" },
+  { key: "eth_hold_safety_margin", label: "ETH Hold Safety Margin", step: "0.01", group: "hold" },
   { key: "hold_margin_per_second", label: "Hold Margin / Second", step: "0.0001", group: "hold" },
+  { key: "eth_hold_margin_per_second", label: "ETH Hold Margin / Second", step: "0.0001", group: "hold" },
   { key: "hold_max_seconds", label: "Hold Max Seconds", step: "1", group: "hold" },
   { key: "hold_max_crossings", label: "Hold Max Crossings", step: "1", group: "hold" },
   { key: "trend_reversal_pct", label: "Trend Reversal (%)", step: "0.1", group: "trend" },
   { key: "trend_reversal_threshold", label: "Trend Reversal ($)", step: "0.1", group: "trend" },
+  { key: "eth_trend_reversal_threshold", label: "ETH Trend Reversal ($)", step: "0.01", group: "trend" },
   { key: "trend_min_magnitude_usd", label: "Trend Min Magnitude ($)", step: "0.1", group: "trend" },
+  { key: "eth_trend_min_magnitude_usd", label: "ETH Trend Min Magnitude ($)", step: "0.1", group: "trend" },
   { key: "counter_trend_multiplier", label: "Counter Trend Multiplier", step: "0.01", group: "trend" },
   { key: "trend_max_magnitude_usd", label: "Trend Max Magnitude ($)", step: "0.1", group: "trend" },
+  { key: "eth_trend_max_magnitude_usd", label: "ETH Trend Max Magnitude ($)", step: "0.1", group: "trend" },
   { key: "ptb_neutral_zone_usd", label: "PTB Neutral Zone ($)", step: "0.1", group: "trend" },
+  { key: "eth_ptb_neutral_zone_usd", label: "ETH PTB Neutral Zone ($)", step: "0.01", group: "trend" },
   { key: "ptb_max_counter_distance_usd", label: "PTB Max Counter Distance ($)", step: "0.1", group: "trend" },
+  { key: "eth_ptb_max_counter_distance_usd", label: "ETH PTB Max Counter Distance ($)", step: "0.1", group: "trend" },
   { key: "crypto_fee_rate", label: "Fee Rate", step: "0.001", group: "execution" },
   { key: "execution_delay_ms", label: "Execution Delay (ms)", step: "1", group: "execution" },
   { key: "min_price_distance", label: "Min Price Distance", step: "0.01", group: "execution" },
@@ -943,7 +951,9 @@ export function App() {
   const totalPnL = snapshot.total_pnl || 0;
   const realized = snapshot.realized_pnl || 0;
   const unrealized = snapshot.unrealized_pnl || 0;
-  const thresholdUsd = (snapshot.config.threshold_bps ?? 0) / 100;
+  const thresholdUsd = displayMarketSymbol === "ETH"
+    ? (snapshot.config.eth_threshold_bps ?? 0) / 100
+    : (snapshot.config.threshold_bps ?? 0) / 100;
   const thresholdPct = Math.min(thresholdUsd / 100, 1) * 50;
   const spikeMagnitude = Math.min(Math.abs(market?.spike ?? 0) / 100, 1) * 50;
   const realizedAbs = Math.abs(realized);

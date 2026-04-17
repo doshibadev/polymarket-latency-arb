@@ -15,12 +15,16 @@ pub enum PtbTier {
 }
 
 impl PtbTier {
-    pub fn from_margin(margin: Option<f64>) -> Self {
+    pub fn from_margin(margin: Option<f64>, config: &AppConfig, symbol: &str) -> Self {
+        let extreme = config.ptb_extreme_margin_for(symbol);
+        let strong = config.ptb_strong_margin_for(symbol);
+        let favorable = config.ptb_favorable_margin_for(symbol);
+        let neutral = config.ptb_neutral_zone_usd_for(symbol);
         match margin {
-            Some(m) if m >= 150.0 => Self::Extreme,
-            Some(m) if m >= 100.0 => Self::Strong,
-            Some(m) if m >= 30.0 => Self::Favorable,
-            Some(m) if m >= -20.0 => Self::Neutral,
+            Some(m) if m >= extreme => Self::Extreme,
+            Some(m) if m >= strong => Self::Strong,
+            Some(m) if m >= favorable => Self::Favorable,
+            Some(m) if m >= -neutral => Self::Neutral,
             Some(_) => Self::Unfavorable,
             None => Self::Unknown,
         }
@@ -262,7 +266,7 @@ fn entry_context_score(
             .as_secs();
         (end > now).then_some(end - now)
     });
-    let ptb_tier = PtbTier::from_margin(ptb_margin);
+    let ptb_tier = PtbTier::from_margin(ptb_margin, input.config, input.symbol);
     let spike_multiple = input.spike.abs() / input.threshold_usd.max(0.01);
 
     if seconds_to_expiry.is_some_and(|s| s < 45)
@@ -294,12 +298,14 @@ fn entry_context_score(
 
     let ptb_score = ptb_margin
         .map(|m| {
-            if m >= 20.0 {
+            let neutral = input.config.ptb_neutral_zone_usd_for(input.symbol);
+            let counter_cap = input.config.ptb_max_counter_distance_usd_for(input.symbol);
+            if m >= neutral {
                 0.9
-            } else if m >= -20.0 {
+            } else if m >= -neutral {
                 0.35
             } else {
-                (-0.9f64).max(m / 120.0)
+                (-0.9f64).max(m / (counter_cap * 0.6).max(0.01))
             }
         })
         .unwrap_or(0.0);
