@@ -979,7 +979,9 @@ impl ArbEngine {
                 _ = broadcast_timer.tick() => {
                     // Sync live wallet state from Polymarket (throttled to every 5s to avoid blocking event loop)
                     if self.is_live_mode() {
-                        let should_sync = self.last_clob_sync.map_or(true, |t| t.elapsed().as_secs() >= 5);
+                        let should_sync = self
+                            .last_clob_sync
+                            .is_none_or(|t| t.elapsed().as_secs() >= 5);
                         if should_sync {
                             self.send_live_command(LiveCommand::SyncFromClob).await;
                             self.last_clob_sync = Some(Instant::now());
@@ -1008,7 +1010,11 @@ impl ArbEngine {
                             })
                             .collect();
                         // Only retry if we're on the 5-second sync boundary (same cadence as sync_from_clob)
-                        if !orphaned.is_empty() && self.last_clob_sync.map_or(true, |t| t.elapsed().as_millis() < 500) {
+                        if !orphaned.is_empty()
+                            && self
+                                .last_clob_sync
+                                .is_none_or(|t| t.elapsed().as_millis() < 500)
+                        {
                             for (position_id, sym, dir, price) in orphaned.into_iter().rev() {
                                 info!(symbol=%sym, direction=%dir, "Retrying sell for orphaned live position");
                                 self.request_live_close(position_id, sym, dir, price, "orphan_retry").await;
@@ -1020,7 +1026,7 @@ impl ArbEngine {
                     if self.is_live_mode() {
                         let now = Self::now_secs();
                         let resolved: Vec<String> = self.symbol_states.values()
-                            .filter(|s| s.market_end_ts.map_or(false, |end| now > end + 30)) // 30s after end
+                            .filter(|s| s.market_end_ts.is_some_and(|end| now > end + 30)) // 30s after end
                             .filter_map(|s| s.condition_id.clone())
                             .collect();
                         for condition_id in resolved {
@@ -1032,7 +1038,7 @@ impl ArbEngine {
                     // This gives us time to exit gracefully instead of being forced out
                     let now = Self::now_secs();
                     let early_exit_needed = self.symbol_states.iter()
-                        .filter(|(_, s)| s.market_end_ts.map_or(false, |end| now >= end.saturating_sub(30)))
+                        .filter(|(_, s)| s.market_end_ts.is_some_and(|end| now >= end.saturating_sub(30)))
                         .map(|(k, _)| k.clone())
                         .collect::<Vec<_>>();
 
@@ -1083,7 +1089,7 @@ impl ArbEngine {
                     // Force-close all positions if any market is within 2 seconds of ending
                     let now = Self::now_secs();
                     let ending_symbols: Vec<String> = self.symbol_states.iter()
-                        .filter(|(_, s)| s.market_end_ts.map_or(false, |end| now >= end.saturating_sub(2)))
+                        .filter(|(_, s)| s.market_end_ts.is_some_and(|end| now >= end.saturating_sub(2)))
                         .map(|(k, _)| k.clone())
                         .collect();
                     let market_ending = !ending_symbols.is_empty();
@@ -1267,10 +1273,10 @@ impl ArbEngine {
             let symbol = update.symbol;
 
             // Push BTC price to wallet for long-baseline spike calculation (every tick)
-            self.wallet.push_btc_price(&symbol, update.price);
+            self.wallet.push_btc_price(symbol, update.price);
 
             // Update BTC trailing stop tracking for open positions
-            self.wallet.update_btc_trailing(&symbol, update.price);
+            self.wallet.update_btc_trailing(symbol, update.price);
             if let Some(handle) = &self.live_execution {
                 let _ = handle.try_send(LiveCommand::UpdateBtcTrailing {
                     symbol: symbol.to_string(),
@@ -1284,7 +1290,7 @@ impl ArbEngine {
                 s.baseline_200ms.map(|b| update.price - b)
             };
             if let Some(momentum) = fast_spike {
-                self.wallet.push_spike_momentum(&symbol, momentum);
+                self.wallet.push_spike_momentum(symbol, momentum);
             }
 
             let (b, c) = {
@@ -1295,10 +1301,10 @@ impl ArbEngine {
                 )
             };
             if b > 0.0 && c > 0.0 {
-                self.wallet.update_btc_prices(&symbol, b, c);
+                self.wallet.update_btc_prices(symbol, b, c);
                 // IMMEDIATE spike check on every Binance price update (no polling delay)
                 if self.running {
-                    self.check_for_spike(&symbol).await;
+                    self.check_for_spike(symbol).await;
                 }
             }
 
@@ -1695,7 +1701,7 @@ impl ArbEngine {
         let cooldown_ms = 3000; // 3 second cooldown after a position closes
         let cooldown_ok = state
             .last_close_time
-            .map_or(true, |t| t.elapsed().as_millis() >= cooldown_ms);
+            .is_none_or(|t| t.elapsed().as_millis() >= cooldown_ms);
 
         // Max 1 position at a time — don't open opposite direction while one is open
         // Prevents opening UP while DOWN is held (or vice versa), which guarantees a loss on one side
@@ -1743,7 +1749,7 @@ impl ArbEngine {
                 }
             });
             let in_hold_mode = entry_price > self.config.hold_min_share_price
-                && time_remaining.map_or(false, |t| t <= 30);
+                && time_remaining.is_some_and(|t| t <= 30);
 
             match self.wallet.open_position(
                 symbol,
@@ -1865,7 +1871,7 @@ impl ArbEngine {
             } => {
                 self.live_state = Some(snapshot);
                 self.record_latency(LatencyKind::Open, &latency_trace, "open");
-                match result {
+                match *result {
                     Ok(fill) => {
                         self.wallet.sync_pending_to_live_fill(
                             &fill.position.position_id,

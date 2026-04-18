@@ -142,6 +142,18 @@ const BOOL_CONFIG_FIELDS: &[(&str, &str)] = &[
     ("LIVE_DRY_RUN_ORDERS", "live_dry_run_orders"),
 ];
 
+const STARTUP_ONLY_CONFIG_FIELDS: &[&str] = &[
+    "dashboard_bind_addr",
+    "dashboard_auth_token",
+    "paper_trading",
+    "starting_balance",
+    "symbols",
+    "paper_symbols",
+    "live_symbols",
+    "paper_db_path",
+    "live_db_path",
+];
+
 pub struct ServerState {
     pub tx: broadcast::Sender<String>,
     pub cmd_tx: mpsc::Sender<serde_json::Value>,
@@ -511,6 +523,26 @@ mod tests {
 
         assert!(matches!(result, Err((StatusCode::BAD_REQUEST, _))));
     }
+
+    #[tokio::test]
+    async fn startup_only_settings_are_rejected() {
+        let config = AppConfig::load().expect("config should load");
+        let state = test_state(config, json!({"mode":"paper"}), None);
+
+        let result = validate_settings_update(
+            &state,
+            &json!({
+                "paper_db_path": "other.db"
+            }),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err((StatusCode::BAD_REQUEST, ref message))
+                if message == "`paper_db_path` is startup-only and cannot be changed via /settings"
+        ));
+    }
 }
 
 async fn send_command(
@@ -654,6 +686,16 @@ async fn validate_settings_update(
     state: &ServerState,
     payload: &serde_json::Value,
 ) -> std::result::Result<AppConfig, (StatusCode, String)> {
+    if let Some(key) = payload.as_object().and_then(|map| {
+        map.keys()
+            .find(|key| STARTUP_ONLY_CONFIG_FIELDS.contains(&key.as_str()))
+    }) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("`{key}` is startup-only and cannot be changed via /settings"),
+        ));
+    }
+
     let mut config = AppConfig::load().map_err(|err| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

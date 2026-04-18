@@ -33,8 +33,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::load()?;
     config.validate_startup_settings()?;
 
-    // Fetch initial markets for all symbols
-    let symbols = vec!["BTC", "ETH"];
+    // Fetch initial markets for configured symbols
+    let symbols = config.active_symbols().to_vec();
     let mut initial_markets = Vec::new();
     for symbol in &symbols {
         if let Some(market) = fetch_current_market(symbol).await {
@@ -75,8 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // RTDS Stream
+    let stream_symbols = symbols.clone();
     tokio::spawn(async move {
-        let mut stream = crate::rtds::RtdsStream::new(vec!["BTC", "ETH"]);
+        let mut stream = crate::rtds::RtdsStream::new(stream_symbols);
         if let Err(e) = stream.run(price_tx).await {
             tracing::error!(error = %e, "RTDS stream error");
         }

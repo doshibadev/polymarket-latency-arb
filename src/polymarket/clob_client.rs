@@ -193,9 +193,9 @@ impl ClobClient {
                         if let Some(&end_ts) = self.market_ends.get(symbol) {
                             if now >= end_ts.saturating_sub(10)
                                 && now < end_ts.saturating_sub(1)
-                                && !prefetched_markets
+                                && prefetched_markets
                                     .get(symbol)
-                                    .is_some_and(|market| market.window_end_ts > end_ts)
+                                    .is_none_or(|market| market.window_end_ts <= end_ts)
                                 && inflight_prefetches.insert(symbol.clone())
                             {
                                 let symbol_clone = symbol.clone();

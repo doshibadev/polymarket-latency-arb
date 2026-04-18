@@ -44,7 +44,7 @@ This is trading infrastructure, not a SaaS demo. The dashboard is meant to stay 
 - Shared entry planner and shared position model so paper and live use the same strategy decisions.
 - Axum dashboard server with `/ws`, `/config`, `/settings`, and `/command`.
 - React + TypeScript terminal frontend served from `web/dist`.
-- Runtime settings editor that persists supported config fields into `.env`.
+- Runtime settings editor that persists supported strategy/risk fields into `.env`.
 - Start, stop, reset, and manual close controls.
 - Equity chart, positions table, execution blotter, signal terminal, active market panel, market scanner, and PnL metrics.
 
@@ -57,8 +57,8 @@ Important operational constraints:
 - `PAPER_TRADING=true` is the default and should be used for development.
 - `PAPER_TRADING=false` enables real execution.
 - `POLYMARKET_PRIVATE_KEY` must never be committed.
-- Paper state is stored locally in `lattice.db` using SQLite.
-- Live state is stored separately in `lattice-live.db` using SQLite.
+- Paper state is stored locally in SQLite, defaulting to `lattice.db`.
+- Live state is stored separately in SQLite, defaulting to `lattice-live.db`.
 - Dashboard settings write to `.env`.
 - The bot currently targets BTC 5-minute Up/Down markets.
 
@@ -77,7 +77,7 @@ Polymarket CLOB WS --- bid/ask + depth ----+
                                            +-- LiveWallet
 
 React terminal -- POST /command -- start | stop | reset | close_position
-React terminal -- POST /settings - persisted .env updates
+React terminal -- POST /settings - persisted runtime-only .env updates
 ```
 
 ## Repository Layout
@@ -239,7 +239,7 @@ The React app talks to the Rust server through:
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/config` | Read current persisted settings from `.env`. |
-| `POST` | `/settings` | Persist config updates and send them to the running engine. |
+| `POST` | `/settings` | Persist runtime-mutable strategy/risk updates and send them to the running engine. |
 | `POST` | `/command` | Send `start`, `stop`, `reset`, or `close_position`. |
 | `GET` | `/ws` | Realtime JSON snapshot stream for the dashboard. |
 
@@ -258,7 +258,7 @@ Snapshot groups:
 - Trading stats: `wins`, `losses`, `total_fees`, `total_volume`.
 - State: `running`, `runtime_ms`, `is_live`, `wallet_address`.
 - Collections: `positions`, `trades`, `history`, `signals`, `markets`.
-- Config: all dashboard-editable strategy/risk settings.
+- Config: runtime-mutable strategy/risk settings only. Startup-only settings such as mode, symbol lists, bind/auth, and DB paths stay in `.env` and require restart.
 
 ## Configuration Reference
 
@@ -267,8 +267,11 @@ Full examples live in `.env.example` and `.env.paper`. The most important settin
 | Variable | Meaning |
 |---|---|
 | `DASHBOARD_PORT` | Axum dashboard/API port. Defaults to `3000`. |
+| `DASHBOARD_BIND_ADDR` | Startup-only bind address for dashboard/API. |
 | `PAPER_TRADING` | `true` for simulation, `false` for real live trading. |
 | `STARTING_BALANCE` | Paper wallet starting balance in USDC. |
+| `SYMBOLS` / `PAPER_SYMBOLS` / `LIVE_SYMBOLS` | Startup-only market symbol lists. Mode-specific vars override shared fallback. |
+| `PAPER_DB_PATH` / `LIVE_DB_PATH` | Startup-only SQLite paths. Must stay separate. |
 | `THRESHOLD_BPS` | Spike threshold in hundredths of USD. `2000` means `$20`. |
 | `PORTFOLIO_PCT` | Fraction of balance per entry. `0.20` means 20%. |
 | `MAX_ENTRY_PRICE` / `MIN_ENTRY_PRICE` | Share price entry bounds. |
@@ -343,8 +346,7 @@ Current test coverage is small and focused on config/server invariants. Paper tr
 ## Operational Files
 
 - `.env` contains secrets and runtime config. Do not commit it.
-- `lattice.db`, `lattice.db-shm`, and `lattice.db-wal` are local paper state. Do not commit them.
-- `lattice-live.db`, `lattice-live.db-shm`, and `lattice-live.db-wal` are local live state. Do not commit them.
+- `PAPER_DB_PATH` and `LIVE_DB_PATH` control local SQLite state files. Defaults are `lattice.db` and `lattice-live.db`. Do not commit them.
 - `web/dist` is generated frontend output. Do not commit it.
 - `target` is Rust build output. Do not commit it.
 
@@ -354,7 +356,7 @@ Current test coverage is small and focused on config/server invariants. Paper tr
 - If Vite cannot reach the backend, make sure `cargo run` is serving on `DASHBOARD_PORT=3000`.
 - If no market appears, the current 5-minute BTC market may not be available from Gamma yet; wait for the next window or check network access.
 - If live approvals fail, verify Polygon gas, `POLYGON_RPC_URL`, wallet type, and private key.
-- If paper state looks stale, stop the bot and remove `lattice.db`, `lattice.db-shm`, and `lattice.db-wal`.
+- If paper state looks stale, stop the bot and remove the SQLite files for `PAPER_DB_PATH` (default `lattice.db`, `lattice.db-shm`, `lattice.db-wal`).
 
 ## License
 

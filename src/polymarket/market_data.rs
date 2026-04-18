@@ -77,7 +77,7 @@ pub async fn fetch_market_for_window(symbol: &str, window_ts: u64) -> Option<Mar
             // Extract window_start from slug: {symbol}-updown-5m-{timestamp}
             let window_start_ts = market_slug
                 .split('-')
-                .last()
+                .next_back()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             let window_end_ts = window_start_ts + 300; // 5 minutes

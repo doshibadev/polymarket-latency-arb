@@ -177,8 +177,17 @@ pub struct RtdsStream {
 }
 
 impl RtdsStream {
-    pub fn new(symbols: Vec<&'static str>) -> Self {
-        let symbols = symbols.into_iter().filter_map(feed_symbol).collect();
+    pub fn new(symbols: Vec<String>) -> Self {
+        let symbols = symbols
+            .into_iter()
+            .filter_map(|symbol| match symbol.as_str() {
+                "BTC" => feed_symbol("BTC"),
+                "ETH" => feed_symbol("ETH"),
+                "SOL" => feed_symbol("SOL"),
+                "XRP" => feed_symbol("XRP"),
+                _ => None,
+            })
+            .collect();
         Self { symbols }
     }
 

@@ -5,6 +5,10 @@ use std::env;
 pub struct AppConfig {
     pub dashboard_bind_addr: String,
     pub dashboard_auth_token: Option<String>,
+    pub paper_symbols: Vec<String>,
+    pub live_symbols: Vec<String>,
+    pub paper_db_path: String,
+    pub live_db_path: String,
     pub threshold_bps: u64,
     pub eth_threshold_bps: u64,
     pub starting_balance: f64,
@@ -61,8 +65,14 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    const DEFAULT_SYMBOLS: &'static str = "BTC,ETH";
+    pub const SUPPORTED_SYMBOLS: &'static [&'static str] = &["BTC", "ETH", "SOL", "XRP"];
+
     pub fn load() -> Result<Self> {
         let _ = dotenvy::dotenv();
+
+        let paper_symbols = Self::load_symbol_list("PAPER_SYMBOLS");
+        let live_symbols = Self::load_symbol_list("LIVE_SYMBOLS");
 
         Ok(Self {
             dashboard_bind_addr: env::var("DASHBOARD_BIND_ADDR")
@@ -73,6 +83,18 @@ impl AppConfig {
                 .ok()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
+            paper_symbols,
+            live_symbols,
+            paper_db_path: env::var("PAPER_DB_PATH")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "lattice.db".to_string()),
+            live_db_path: env::var("LIVE_DB_PATH")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "lattice-live.db".to_string()),
             threshold_bps: env::var("THRESHOLD_BPS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -282,6 +304,52 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5000),
         })
+    }
+
+    fn load_symbol_list(mode_key: &str) -> Vec<String> {
+        let value = env::var(mode_key)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| env::var("SYMBOLS").ok().filter(|v| !v.trim().is_empty()))
+            .unwrap_or_else(|| Self::DEFAULT_SYMBOLS.to_string());
+
+        Self::parse_symbol_list(&value)
+    }
+
+    fn parse_symbol_list(value: &str) -> Vec<String> {
+        let mut symbols = Vec::new();
+        for symbol in value.split(',') {
+            let normalized = symbol.trim().to_ascii_uppercase();
+            if normalized.is_empty() || symbols.iter().any(|existing| existing == &normalized) {
+                continue;
+            }
+            symbols.push(normalized);
+        }
+        symbols
+    }
+
+    pub fn active_symbols(&self) -> &[String] {
+        if self.paper_trading {
+            &self.paper_symbols
+        } else {
+            &self.live_symbols
+        }
+    }
+
+    pub fn active_db_path(&self) -> &str {
+        if self.paper_trading {
+            &self.paper_db_path
+        } else {
+            &self.live_db_path
+        }
+    }
+
+    pub fn db_url(path: &str) -> String {
+        if path.starts_with("sqlite:") {
+            path.to_string()
+        } else {
+            format!("sqlite://{path}")
+        }
     }
 
     pub fn update_from_json(&mut self, json: serde_json::Value) -> Result<()> {
@@ -563,6 +631,21 @@ impl AppConfig {
             ));
         }
 
+        Self::validate_symbol_list("PAPER_SYMBOLS", &self.paper_symbols)?;
+        Self::validate_symbol_list("LIVE_SYMBOLS", &self.live_symbols)?;
+
+        if self.paper_db_path.trim().is_empty() || self.live_db_path.trim().is_empty() {
+            return Err(crate::error::ArbError::Config(
+                "PAPER_DB_PATH and LIVE_DB_PATH must not be empty".to_string(),
+            ));
+        }
+
+        if self.paper_db_path == self.live_db_path {
+            return Err(crate::error::ArbError::Config(
+                "PAPER_DB_PATH and LIVE_DB_PATH must differ".to_string(),
+            ));
+        }
+
         self.validate_runtime_settings()
     }
 
@@ -679,6 +762,25 @@ impl AppConfig {
             )))
         }
     }
+
+    fn validate_symbol_list(name: &str, symbols: &[String]) -> Result<()> {
+        if symbols.is_empty() {
+            return Err(crate::error::ArbError::Config(format!(
+                "{name} must contain at least one supported symbol"
+            )));
+        }
+
+        for symbol in symbols {
+            if !Self::SUPPORTED_SYMBOLS.contains(&symbol.as_str()) {
+                return Err(crate::error::ArbError::Config(format!(
+                    "{name} contains unsupported symbol `{symbol}`. Supported: {}",
+                    Self::SUPPORTED_SYMBOLS.join(", ")
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -754,5 +856,36 @@ mod tests {
         config.min_entry_price = 0.9;
         config.max_entry_price = 0.8;
         assert!(config.validate_runtime_settings().is_err());
+    }
+
+    #[test]
+    fn validate_startup_settings_rejects_shared_db_paths() {
+        let mut config = AppConfig::load().expect("config should load");
+        config.paper_db_path = "same.db".to_string();
+        config.live_db_path = "same.db".to_string();
+        assert!(config.validate_startup_settings().is_err());
+    }
+
+    #[test]
+    fn active_symbols_switch_with_mode() {
+        let mut config = AppConfig::load().expect("config should load");
+        config.paper_symbols = vec!["BTC".to_string()];
+        config.live_symbols = vec!["ETH".to_string(), "SOL".to_string()];
+
+        config.paper_trading = true;
+        assert_eq!(config.active_symbols(), &["BTC".to_string()]);
+
+        config.paper_trading = false;
+        assert_eq!(
+            config.active_symbols(),
+            &["ETH".to_string(), "SOL".to_string()]
+        );
+    }
+
+    #[test]
+    fn validate_startup_settings_rejects_unsupported_symbols() {
+        let mut config = AppConfig::load().expect("config should load");
+        config.live_symbols = vec!["DOGE".to_string()];
+        assert!(config.validate_startup_settings().is_err());
     }
 }

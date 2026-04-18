@@ -99,7 +99,7 @@ pub enum LiveEvent {
         direction: String,
         spike: f64,
         submitted_at: Instant,
-        result: Result<LiveOpenFill, String>,
+        result: Box<Result<LiveOpenFill, String>>,
         snapshot: LiveWalletSnapshot,
         latency_trace: LatencyTrace,
     },
@@ -126,6 +126,7 @@ impl LiveExecutionHandle {
         self.tx.send(command).await
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn try_send(
         &self,
         command: LiveCommand,
@@ -228,7 +229,7 @@ pub fn spawn_live_execution(
                             direction,
                             spike,
                             submitted_at,
-                            result,
+                            result: Box::new(result),
                             snapshot,
                             latency_trace,
                         })

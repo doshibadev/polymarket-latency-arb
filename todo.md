@@ -65,8 +65,8 @@ Go-live means `PAPER_TRADING=false` with real USDC on Polymarket. Do not trade r
   - Invalid settings values are rejected.
 
 - [x] Commit + push after this block.
-  - Validation run: `cargo fmt`, `cargo test`, `cd web && npm run build`.
-  - Follow-up: `cargo clippy -- -D warnings` still fails on pre-existing repo-wide lints outside this block; `cargo build --release` was started but not waited to completion because fat LTO link/build was slow.
+  - Validation run: `cargo fmt`, `cargo test`, `cargo clippy -- -D warnings`, `cd web && npm run build`.
+  - Note: `cargo build --release` was started earlier but not waited to completion because fat LTO link/build was slow.
 
 ## 4. Add Submit-Time Live Execution Guards
 
@@ -117,7 +117,7 @@ Go-live means `PAPER_TRADING=false` with real USDC on Polymarket. Do not trade r
   - Token balance exists but DB row missing.
   - Pending close before crash.
 
-- [ ] Commit + push after this block.
+- [x] Commit + push after this block.
   - Validation before commit: `cargo fmt`, `cargo test`, `cargo clippy`, `cargo build --release`.
 
 ## 6. Finish Live Startup Preflight
@@ -135,7 +135,7 @@ Go-live means `PAPER_TRADING=false` with real USDC on Polymarket. Do not trade r
 - [x] Add preflight command/report endpoint for ops.
   - Backend only; frontend can wire later.
 
-- [ ] Commit + push after this block.
+- [x] Commit + push after this block.
   - Validation before commit: `cargo fmt`, `cargo test`, `cargo clippy`, `cargo build --release`.
 
 ## 7. Add Live Pause, Kill Switch, And Safe Shutdown
@@ -181,21 +181,22 @@ Go-live means `PAPER_TRADING=false` with real USDC on Polymarket. Do not trade r
 
 ## 9. Clean Config And Symbol Control
 
-- [ ] Move hardcoded live symbols out of `main.rs`.
+- [x] Move hardcoded live symbols out of `main.rs`.
   - Current code starts BTC and ETH unconditionally.
   - Add `SYMBOLS=BTC,ETH` or separate `PAPER_SYMBOLS` / `LIVE_SYMBOLS`.
   - In live mode, require every enabled symbol to pass market, RTDS, CLOB, risk, and preflight checks.
 
-- [ ] Add strict config validation on startup and settings update.
+- [x] Add strict config validation on startup and settings update.
   - Reject invalid ranges such as negative fees, impossible entry price bounds, drawdown over 100%, zero/negative order limits, and dangerous live defaults.
   - Document all new env vars in `.env.example` and `.env.paper` if relevant.
 
-- [ ] Split mutable runtime settings from startup-only settings.
+- [x] Split mutable runtime settings from startup-only settings.
   - Startup-only: mode, private key, wallet type, RPC URL, DB path, bind address, auth token, symbol list.
   - Runtime-mutable: conservative strategy/risk fields only, and maybe only while stopped in live mode.
 
-- [ ] Commit + push after this block.
-  - Validation before commit: `cargo fmt`, `cargo test`, `cargo clippy`, `cargo build --release`.
+- [x] Commit + push after this block.
+  - Validation run: `cargo fmt`, `cargo test`, `cargo clippy -- -D warnings`, `cd web && npm run build`.
+  - Delivered: `SYMBOLS` / `PAPER_SYMBOLS` / `LIVE_SYMBOLS`, `PAPER_DB_PATH` / `LIVE_DB_PATH`, startup validation for supported symbols and distinct DB paths, runtime-only `/settings` updates, and server tests rejecting startup-only settings changes.
 
 ## 10. Improve Observability And Audit Logs
 

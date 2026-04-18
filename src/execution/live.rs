@@ -420,6 +420,7 @@ enum LiveSubmitSide {
     Close,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_live_submit_against_quote(
     config: &AppConfig,
     quote: &LiveQuoteSnapshot,
@@ -552,8 +553,6 @@ pub struct LiveWallet {
 }
 
 impl LiveWallet {
-    const DB_URL: &'static str = "sqlite://lattice-live.db";
-
     pub async fn new(config: AppConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let private_key =
             std::env::var(PRIVATE_KEY_VAR).map_err(|_| "POLYMARKET_PRIVATE_KEY not set in .env")?;
@@ -653,11 +652,12 @@ impl LiveWallet {
             return Ok(db.clone());
         }
 
-        let options = SqliteConnectOptions::from_str(Self::DB_URL)?
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(std::time::Duration::from_secs(5));
+        let options =
+            SqliteConnectOptions::from_str(&AppConfig::db_url(&self.config.live_db_path))?
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal)
+                .synchronous(SqliteSynchronous::Normal)
+                .busy_timeout(std::time::Duration::from_secs(5));
         let db = SqlitePool::connect_with(options).await?;
         Self::migrate(&db).await?;
         self.db = Some(db.clone());
@@ -1774,7 +1774,7 @@ impl LiveWallet {
                 let update_req =
                     polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
                         .asset_type(AssetType::Conditional)
-                        .token_id(token_id.clone())
+                        .token_id(token_id)
                         .build();
                 let _ = self.clob.update_balance_allowance(update_req).await;
 
@@ -1941,6 +1941,7 @@ impl LiveWallet {
     }
 
     /// Update share prices from WebSocket
+    #[allow(clippy::too_many_arguments)]
     pub fn update_share_price(
         &mut self,
         symbol: &str,
@@ -2024,7 +2025,7 @@ impl LiveWallet {
         let update_req =
             polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
                 .asset_type(AssetType::Conditional)
-                .token_id(token_id.clone())
+                .token_id(token_id)
                 .build();
         let _ = self.clob.update_balance_allowance(update_req).await;
 
@@ -2118,6 +2119,7 @@ impl LiveWallet {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn validate_live_submit_quote(
         &self,
         symbol: &str,
@@ -2144,6 +2146,7 @@ impl LiveWallet {
         Ok(quote)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn post_with_retry(
         clob: &AuthClient,
         signer: &K256Signer,
@@ -2182,7 +2185,7 @@ impl LiveWallet {
                 .token_id(token_id)
                 .amount(amount)
                 .price(price)
-                .side(side.clone())
+                .side(side)
                 .order_type(OrderType::FAK) // FAK = Fill-And-Kill (fills as much as possible, cancels rest)
                 .build()
                 .await
@@ -2774,7 +2777,7 @@ impl LiveWallet {
                     use polymarket_client_sdk::clob::types::AssetType;
                     let update_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
                         .asset_type(AssetType::Conditional)
-                        .token_id(token_id.clone())
+                        .token_id(token_id)
                         .build();
                     let _ = self.clob.update_balance_allowance(update_req).await;
 
@@ -2782,7 +2785,7 @@ impl LiveWallet {
 
                     let balance_req = polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest::builder()
                         .asset_type(AssetType::Conditional)
-                        .token_id(token_id.clone())
+                        .token_id(token_id)
                         .build();
                     if let Ok(b) = self.clob.balance_allowance(balance_req).await {
                         let raw: f64 = b.balance.try_into().unwrap_or(0.0);

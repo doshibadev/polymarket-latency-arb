@@ -142,7 +142,6 @@ enum DbWriteCommand {
 }
 
 impl PaperWallet {
-    const DB_URL: &'static str = "sqlite://lattice.db";
     const SUPPRESSED_EXIT_SIGNAL_INTERVAL: Duration = Duration::from_secs(5);
 
     pub fn new(config: AppConfig) -> Self {
@@ -175,11 +174,12 @@ impl PaperWallet {
             return Ok(db.clone());
         }
 
-        let options = SqliteConnectOptions::from_str(Self::DB_URL)?
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(std::time::Duration::from_secs(5));
+        let options =
+            SqliteConnectOptions::from_str(&AppConfig::db_url(&self.config.paper_db_path))?
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal)
+                .synchronous(SqliteSynchronous::Normal)
+                .busy_timeout(std::time::Duration::from_secs(5));
         let db = SqlitePool::connect_with(options).await?;
         Self::migrate(&db).await?;
         self.db = Some(db.clone());
@@ -777,6 +777,7 @@ impl PaperWallet {
     }
 
     /// Called by engine on each Binance tick to evaluate hold-to-resolution for open positions
+    #[allow(clippy::too_many_arguments)]
     pub fn update_hold_status(
         &mut self,
         symbol: &str,
@@ -1341,6 +1342,7 @@ impl PaperWallet {
     /// This ensures paper and live positions are identical so exit decisions apply correctly.
     /// Called after live wallet fills an order — adjusts the pending entry's price, shares,
     /// position_size, and fees to match the real fill.
+    #[allow(clippy::too_many_arguments)]
     pub fn sync_pending_to_live_fill(
         &mut self,
         position_id: &str,
