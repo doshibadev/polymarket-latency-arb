@@ -142,7 +142,7 @@ export type CommandPayload =
   | { _type: "start" }
   | { _type: "stop" }
   | { _type: "reset" }
-  | { _type: "close_position"; index: number; position_id?: string }
+  | { _type: "close_position"; position_id: string }
   | { _type: "toggle_market"; symbol: string; enabled: boolean };
 
 export type ConfigField =

@@ -31,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Polymarket Latency Arbitrage Bot V2 starting");
 
     let config = AppConfig::load()?;
+    config.validate_startup_settings()?;
 
     // Fetch initial markets for all symbols
     let symbols = vec!["BTC", "ETH"];

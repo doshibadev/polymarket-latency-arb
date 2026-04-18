@@ -1,5 +1,34 @@
 import { Config, CommandPayload, EMPTY_CONFIG } from "./types";
 
+const AUTH_TOKEN_STORAGE_KEY = "lattice.dashboardAuthToken";
+
+function readTokenFromUrl() {
+  const url = new URL(window.location.href);
+  const token = url.searchParams.get("token")?.trim();
+  if (!token) return null;
+  window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+  url.searchParams.delete("token");
+  window.history.replaceState({}, "", url.toString());
+  return token;
+}
+
+export function getDashboardAuthToken() {
+  return (
+    readTokenFromUrl() ??
+    window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY)?.trim() ??
+    null
+  );
+}
+
+function buildHeaders() {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  const token = getDashboardAuthToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  return headers;
+}
+
 export function normalizeConfig(config: Partial<Config>): Config {
   const merged = { ...EMPTY_CONFIG, ...config };
   return {
@@ -36,7 +65,7 @@ export async function saveConfig(config: Config) {
   await ensureOk(
     await fetch("/settings", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: buildHeaders(),
       body: JSON.stringify(serializeConfig(config)),
     }),
   );
@@ -46,7 +75,7 @@ export async function sendCommand(payload: CommandPayload) {
   await ensureOk(
     await fetch("/command", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: buildHeaders(),
       body: JSON.stringify(payload),
     }),
   );

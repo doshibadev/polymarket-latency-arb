@@ -17,7 +17,7 @@ import {
 } from "recharts";
 import { fetchConfig, normalizeConfig, saveConfig, sendCommand } from "./api";
 import { useTerminalFeed } from "./useTerminalFeed";
-import { Config, ConfigField, EMPTY_CONFIG, HistoryPoint, MarketSnapshot, Trade } from "./types";
+import { Config, ConfigField, EMPTY_CONFIG, HistoryPoint, MarketSnapshot, Position, Trade } from "./types";
 
 type SettingsField = {
   key: ConfigField;
@@ -680,7 +680,7 @@ function OpenPositionsTable({
   busyAction: string | null;
   clock: number;
   entryTimes: number[];
-  onClosePosition: (index: number) => void;
+  onClosePosition: (position: Position) => void;
 }) {
   return (
     <div className="panel positions-table-panel">
@@ -704,7 +704,7 @@ function OpenPositionsTable({
                   <span className={position.pnl >= 0 ? "val-up" : "val-down"}>{formatMoneySigned(position.pnl)}</span>
                   <span>{held}</span>
                   <span>{`LVL ${position.level}${position.hold_to_resolution ? " · HOLD" : ""}`}</span>
-                  <span><button className="row-btn danger-btn" onClick={() => onClosePosition(index)} disabled={busyAction !== null}>Close</button></span>
+                  <span><button className="row-btn danger-btn" onClick={() => onClosePosition(position)} disabled={busyAction !== null}>Close</button></span>
                 </div>
               );
             })}
@@ -897,10 +897,10 @@ export function App() {
     }
   }
 
-  async function closePosition(index: number) {
+  async function closePosition(position: Position) {
     setBusyAction("close");
     try {
-      await sendCommand({ _type: "close_position", index });
+      await sendCommand({ _type: "close_position", position_id: position.position_id });
     } finally {
       setBusyAction(null);
     }
@@ -1095,7 +1095,7 @@ export function App() {
                 busyAction={busyAction}
                 clock={clock}
                 entryTimes={positionEntryTimesRef.current}
-                onClosePosition={(index) => void closePosition(index)}
+                onClosePosition={(position) => void closePosition(position)}
               />
             </div>
           ) : null}
@@ -1139,7 +1139,7 @@ export function App() {
                 busyAction={busyAction}
                 clock={clock}
                 entryTimes={positionEntryTimesRef.current}
-                onClosePosition={(index) => void closePosition(index)}
+                onClosePosition={(position) => void closePosition(position)}
               />
               <div className="panel fixed-panel">
                 <div className="panel-header"><div className="panel-title">Trade Stats</div></div>

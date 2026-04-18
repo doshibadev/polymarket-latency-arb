@@ -1,4 +1,5 @@
 import { startTransition, useEffect, useRef, useState } from "react";
+import { getDashboardAuthToken } from "./api";
 import { EMPTY_SNAPSHOT, FeedStatus, SnapshotMessage, TerminalSnapshot } from "./types";
 
 export function useTerminalFeed() {
@@ -48,7 +49,12 @@ export function useTerminalFeed() {
     const connect = (path: "/ws" | "/ws/fast" | "/ws/slow") => {
       if (!active) return;
       const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-      const socket = new WebSocket(`${protocol}://${window.location.host}${path}`);
+      const url = new URL(`${protocol}://${window.location.host}${path}`);
+      const token = getDashboardAuthToken();
+      if (token) {
+        url.searchParams.set("token", token);
+      }
+      const socket = new WebSocket(url);
       sockets.set(path, socket);
       startTransition(() => setStatus("connecting"));
 

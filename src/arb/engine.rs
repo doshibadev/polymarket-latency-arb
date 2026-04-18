@@ -892,7 +892,15 @@ impl ArbEngine {
                             info!("Bot stopped");
                         }
                         Some("reset") => {
-                            // Only reset paper wallet, never live
+                            if self.is_live_mode() {
+                                warn!("Reset command rejected in live mode");
+                                self.add_system_signal(
+                                    SignalStatus::Rejected,
+                                    "LIVE_RESET_DISABLED".to_string(),
+                                );
+                                self.broadcast_state();
+                                continue;
+                            }
                             self.wallet.reset().await;
                             self.signals.clear(); // Clear signal terminal
                             info!("Paper wallet reset");

@@ -1,6 +1,8 @@
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::Query,
     extract::State,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
@@ -8,9 +10,10 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
-use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{debug, info, warn};
+
+use crate::config::AppConfig;
 
 const FRONTEND_DIST_DIR: &str = "web/dist";
 const FRONTEND_ENTRYPOINT: &str = "web/dist/index.html";
@@ -144,6 +147,34 @@ pub struct ServerState {
     pub cmd_tx: mpsc::Sender<serde_json::Value>,
     pub startup_preflight: Arc<RwLock<serde_json::Value>>,
     pub latest_fast: Arc<RwLock<Option<serde_json::Value>>>,
+    pub config: AppConfig,
+}
+
+#[derive(Clone, Default, serde::Deserialize)]
+struct AuthQuery {
+    token: Option<String>,
+}
+
+#[derive(Debug)]
+struct RequestAuth {
+    token: Option<String>,
+}
+
+impl RequestAuth {
+    fn from_parts(headers: &HeaderMap, query: AuthQuery) -> Self {
+        let bearer = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let token = query
+            .token
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or(bearer);
+        Self { token }
+    }
 }
 
 pub async fn run_server(
@@ -151,12 +182,17 @@ pub async fn run_server(
     cmd_tx: mpsc::Sender<serde_json::Value>,
     startup_preflight: Arc<RwLock<serde_json::Value>>,
 ) {
+    let config = match AppConfig::load() {
+        Ok(config) => config,
+        Err(err) => panic!("Failed to load dashboard config: {err}"),
+    };
     let latest_fast = Arc::new(RwLock::new(None));
     let state = Arc::new(ServerState {
         tx: tx.clone(),
         cmd_tx,
         startup_preflight,
         latest_fast: latest_fast.clone(),
+        config: config.clone(),
     });
     let mut snapshot_rx = tx.subscribe();
     tokio::spawn(async move {
@@ -184,7 +220,6 @@ pub async fn run_server(
             .fallback_service(
                 ServeDir::new(FRONTEND_DIST_DIR).fallback(ServeFile::new(FRONTEND_ENTRYPOINT)),
             )
-            .layer(CorsLayer::permissive())
             .with_state(state)
     } else {
         warn!(
@@ -202,7 +237,6 @@ pub async fn run_server(
             .route("/settings", post(update_settings))
             .route("/command", post(send_command))
             .fallback(get(frontend_setup_page))
-            .layer(CorsLayer::permissive())
             .with_state(state)
     };
 
@@ -212,7 +246,7 @@ pub async fn run_server(
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(3000);
 
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("{}:{}", config.dashboard_bind_addr, port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -280,9 +314,24 @@ fn build_preflight_response(
 
 async fn update_settings(
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
     Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err(status) =
+        authorize_dashboard_request(&state, &RequestAuth::from_parts(&headers, query))
+    {
+        return status.into_response();
+    }
+
     info!(settings = ?payload, "Received settings update from dashboard");
+
+    let config = match validate_settings_update(&state, &payload).await {
+        Ok(config) => config,
+        Err((status, message)) => {
+            return (status, Json(serde_json::json!({ "error": message }))).into_response();
+        }
+    };
 
     // Persist to .env, falling back to .env.example on first run.
     let content = std::fs::read_to_string(".env")
@@ -329,13 +378,25 @@ async fn update_settings(
     let mut cmd = payload;
     cmd["_type"] = serde_json::json!("settings");
     let _ = state.cmd_tx.send(cmd).await;
-    Json(serde_json::json!({ "status": "ok" }))
+    Json(serde_json::json!({
+        "status": "ok",
+        "paper_trading": config.paper_trading
+    }))
+    .into_response()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_preflight_response, BOOL_CONFIG_FIELDS, NUMERIC_CONFIG_FIELDS};
+    use super::{
+        authorize_dashboard_request, build_preflight_response, validate_command,
+        validate_settings_update, AuthQuery, RequestAuth, ServerState, BOOL_CONFIG_FIELDS,
+        NUMERIC_CONFIG_FIELDS,
+    };
+    use crate::config::AppConfig;
+    use axum::http::StatusCode;
     use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::{broadcast, mpsc, RwLock};
 
     #[test]
     fn config_field_keys_are_unique() {
@@ -378,36 +439,129 @@ mod tests {
         assert_eq!(response["runtime_gate"]["ready"], json!(true));
         assert_eq!(response["running"], json!(false));
     }
+
+    fn test_state(
+        config: AppConfig,
+        startup: serde_json::Value,
+        latest_fast: Option<serde_json::Value>,
+    ) -> Arc<ServerState> {
+        let (tx, _) = broadcast::channel(4);
+        let (cmd_tx, _) = mpsc::channel(4);
+        Arc::new(ServerState {
+            tx,
+            cmd_tx,
+            startup_preflight: Arc::new(RwLock::new(startup)),
+            latest_fast: Arc::new(RwLock::new(latest_fast)),
+            config,
+        })
+    }
+
+    #[test]
+    fn auth_rejects_missing_token_when_configured() {
+        let mut config = AppConfig::load().expect("config should load");
+        config.dashboard_auth_token = Some("secret".to_string());
+        let state = test_state(config, json!({"mode":"paper"}), None);
+
+        let result = authorize_dashboard_request(
+            &state,
+            &RequestAuth::from_parts(&axum::http::HeaderMap::new(), AuthQuery::default()),
+        );
+
+        assert_eq!(result, Err(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn live_reset_command_is_rejected() {
+        let config = AppConfig::load().expect("config should load");
+        let state = test_state(
+            config,
+            json!({"mode":"live"}),
+            Some(json!({
+                "_kind": "fast",
+                "snapshot": {
+                    "is_live": true,
+                    "running": false
+                }
+            })),
+        );
+
+        let result = validate_command(&state, &json!({ "_type": "reset" })).await;
+
+        assert_eq!(
+            result,
+            Err((
+                StatusCode::FORBIDDEN,
+                "reset is disabled in live mode".to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_settings_values_are_rejected() {
+        let config = AppConfig::load().expect("config should load");
+        let state = test_state(config, json!({"mode":"paper"}), None);
+
+        let result = validate_settings_update(
+            &state,
+            &json!({
+                "portfolio_pct": 1.5
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err((StatusCode::BAD_REQUEST, _))));
+    }
 }
 
 async fn send_command(
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
     Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err(status) =
+        authorize_dashboard_request(&state, &RequestAuth::from_parts(&headers, query))
+    {
+        return status.into_response();
+    }
+
+    if let Err((status, message)) = validate_command(&state, &payload).await {
+        return (status, Json(serde_json::json!({ "error": message }))).into_response();
+    }
+
     info!(cmd = ?payload, "Received command from dashboard");
     let _ = state.cmd_tx.send(payload).await;
-    Json(serde_json::json!({ "status": "ok" }))
+    Json(serde_json::json!({ "status": "ok" })).into_response()
 }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state, None))
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize_dashboard_request(&state, &RequestAuth::from_parts(&headers, query))?;
+    Ok(ws.on_upgrade(|socket| handle_socket(socket, state, None)))
 }
 
 async fn ws_fast_handler(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state, Some("fast")))
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize_dashboard_request(&state, &RequestAuth::from_parts(&headers, query))?;
+    Ok(ws.on_upgrade(|socket| handle_socket(socket, state, Some("fast"))))
 }
 
 async fn ws_slow_handler(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state, Some("slow")))
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize_dashboard_request(&state, &RequestAuth::from_parts(&headers, query))?;
+    Ok(ws.on_upgrade(|socket| handle_socket(socket, state, Some("slow"))))
 }
 
 async fn handle_socket(
@@ -433,7 +587,7 @@ async fn handle_socket(
                             }
                         }
                         debug!("Sending state to dashboard ({} bytes)", msg.len());
-                        if let Err(_) = sender.send(Message::Text(msg.into())).await {
+                        if sender.send(Message::Text(msg.into())).await.is_err() {
                             // Standard disconnect, no need to log as ERROR
                             break;
                         }
@@ -460,4 +614,100 @@ async fn handle_socket(
 
 async fn frontend_setup_page() -> Html<&'static str> {
     Html(FRONTEND_SETUP_PAGE)
+}
+
+fn authorize_dashboard_request(state: &ServerState, auth: &RequestAuth) -> Result<(), StatusCode> {
+    match &state.config.dashboard_auth_token {
+        Some(expected) if auth.token.as_deref() != Some(expected.as_str()) => {
+            Err(StatusCode::UNAUTHORIZED)
+        }
+        _ => Ok(()),
+    }
+}
+
+async fn validate_command(
+    state: &ServerState,
+    payload: &serde_json::Value,
+) -> std::result::Result<(), (StatusCode, String)> {
+    let is_live = is_live_mode(state).await;
+    match payload.get("_type").and_then(|value| value.as_str()) {
+        Some("reset") if is_live => Err((
+            StatusCode::FORBIDDEN,
+            "reset is disabled in live mode".to_string(),
+        )),
+        Some("close_position")
+            if payload
+                .get("position_id")
+                .and_then(|v| v.as_str())
+                .is_none() =>
+        {
+            Err((
+                StatusCode::BAD_REQUEST,
+                "close_position requires position_id".to_string(),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+async fn validate_settings_update(
+    state: &ServerState,
+    payload: &serde_json::Value,
+) -> std::result::Result<AppConfig, (StatusCode, String)> {
+    let mut config = AppConfig::load().map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load config: {err}"),
+        )
+    })?;
+    config
+        .update_from_json(payload.clone())
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    config
+        .validate_runtime_settings()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    if is_live_mode(state).await && is_running(state).await {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "settings updates are disabled while live bot is running".to_string(),
+        ));
+    }
+
+    Ok(config)
+}
+
+async fn is_live_mode(state: &ServerState) -> bool {
+    if state
+        .startup_preflight
+        .read()
+        .await
+        .get("mode")
+        .and_then(|value| value.as_str())
+        == Some("live")
+    {
+        return true;
+    }
+
+    state
+        .latest_fast
+        .read()
+        .await
+        .as_ref()
+        .and_then(|value| value.get("snapshot"))
+        .and_then(|snapshot| snapshot.get("is_live"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+async fn is_running(state: &ServerState) -> bool {
+    state
+        .latest_fast
+        .read()
+        .await
+        .as_ref()
+        .and_then(|value| value.get("snapshot"))
+        .and_then(|snapshot| snapshot.get("running"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }

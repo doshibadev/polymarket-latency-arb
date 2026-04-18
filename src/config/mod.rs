@@ -3,6 +3,8 @@ use std::env;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
+    pub dashboard_bind_addr: String,
+    pub dashboard_auth_token: Option<String>,
     pub threshold_bps: u64,
     pub eth_threshold_bps: u64,
     pub starting_balance: f64,
@@ -63,6 +65,14 @@ impl AppConfig {
         let _ = dotenvy::dotenv();
 
         Ok(Self {
+            dashboard_bind_addr: env::var("DASHBOARD_BIND_ADDR")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+            dashboard_auth_token: env::var("DASHBOARD_AUTH_TOKEN")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
             threshold_bps: env::var("THRESHOLD_BPS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -458,6 +468,7 @@ impl AppConfig {
         if let Some(v) = json.get("live_max_clock_skew_ms").and_then(|v| v.as_u64()) {
             self.live_max_clock_skew_ms = v;
         }
+        self.validate_runtime_settings()?;
         Ok(())
     }
 
@@ -532,6 +543,142 @@ impl AppConfig {
     pub fn ptb_extreme_margin_for(&self, symbol: &str) -> f64 {
         self.ptb_neutral_zone_usd_for(symbol) * 7.5
     }
+
+    pub fn validate_startup_settings(&self) -> Result<()> {
+        let bind_addr = self.dashboard_bind_addr.trim();
+        if bind_addr.is_empty() {
+            return Err(crate::error::ArbError::Config(
+                "DASHBOARD_BIND_ADDR must not be empty".to_string(),
+            ));
+        }
+
+        if !self.paper_trading
+            && bind_addr != "127.0.0.1"
+            && bind_addr != "::1"
+            && self.dashboard_auth_token.is_none()
+        {
+            return Err(crate::error::ArbError::Config(
+                "Live mode requires DASHBOARD_AUTH_TOKEN when DASHBOARD_BIND_ADDR is not localhost"
+                    .to_string(),
+            ));
+        }
+
+        self.validate_runtime_settings()
+    }
+
+    pub fn validate_runtime_settings(&self) -> Result<()> {
+        self.validate_range("PORTFOLIO_PCT", self.portfolio_pct, 0.0, 1.0)?;
+        self.validate_range("CRYPTO_FEE_RATE", self.crypto_fee_rate, 0.0, 1.0)?;
+        self.validate_range("MIN_ENTRY_PRICE", self.min_entry_price, 0.0, 1.0)?;
+        self.validate_range("MAX_ENTRY_PRICE", self.max_entry_price, 0.0, 1.0)?;
+        self.validate_range("HOLD_MIN_SHARE_PRICE", self.hold_min_share_price, 0.0, 1.0)?;
+        self.validate_range("MAX_DRAWDOWN_PCT", self.max_drawdown_pct, 0.0, 1.0)?;
+        self.validate_range("EARLY_EXIT_LOSS_PCT", self.early_exit_loss_pct, 0.0, 1.0)?;
+
+        self.validate_non_negative("THRESHOLD_BPS", self.threshold_bps as f64)?;
+        self.validate_non_negative("ETH_THRESHOLD_BPS", self.eth_threshold_bps as f64)?;
+        self.validate_non_negative("TRAILING_STOP_PCT", self.trailing_stop_pct)?;
+        self.validate_non_negative("TRAILING_STOP_ACTIVATION", self.trailing_stop_activation)?;
+        self.validate_non_negative("STOP_LOSS_PCT", self.stop_loss_pct)?;
+        self.validate_non_negative("TREND_REVERSAL_PCT", self.trend_reversal_pct)?;
+        self.validate_non_negative("TREND_REVERSAL_THRESHOLD", self.trend_reversal_threshold)?;
+        self.validate_non_negative(
+            "ETH_TREND_REVERSAL_THRESHOLD",
+            self.eth_trend_reversal_threshold,
+        )?;
+        self.validate_non_negative("SPIKE_FADED_PCT", self.spike_faded_pct)?;
+        self.validate_non_negative("SPIKE_FADED_MS", self.spike_faded_ms as f64)?;
+        self.validate_non_negative("MIN_HOLD_MS", self.min_hold_ms as f64)?;
+        self.validate_non_negative("HOLD_SAFETY_MARGIN", self.hold_safety_margin)?;
+        self.validate_non_negative("ETH_HOLD_SAFETY_MARGIN", self.eth_hold_safety_margin)?;
+        self.validate_non_negative("HOLD_MARGIN_PER_SECOND", self.hold_margin_per_second)?;
+        self.validate_non_negative(
+            "ETH_HOLD_MARGIN_PER_SECOND",
+            self.eth_hold_margin_per_second,
+        )?;
+        self.validate_non_negative("HOLD_MAX_SECONDS", self.hold_max_seconds as f64)?;
+        self.validate_non_negative("HOLD_MAX_CROSSINGS", self.hold_max_crossings as f64)?;
+        self.validate_non_negative("SPIKE_SUSTAIN_MS", self.spike_sustain_ms as f64)?;
+        self.validate_non_negative("EXECUTION_DELAY_MS", self.execution_delay_ms as f64)?;
+        self.validate_non_negative("MIN_PRICE_DISTANCE", self.min_price_distance)?;
+        self.validate_positive("MAX_ORDERS_PER_MINUTE", self.max_orders_per_minute as f64)?;
+        self.validate_non_negative("MAX_DAILY_LOSS", self.max_daily_loss)?;
+        self.validate_non_negative("MAX_EXPOSURE_PER_MARKET", self.max_exposure_per_market)?;
+        self.validate_non_negative("TREND_MIN_MAGNITUDE_USD", self.trend_min_magnitude_usd)?;
+        self.validate_non_negative(
+            "ETH_TREND_MIN_MAGNITUDE_USD",
+            self.eth_trend_min_magnitude_usd,
+        )?;
+        self.validate_positive("COUNTER_TREND_MULTIPLIER", self.counter_trend_multiplier)?;
+        self.validate_positive("TREND_MAX_MAGNITUDE_USD", self.trend_max_magnitude_usd)?;
+        self.validate_positive(
+            "ETH_TREND_MAX_MAGNITUDE_USD",
+            self.eth_trend_max_magnitude_usd,
+        )?;
+        self.validate_non_negative("PTB_NEUTRAL_ZONE_USD", self.ptb_neutral_zone_usd)?;
+        self.validate_non_negative("ETH_PTB_NEUTRAL_ZONE_USD", self.eth_ptb_neutral_zone_usd)?;
+        self.validate_non_negative(
+            "PTB_MAX_COUNTER_DISTANCE_USD",
+            self.ptb_max_counter_distance_usd,
+        )?;
+        self.validate_non_negative(
+            "ETH_PTB_MAX_COUNTER_DISTANCE_USD",
+            self.eth_ptb_max_counter_distance_usd,
+        )?;
+        self.validate_positive("LIVE_MAX_ORDER_USDC", self.live_max_order_usdc)?;
+        self.validate_positive(
+            "LIVE_MAX_SESSION_LOSS_USDC",
+            self.live_max_session_loss_usdc,
+        )?;
+        self.validate_positive(
+            "LIVE_MAX_OPEN_POSITIONS",
+            self.live_max_open_positions as f64,
+        )?;
+        self.validate_non_negative("LIVE_MAX_SLIPPAGE_CENTS", self.live_max_slippage_cents)?;
+        self.validate_positive("LIVE_MAX_QUOTE_AGE_MS", self.live_max_quote_age_ms as f64)?;
+        self.validate_non_negative("LIVE_MIN_GAS_POL", self.live_min_gas_pol)?;
+        self.validate_non_negative("LIVE_MIN_USDC_BALANCE", self.live_min_usdc_balance)?;
+        self.validate_positive("LIVE_MAX_FEED_AGE_MS", self.live_max_feed_age_ms as f64)?;
+        self.validate_positive("LIVE_MAX_CLOCK_SKEW_MS", self.live_max_clock_skew_ms as f64)?;
+
+        if self.min_entry_price > self.max_entry_price {
+            return Err(crate::error::ArbError::Config(
+                "MIN_ENTRY_PRICE must be <= MAX_ENTRY_PRICE".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_non_negative(&self, name: &str, value: f64) -> Result<()> {
+        if value.is_finite() && value >= 0.0 {
+            Ok(())
+        } else {
+            Err(crate::error::ArbError::Config(format!(
+                "{name} must be a finite value >= 0"
+            )))
+        }
+    }
+
+    fn validate_positive(&self, name: &str, value: f64) -> Result<()> {
+        if value.is_finite() && value > 0.0 {
+            Ok(())
+        } else {
+            Err(crate::error::ArbError::Config(format!(
+                "{name} must be a finite value > 0"
+            )))
+        }
+    }
+
+    fn validate_range(&self, name: &str, value: f64, min: f64, max: f64) -> Result<()> {
+        if value.is_finite() && value >= min && value <= max {
+            Ok(())
+        } else {
+            Err(crate::error::ArbError::Config(format!(
+                "{name} must be between {min} and {max}"
+            )))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -595,5 +742,17 @@ mod tests {
         assert_eq!(config.live_min_usdc_balance, 2.5);
         assert_eq!(config.live_max_feed_age_ms, 2200);
         assert_eq!(config.live_max_clock_skew_ms, 3500);
+    }
+
+    #[test]
+    fn validate_runtime_settings_rejects_bad_ranges() {
+        let mut config = AppConfig::load().expect("config should load");
+        config.portfolio_pct = 1.5;
+        assert!(config.validate_runtime_settings().is_err());
+
+        config.portfolio_pct = 0.2;
+        config.min_entry_price = 0.9;
+        config.max_entry_price = 0.8;
+        assert!(config.validate_runtime_settings().is_err());
     }
 }
